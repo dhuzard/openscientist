@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from nicegui import ui
+from nicegui import run, ui
 
 from openscientist.agent.factory import agent_class_for_provider_id
 from openscientist.artifact_packager import create_artifacts_zip
@@ -1124,9 +1124,13 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
         context.active_timers.append(stats_timer_holder["timer"])
 
 
-def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
+async def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
     try:
-        zip_buffer = create_artifacts_zip(job_dir, job_id)
+        # Building the ZIP reads and compresses every file in job_dir, which
+        # can take a while for data-heavy jobs -- run it in a worker thread
+        # so it doesn't block the shared event loop (and every other user's
+        # page) for the duration.
+        zip_buffer = await run.io_bound(create_artifacts_zip, job_dir, job_id)
         ui.download(zip_buffer.getvalue(), filename=f"{job_id}_artifacts.zip")
     except Exception as exc:
         logger.error("Failed to create artifacts ZIP: %s", exc, exc_info=True)

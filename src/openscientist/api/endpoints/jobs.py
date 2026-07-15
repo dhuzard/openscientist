@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -706,7 +707,16 @@ async def download_artifacts(
         archive_path = Path(tmp_file.name)
 
     try:
-        create_artifacts_zip_file(job_dir=job_dir, archive_path=archive_path, job_id=str(job.id))
+        # Building the ZIP reads and compresses every file in job_dir, which
+        # can take a while for data-heavy jobs -- run it in a worker thread
+        # so it doesn't block the shared event loop (this FastAPI app and the
+        # NiceGUI UI run on the same process/loop) for everyone else.
+        await run_in_threadpool(
+            create_artifacts_zip_file,
+            job_dir=job_dir,
+            archive_path=archive_path,
+            job_id=str(job.id),
+        )
     except Exception:
         archive_path.unlink(missing_ok=True)
         raise

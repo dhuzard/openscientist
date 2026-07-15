@@ -5,7 +5,12 @@ import zipfile
 
 import pytest
 
-from openscientist.artifact_packager import create_artifacts_zip, create_artifacts_zip_file
+from openscientist.artifact_packager import (
+    EXCLUDED_FILES_MANIFEST,
+    MAX_ARTIFACT_FILE_SIZE_BYTES,
+    create_artifacts_zip,
+    create_artifacts_zip_file,
+)
 
 
 class TestCreateArtifactsZip:
@@ -199,3 +204,66 @@ class TestCreateArtifactsZip:
             assert "report.md" in names
             assert "config.json" not in names
             assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
+
+
+class TestOversizedFileExclusion:
+    """A job dir can contain arbitrarily large agent-downloaded reference
+    data (e.g. a full knowledge graph), not just small user uploads --
+    files over MAX_ARTIFACT_FILE_SIZE_BYTES must be excluded from the
+    archive and listed in a manifest instead of ballooning it."""
+
+    def test_oversized_file_excluded_small_file_kept(self, tmp_path):
+        sub = tmp_path / "data"
+        sub.mkdir()
+        small = sub / "small.csv"
+        small.write_text("a,b\n1,2\n")
+        huge = sub / "huge_reference_data.jsonl"
+        with open(huge, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES + 1024)
+            f.write(b"\0")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            assert "data/small.csv" in names
+            assert "data/huge_reference_data.jsonl" not in names
+            assert EXCLUDED_FILES_MANIFEST in names
+            manifest = zf.read(EXCLUDED_FILES_MANIFEST).decode()
+            assert "data/huge_reference_data.jsonl" in manifest
+
+    def test_no_manifest_when_nothing_excluded(self, tmp_path):
+        (tmp_path / "report.md").write_text("# Report")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            assert EXCLUDED_FILES_MANIFEST not in zf.namelist()
+
+    def test_file_at_exactly_the_limit_is_kept(self, tmp_path):
+        exact = tmp_path / "exact.bin"
+        with open(exact, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES - 1)
+            f.write(b"\0")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            assert "exact.bin" in zf.namelist()
+
+    def test_oversized_file_excluded_from_zip_file_variant(self, tmp_path):
+        huge = tmp_path / "huge.bin"
+        with open(huge, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES + 1024)
+            f.write(b"\0")
+        (tmp_path / "report.md").write_text("# Report")
+        archive_path = tmp_path / "artifacts.zip"
+
+        written = create_artifacts_zip_file(tmp_path, archive_path, "j1")
+
+        assert written == 1
+        with zipfile.ZipFile(archive_path) as zf:
+            names = zf.namelist()
+            assert "report.md" in names
+            assert "huge.bin" not in names
+            assert EXCLUDED_FILES_MANIFEST in names
