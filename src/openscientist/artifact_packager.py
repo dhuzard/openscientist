@@ -33,13 +33,10 @@ _EXCLUDE_FILES = {"config.json", EXCLUDED_FILES_MANIFEST}
 
 # Job directories can contain arbitrarily large reference data the agent
 # downloaded as analysis input (e.g. a full knowledge graph), not just small
-# user-uploaded files. Any single file over this size, or any file that would
-# push the running archive total over MAX_TOTAL_ARCHIVE_SIZE_BYTES, is left
-# out of the artifacts ZIP and noted in EXCLUDED_FILES_MANIFEST instead of
-# silently ballooning the archive (and the in-memory/event-loop cost of
-# building and sending it) to tens of GB.
-MAX_ARTIFACT_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB per file
-MAX_TOTAL_ARCHIVE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB combined
+# user-uploaded files. Files over this size are left out of the artifacts
+# ZIP and noted in EXCLUDED_FILES_MANIFEST instead of silently ballooning
+# the archive to tens of GB.
+MAX_ARTIFACT_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 def _iter_artifact_files(
@@ -77,17 +74,13 @@ def _iter_artifact_files(
 
 def _partition_by_size(
     files: Iterator[tuple[Path, Path]],
-) -> tuple[list[tuple[Path, Path]], list[tuple[Path, int, str]]]:
-    """Split (path, arcname) pairs into (includable, excluded) by size.
+) -> tuple[list[tuple[Path, Path]], list[tuple[Path, int]]]:
+    """Split (path, arcname) pairs into (includable, oversized) by file size.
 
-    A file is excluded either for being individually over
-    MAX_ARTIFACT_FILE_SIZE_BYTES, or for pushing the running total over
-    MAX_TOTAL_ARCHIVE_SIZE_BYTES. Excluded entries are
-    (arcname, size_bytes, reason), for manifest reporting.
+    oversized entries are (arcname, size_bytes), for manifest reporting.
     """
     included: list[tuple[Path, Path]] = []
-    excluded: list[tuple[Path, int, str]] = []
-    running_total = 0
+    oversized: list[tuple[Path, int]] = []
     for file_path, arcname in files:
         try:
             size = file_path.stat().st_size
@@ -95,27 +88,22 @@ def _partition_by_size(
             included.append((file_path, arcname))
             continue
         if size > MAX_ARTIFACT_FILE_SIZE_BYTES:
-            excluded.append((arcname, size, "exceeds per-file limit"))
-        elif running_total + size > MAX_TOTAL_ARCHIVE_SIZE_BYTES:
-            excluded.append((arcname, size, "archive size limit reached"))
+            oversized.append((arcname, size))
         else:
             included.append((file_path, arcname))
-            running_total += size
-    return included, excluded
+    return included, oversized
 
 
-def _format_excluded_manifest(excluded: list[tuple[Path, int, str]]) -> str:
-    per_file_mb = MAX_ARTIFACT_FILE_SIZE_BYTES // (1024 * 1024)
-    total_mb = MAX_TOTAL_ARCHIVE_SIZE_BYTES // (1024 * 1024)
+def _format_excluded_manifest(oversized: list[tuple[Path, int]]) -> str:
     lines = [
-        f"The following files were left out of this archive (per-file limit "
-        f"{per_file_mb} MB, total archive limit {total_mb} MB). Large files here "
-        "are often reference datasets used as analysis input rather than "
-        "report outputs; check the job's data sources if you need one of these.",
+        "The following files were left out of this archive because they exceed "
+        f"{MAX_ARTIFACT_FILE_SIZE_BYTES // (1024 * 1024)} MB. Large files here are "
+        "often reference datasets used as analysis input rather than report "
+        "outputs; check the job's data sources if you need one of these.",
         "",
     ]
-    for arcname, size, reason in sorted(excluded, key=lambda e: e[1], reverse=True):
-        lines.append(f"{size / (1024 * 1024):>10.1f} MB  {arcname.as_posix()}  ({reason})")
+    for arcname, size in sorted(oversized, key=lambda pair: pair[1], reverse=True):
+        lines.append(f"{size / (1024 * 1024):>10.1f} MB  {arcname.as_posix()}")
     return "\n".join(lines) + "\n"
 
 
@@ -125,7 +113,7 @@ def _write_artifacts_zip(
     excluded_paths: set[Path] | None = None,
 ) -> int:
     """Write job artifacts into an open zip file and return number of files written."""
-    included, excluded = _partition_by_size(
+    included, oversized = _partition_by_size(
         _iter_artifact_files(job_dir, excluded_paths=excluded_paths)
     )
 
@@ -137,12 +125,13 @@ def _write_artifacts_zip(
         except Exception as e:
             logger.warning("Failed to add %s to archive: %s", arcname, e)
 
-    if excluded:
-        zip_file.writestr(EXCLUDED_FILES_MANIFEST, _format_excluded_manifest(excluded))
+    if oversized:
+        zip_file.writestr(EXCLUDED_FILES_MANIFEST, _format_excluded_manifest(oversized))
         logger.info(
-            "Excluded %d file(s) from artifacts archive: %s",
-            len(excluded),
-            ", ".join(f"{arcname.as_posix()} ({reason})" for arcname, _, reason in excluded),
+            "Excluded %d oversized file(s) from artifacts archive (over %d MB): %s",
+            len(oversized),
+            MAX_ARTIFACT_FILE_SIZE_BYTES // (1024 * 1024),
+            ", ".join(arcname.as_posix() for arcname, _ in oversized),
         )
 
     return written
@@ -155,13 +144,12 @@ def create_artifacts_zip(job_dir: Path, job_id: str) -> BytesIO:
     Includes:
     - Final reports (PDF, Markdown)
     - Plots and visualizations
-    - Data files, up to MAX_ARTIFACT_FILE_SIZE_BYTES each and
-      MAX_TOTAL_ARCHIVE_SIZE_BYTES combined
+    - Data files (up to MAX_ARTIFACT_FILE_SIZE_BYTES each)
     - Provenance logs
 
-    Files excluded by either limit (e.g. large reference datasets downloaded
-    as analysis input) are listed in EXCLUDED_FILES_MANIFEST instead of being
-    bundled.
+    Files over MAX_ARTIFACT_FILE_SIZE_BYTES (e.g. large reference datasets
+    downloaded as analysis input) are excluded and listed in
+    EXCLUDED_FILES_MANIFEST instead of being bundled.
 
     Args:
         job_dir: Path to job directory
@@ -189,7 +177,7 @@ def create_artifacts_zip(job_dir: Path, job_id: str) -> BytesIO:
 def create_artifacts_zip_file(job_dir: Path, archive_path: Path, job_id: str) -> int:
     """Create an artifacts ZIP archive on disk and return number of files written.
 
-    See create_artifacts_zip() for the size-exclusion behavior.
+    See create_artifacts_zip() for the oversized-file exclusion behavior.
     """
     excluded_paths: set[Path] = set()
     archive_path_resolved = archive_path.resolve()
