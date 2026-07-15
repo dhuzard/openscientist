@@ -15,10 +15,16 @@ from openscientist.webapp_components.ui_components import (
     STATUS_ICONS,
     _get_job_id_badge_html,
     _get_pubmed_badge_html,
+    _inject_thinking_status_styles,
     get_project_resource_links,
     get_status_badge_props,
+    register_badge_head_html,
+    render_job_id_badge,
     render_job_id_slot,
+    render_pmid_badge,
     render_status_cell_slot,
+    render_text_with_pmid_links,
+    render_thinking_status,
     transform_pmid_references,
 )
 
@@ -376,3 +382,44 @@ class TestInlineBadgeMarkup:
 
         assert "display:inline-flex" in template
         assert "display:inline !important" in template
+
+
+class TestBadgeStylesRegisteredOnceAtBootstrap:
+    """add_head_html(shared=True) appends to a process-global string with no
+    dedup, so badge CSS/JS must be registered exactly once, at app bootstrap
+    (register_badge_head_html, called from web_app._configure_host_app) --
+    never from per-render code, no matter how many badges get rendered."""
+
+    def test_register_badge_head_html_registers_both_style_blocks(self):
+        with patch("openscientist.webapp_components.ui_components.ui.add_head_html") as mock_add:
+            register_badge_head_html()
+
+        assert mock_add.call_count == 2
+
+    def test_rendering_many_badges_never_touches_add_head_html(self):
+        with (
+            patch("openscientist.webapp_components.ui_components.ui.add_head_html") as mock_add,
+            patch("openscientist.webapp_components.ui_components.ui.html"),
+        ):
+            for i in range(50):
+                render_pmid_badge(str(12000000 + i))
+                render_job_id_badge(f"12345678-1234-1234-1234-{i:012d}")
+                render_text_with_pmid_links(f"See PMID: {12000000 + i}")
+
+        mock_add.assert_not_called()
+
+    def test_inject_thinking_status_styles_adds_head_html(self):
+        with patch("openscientist.webapp_components.ui_components.ui.add_head_html") as mock_add:
+            _inject_thinking_status_styles()
+
+        mock_add.assert_called_once()
+
+    def test_rendering_many_thinking_statuses_never_touches_add_head_html(self):
+        """render_thinking_status is refreshed on a 2-second poll timer for any
+        actively-watched running job -- this is the call site that produced
+        the original leak, so it must never call add_head_html itself."""
+        with patch("openscientist.webapp_components.ui_components.ui.add_head_html") as mock_add:
+            for _ in range(50):
+                render_thinking_status("Searching PubMed...")
+
+        mock_add.assert_not_called()

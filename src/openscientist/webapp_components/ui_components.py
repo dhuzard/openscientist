@@ -225,8 +225,14 @@ def _get_pubmed_badge_html(pmid: str) -> str:
 
 
 def _inject_pubmed_badge_styles() -> None:
-    """Inject CSS and JS for PubMed badges into page head (idempotent)."""
-    # Using add_head_html with shared=True ensures this is only added once per client
+    """Register CSS and JS for PubMed badges into the app-wide page head.
+
+    Must be called exactly once, at app bootstrap (see
+    ``register_badge_head_html`` / ``web_app._configure_host_app``), not from
+    per-render code: ``add_head_html(shared=True)`` appends unconditionally to
+    a process-global string (``Client.shared_head_html``), so repeated calls
+    accumulate the same block forever instead of being deduplicated.
+    """
     ui.add_head_html(
         """
         <style>
@@ -274,7 +280,11 @@ def _inject_pubmed_badge_styles() -> None:
 
 
 def _inject_job_id_badge_styles() -> None:
-    """Inject CSS and JS for job ID badges into page head (idempotent)."""
+    """Register CSS and JS for job ID badges into the app-wide page head.
+
+    Must be called exactly once, at app bootstrap -- see
+    ``_inject_pubmed_badge_styles`` above for why.
+    """
     ui.add_head_html(
         """
         <style>
@@ -324,6 +334,17 @@ def _inject_job_id_badge_styles() -> None:
     )
 
 
+def register_badge_head_html() -> None:
+    """Register PubMed/job-id badge CSS and JS globally, for every page.
+
+    Call exactly once, at app bootstrap (alongside ``_register_pwa_metadata``
+    in ``web_app._configure_host_app``) -- see ``_inject_pubmed_badge_styles``
+    for why this can't be called from per-render code.
+    """
+    _inject_pubmed_badge_styles()
+    _inject_job_id_badge_styles()
+
+
 def _get_job_id_badge_html(job_id: str, truncate: bool = True) -> str:
     """
     Generate HTML for a job ID badge.
@@ -368,7 +389,6 @@ def render_job_id_badge(job_id: str, truncate: bool = True) -> None:
         job_id: The job UUID
         truncate: If True, show only last 8 characters of UUID (default True)
     """
-    _inject_job_id_badge_styles()
     badge_html = _get_job_id_badge_html(job_id, truncate)
     ui.html(badge_html)
 
@@ -417,10 +437,6 @@ def render_pmid_badge(pmid: str) -> None:
     Args:
         pmid: The PubMed ID number (just the numeric part)
     """
-    # Inject CSS/JS for badges into page head
-    _inject_pubmed_badge_styles()
-
-    # Render badge as inline HTML
     badge_html = _get_pubmed_badge_html(pmid)
     ui.html(badge_html)
 
@@ -482,9 +498,6 @@ def render_text_with_pmid_links(
             f'text-justify:inter-word;margin:0;">{html.escape(text)}</p>'
         )
         return
-
-    # Inject CSS/JS for badges into page head
-    _inject_pubmed_badge_styles()
 
     # Render as HTML to support inline badges with justified text
     html_content = "".join(result_parts)
@@ -2064,7 +2077,15 @@ def render_delete_dialog(
 
 
 def _inject_thinking_status_styles() -> None:
-    """Inject CSS for thinking status indicator into page head (idempotent)."""
+    """Register CSS for the thinking status indicator into the app-wide page head.
+
+    Must be called exactly once, at app bootstrap -- see
+    ``_inject_pubmed_badge_styles`` for why (``add_head_html(shared=True)``
+    appends unconditionally to a process-global string with no dedup, so
+    calling this from ``render_thinking_status`` -- which fires on every
+    2-second poll refresh for an actively-watched running job -- leaked
+    the same style block without bound).
+    """
     ui.add_head_html(
         """
         <style>
@@ -2156,8 +2177,6 @@ def render_thinking_status(status_text: str = "Thinking...") -> ui.element:
         status.classes(remove="hidden")  # Show
         status.classes(add="hidden")  # Hide
     """
-    _inject_thinking_status_styles()
-
     with ui.row().classes(
         "items-center gap-3 py-3 px-4 bg-cyan-50 rounded-lg border border-cyan-200"
     ) as container:
