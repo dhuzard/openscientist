@@ -8,6 +8,7 @@ import pytest
 from openscientist.artifact_packager import (
     EXCLUDED_FILES_MANIFEST,
     MAX_ARTIFACT_FILE_SIZE_BYTES,
+    MAX_TOTAL_ARCHIVE_SIZE_BYTES,
     create_artifacts_zip,
     create_artifacts_zip_file,
 )
@@ -267,3 +268,55 @@ class TestOversizedFileExclusion:
             assert "report.md" in names
             assert "huge.bin" not in names
             assert EXCLUDED_FILES_MANIFEST in names
+
+
+class TestTotalArchiveSizeCap:
+    """Many files individually under the per-file limit can still add up to
+    an unreasonably large archive -- the combined total must also be capped,
+    or a job with hundreds of medium-sized files reproduces the same
+    memory/event-loop pressure a single huge file did."""
+
+    def test_files_beyond_total_cap_are_excluded(self, tmp_path):
+        # Each file is comfortably under the per-file limit (50 MB), but
+        # enough of them together exceed MAX_TOTAL_ARCHIVE_SIZE_BYTES (500 MB).
+        chunk = 40 * 1024 * 1024
+        num_files = (MAX_TOTAL_ARCHIVE_SIZE_BYTES // chunk) + 3
+        for i in range(num_files):
+            f = tmp_path / f"part_{i}.bin"
+            with open(f, "wb") as fh:
+                fh.seek(chunk)
+                fh.write(b"\0")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            included = [n for n in names if n != EXCLUDED_FILES_MANIFEST]
+            # Only as many chunks as fit under the total cap should be kept.
+            assert len(included) < num_files
+            assert EXCLUDED_FILES_MANIFEST in names
+            manifest = zf.read(EXCLUDED_FILES_MANIFEST).decode()
+            assert "archive size limit reached" in manifest
+
+
+class TestManifestNameCollision:
+    """A job dir could legitimately contain a real file literally named
+    EXCLUDED_FILES.txt (e.g. the agent wrote one) -- it must not collide
+    with the manifest entry added when other files are excluded."""
+
+    def test_preexisting_file_with_manifest_name_is_not_bundled(self, tmp_path):
+        (tmp_path / EXCLUDED_FILES_MANIFEST).write_text("not the real manifest")
+        huge = tmp_path / "huge.bin"
+        with open(huge, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES + 1024)
+            f.write(b"\0")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            # Exactly one EXCLUDED_FILES.txt entry -- the generated manifest,
+            # not a duplicate zip entry from the pre-existing file.
+            assert zf.namelist().count(EXCLUDED_FILES_MANIFEST) == 1
+            manifest = zf.read(EXCLUDED_FILES_MANIFEST).decode()
+            assert "huge.bin" in manifest
+            assert "not the real manifest" not in manifest
