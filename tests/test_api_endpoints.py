@@ -1498,7 +1498,7 @@ class TestJobEndpoints:
         assert response.headers.get("accept-ranges") == "bytes"
 
     @pytest.mark.asyncio
-    async def test_get_job_artifacts_excludes_config_json(
+    async def test_get_job_artifacts_excludes_internal_runtime_files(
         self,
         db_session: AsyncSession,
         test_user_db: User,
@@ -1506,12 +1506,18 @@ class TestJobEndpoints:
         test_job_db: Job,
         tmp_path,
     ):
-        """Artifacts endpoint should not include config.json in archives."""
+        """Artifacts endpoint should not include internal runtime files."""
         _, full_key = test_api_key_db
 
         job_dir = tmp_path / "jobs" / str(test_job_db.id)
         job_dir.mkdir(parents=True)
         (job_dir / "config.json").write_text('{"legacy": true}', encoding="utf-8")
+        (job_dir / ".codex").mkdir()
+        (job_dir / ".codex" / "config.toml").write_text(
+            'OPENSCIENTIST_SECRET_KEY = "placeholder"', encoding="utf-8"
+        )
+        (job_dir / ".codex" / "auth.json").write_text('{"tokens": "placeholder"}', encoding="utf-8")
+        (job_dir / "report.md").write_text("# Report", encoding="utf-8")
 
         app = _build_authenticated_app(db_session, test_user_db)
 
@@ -1531,7 +1537,9 @@ class TestJobEndpoints:
 
         with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
             names = zf.namelist()
+            assert "report.md" in names
             assert "config.json" not in names
+            assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
 
     @pytest.mark.asyncio
     async def test_get_job_artifacts_uses_job_manager_jobs_dir(

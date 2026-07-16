@@ -1,7 +1,11 @@
 """Tests for openscientist.artifact_packager module."""
 
+import os
 import stat
+import subprocess
 import zipfile
+
+import pytest
 
 from openscientist.artifact_packager import create_artifacts_zip, create_artifacts_zip_file
 
@@ -34,6 +38,73 @@ class TestCreateArtifactsZip:
             assert "keep.txt" in names
             assert not any(".git" in n for n in names)
             assert not any("__pycache__" in n for n in names)
+
+    def test_excludes_codex_runtime_state(self, tmp_path):
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text('OPENSCIENTIST_SECRET_KEY = "placeholder"')
+        (codex_home / "auth.json").write_text('{"tokens": "placeholder"}')
+        (tmp_path / "report.md").write_text("# Report")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            assert "report.md" in names
+            assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
+
+    def test_excludes_symlinks_to_runtime_state(self, tmp_path):
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        auth_file = codex_home / "auth.json"
+        auth_file.write_text('{"tokens": "placeholder"}')
+        linked_artifact = tmp_path / "result.json"
+        try:
+            linked_artifact.symlink_to(auth_file)
+        except OSError:
+            pytest.skip("symlink creation is not available on this platform")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            assert "result.json" not in zf.namelist()
+
+    def test_excludes_directory_symlinks_to_runtime_state(self, tmp_path):
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text('{"tokens": "placeholder"}')
+        linked_artifact_dir = tmp_path / "results"
+        try:
+            linked_artifact_dir.symlink_to(codex_home, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlink creation is not available on this platform")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            assert not any(name.startswith("results/") for name in zf.namelist())
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows junction regression test")
+    def test_excludes_windows_junctions_to_runtime_state(self, tmp_path):
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text('{"tokens": "placeholder"}')
+        linked_artifact_dir = tmp_path / "results"
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(linked_artifact_dir), str(codex_home)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            pytest.skip("junction creation is not available on this platform")
+        assert linked_artifact_dir.is_junction()
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            assert not any(name.startswith("results/") for name in zf.namelist())
 
     def test_excludes_pytest_cache_and_node_modules(self, tmp_path):
         (tmp_path / ".pytest_cache").mkdir()
@@ -98,6 +169,9 @@ class TestCreateArtifactsZip:
     def test_create_artifacts_zip_file(self, tmp_path):
         (tmp_path / "report.md").write_text("# Report")
         (tmp_path / "config.json").write_text('{"job_id":"j1"}')
+        (tmp_path / ".codex").mkdir()
+        (tmp_path / ".codex" / "config.toml").write_text('DATABASE_URL = "placeholder"')
+        (tmp_path / ".codex" / "auth.json").write_text('{"tokens": "placeholder"}')
         archive_path = tmp_path / "artifacts.zip"
 
         written = create_artifacts_zip_file(tmp_path, archive_path, "j1")
@@ -108,3 +182,4 @@ class TestCreateArtifactsZip:
             names = zf.namelist()
             assert "report.md" in names
             assert "config.json" not in names
+            assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
