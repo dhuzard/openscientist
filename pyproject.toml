@@ -97,6 +97,9 @@ dependencies = [
 
     # SPARQL queries against remote endpoints
     "SPARQLWrapper>=2.0.0",
+
+    # Progress bars for the PubMed mirror ingest CLI
+    "tqdm>=4.67.0",
 ]
 
 [build-system]
