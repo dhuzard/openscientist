@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from openscientist.settings import get_settings
+
 
 def search_pubmed(
     query: str, max_results: int = 10, email: str | None = None
@@ -34,6 +36,11 @@ def search_pubmed(
             ...
         ]
     """
+    if get_settings().airgap.enabled:
+        from openscientist.pubmed_mirror.query import search_local_sync
+
+        return search_local_sync(query, max_results=max_results)
+
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
     # Step 1: Search for PMIDs
