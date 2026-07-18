@@ -1,5 +1,7 @@
 """Tests for openscientist.job_container module."""
 
+import hashlib
+import hmac
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -9,6 +11,8 @@ import pytest
 
 from docker import errors as docker_errors
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
+from openscientist.job_container.secrets import derive_job_secret
+from openscientist.settings import Settings
 
 
 class TestJobContainerRunner:
@@ -431,3 +435,58 @@ class TestCodexAuthProvisioning:
         job_dir.mkdir()
         CodexAgent.provision_host_prelaunch(self._settings(str(tmp_path / "nope.json")), job_dir)
         assert not (job_dir / ".codex" / "auth.json").exists()
+
+
+class TestJobSecretInjection:
+    """The job container receives a per-job derived secret, never the master."""
+
+    @staticmethod
+    def _settings(master: str = "master-key") -> SimpleNamespace:
+        provider = MagicMock()
+        provider.get_container_env_vars.return_value = {}
+        return SimpleNamespace(
+            container=SimpleNamespace(host_project_dir=None, container_app_dir="/app"),
+            provider=provider,
+            database=SimpleNamespace(effective_database_url="postgresql://db"),
+            phenix=SimpleNamespace(phenix_host_path=None),
+            secret_key=master,
+        )
+
+    def test_env_uses_derived_secret_not_master(self) -> None:
+        """The injected key is HMAC(master, "job_secret:" + job_id), not the master."""
+        settings = self._settings(master="master-key")
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, settings), job_id="job-1", job_mount="/agent/jobs/job-1"
+        )
+        expected = hmac.new(b"master-key", b"job_secret:job-1", hashlib.sha256).hexdigest()
+        assert env["OPENSCIENTIST_SECRET_KEY"] == expected
+        assert env["OPENSCIENTIST_SECRET_KEY"] != "master-key"
+
+    def test_distinct_job_ids_yield_distinct_secrets(self) -> None:
+        """Two jobs get two different injected secrets, and neither is the master."""
+        settings = self._settings(master="master-key")
+        env_a = JobContainerRunner._build_container_environment(
+            cast(Settings, settings), job_id="job-a", job_mount="/agent/jobs/job-a"
+        )
+        env_b = JobContainerRunner._build_container_environment(
+            cast(Settings, settings), job_id="job-b", job_mount="/agent/jobs/job-b"
+        )
+        secret_a = env_a["OPENSCIENTIST_SECRET_KEY"]
+        secret_b = env_b["OPENSCIENTIST_SECRET_KEY"]
+        assert secret_a != secret_b
+        assert "master-key" not in {secret_a, secret_b}
+
+    def test_derivation_is_deterministic_and_matches_reference(self) -> None:
+        """The helper is deterministic and matches a hand-computed reference HMAC."""
+        reference = hmac.new(b"master", b"job_secret:job-42", hashlib.sha256).hexdigest()
+        assert derive_job_secret("master", "job-42") == reference
+        assert derive_job_secret("master", "job-42") == derive_job_secret("master", "job-42")
+        assert len(reference) == 64
+
+    def test_derived_value_passes_settings_validation(self) -> None:
+        """A Settings built with the derived value validates and derives its own secrets."""
+        derived = derive_job_secret("master", "job-validate")
+        settings = Settings(OPENSCIENTIST_SECRET_KEY=derived)  # type: ignore[call-arg]
+        assert settings.secret_key == derived
+        expected_storage = hmac.new(derived.encode(), b"storage_secret", hashlib.sha256).hexdigest()
+        assert settings.auth.storage_secret == expected_storage

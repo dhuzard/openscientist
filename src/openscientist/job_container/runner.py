@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import docker
 from docker import errors as docker_errors
+from openscientist.job_container.secrets import derive_job_secret
 from openscientist.job_container.utils import resolve_docker_network, to_host_path
 from openscientist.settings import Settings, get_settings
 from openscientist.version import SHORT_COMMIT_LENGTH
@@ -60,11 +61,12 @@ class JobContainerRunner:
         """Build the environment variables for the agent container."""
         cs = settings.container
         provider_env = settings.provider.get_container_env_vars()
+        # Inject a per-job derived secret, never the master key (untrusted container).
         env: dict[str, str] = {
             "JOB_ID": job_id,
             "JOB_DIR": job_mount,
             "DATABASE_URL": settings.database.effective_database_url,
-            "OPENSCIENTIST_SECRET_KEY": settings.secret_key,
+            "OPENSCIENTIST_SECRET_KEY": derive_job_secret(settings.secret_key, job_id),
             **provider_env,
         }
         # Only set the run-mode override when it diverges from the default so
