@@ -36,6 +36,7 @@ class TestJobContainerRunner:
             provider=provider,
             database=SimpleNamespace(effective_database_url="postgresql://db"),
             phenix=SimpleNamespace(phenix_host_path=None),
+            airgap=SimpleNamespace(enabled=False),
             secret_key="secret",
         )
 

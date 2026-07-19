@@ -2806,6 +2806,7 @@ dependencies = [
     { name = "sparqlwrapper" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "statsmodels" },
+    { name = "tqdm" },
     { name = "typing-extensions" },
     { name = "weasyprint" },
 ]
@@ -2873,6 +2874,7 @@ requires-dist = [
     { name = "sparqlwrapper", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
     { name = "statsmodels", specifier = ">=0.14.0" },
+    { name = "tqdm", specifier = ">=4.67.0" },
     { name = "typing-extensions", specifier = ">=4.8.0" },
     { name = "weasyprint", specifier = ">=62.0,<69" },
 ]

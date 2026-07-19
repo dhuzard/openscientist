@@ -81,6 +81,9 @@ class JobContainerRunner:
         if cs.host_project_dir:
             env["OPENSCIENTIST_HOST_PROJECT_DIR"] = cs.host_project_dir
             env["OPENSCIENTIST_CONTAINER_APP_DIR"] = AGENT_APP_DIR
+        # Air-gapped mode routes the tools subprocess to the local PubMed corpus.
+        if settings.airgap.enabled:
+            env["OPENSCIENTIST_AIRGAPPED"] = "1"
         if settings.provider.google_application_credentials:
             env["GOOGLE_APPLICATION_CREDENTIALS"] = "/agent/gcp-credentials.json"
         if settings.phenix.phenix_host_path:
