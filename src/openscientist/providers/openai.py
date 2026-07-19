@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from openscientist.providers.base import CodexCompatible, CostInfo
+from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
 from openscientist.settings import get_settings
+
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 def _codex_auth_json() -> Path:
@@ -57,10 +59,30 @@ class OpenAIDirectProvider(CodexCompatible):
             data_lag_note="OpenAI per-key cost tracking is not available.",
         )
 
+    def llm_upstream(self) -> LlmUpstream | None:
+        key = get_settings().provider.openai_api_key
+        if key:
+            return LlmUpstream(_OPENAI_BASE_URL, {"authorization": f"Bearer {key}"})
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        if get_settings().provider.openai_api_key:
+            return {"OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
+        return {}
+
     def codex_config_overrides(self) -> list[str]:
-        # Codex ships a built-in "openai" model_providers entry pointing at
-        # the default endpoint, so no config.toml override is needed.
-        return []
+        # Codex ships a built-in "openai" entry at the default endpoint. When the
+        # proxy is active, override base_url so codex routes through it.
+        proxy = os.environ.get(LLM_PROXY_URL_ENV)
+        if not proxy:
+            return []
+        return [
+            "[model_providers.openai]",
+            'name = "OpenAI"',
+            f'base_url = "{proxy}"',
+            'env_key = "OPENAI_API_KEY"',
+            'wire_api = "responses"',
+        ]
 
     def codex_model_name(self) -> str | None:
         # No forced default: codex uses its account/config default unless the

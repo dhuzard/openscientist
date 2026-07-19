@@ -35,6 +35,10 @@ def active_provider(monkeypatch):
         "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_RESOURCE",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "OPENSCIENTIST_LLM_PROXY_URL",
         "GITHUB_TOKEN",
     )
 
@@ -100,8 +104,8 @@ class TestClaudeUpstream:
             "https://api.cborg.lbl.gov", {"authorization": "Bearer real-tok"}
         )
 
-    def test_unsupported_provider_has_no_upstream(self, active_provider):
-        provider = active_provider(OPENSCIENTIST_PROVIDER="openai", OPENAI_API_KEY="sk")
+    def test_unproxied_provider_has_no_upstream(self, active_provider):
+        provider = active_provider(OPENSCIENTIST_PROVIDER="ollama")
         assert provider.llm_upstream() is None
 
     def test_anthropic_without_api_key_has_no_upstream(self, active_provider):
@@ -143,16 +147,106 @@ class TestProxiedContainerEnv:
 
     def test_fallback_keeps_llm_key_but_drops_github(self, active_provider):
         provider = active_provider(
-            OPENSCIENTIST_PROVIDER="openai",
-            OPENAI_API_KEY="sk-real",
+            OPENSCIENTIST_PROVIDER="anthropic",
+            CLAUDE_CODE_OAUTH_TOKEN="oauth-real",
             GITHUB_TOKEN="ghp_secret",
         )
         env = provider.proxied_container_env(
             proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
         )
-        assert env["OPENAI_API_KEY"] == "sk-real"
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-real"
         assert "ANTHROPIC_BASE_URL" not in env
         assert "GITHUB_TOKEN" not in env
+
+
+class TestCodexUpstream:
+    """Codex backend upstream derivation on the Provider hierarchy."""
+
+    def test_openai_upstream(self, active_provider):
+        provider = active_provider(OPENSCIENTIST_PROVIDER="openai", OPENAI_API_KEY="sk-real")
+        assert provider.llm_upstream() == LlmUpstream(
+            "https://api.openai.com/v1", {"authorization": "Bearer sk-real"}
+        )
+
+    def test_azure_upstream(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="azure-openai",
+            AZURE_OPENAI_API_KEY="az-real",
+            AZURE_OPENAI_RESOURCE="myres",
+            AZURE_OPENAI_DEPLOYMENT="gpt5",
+        )
+        assert provider.llm_upstream() == LlmUpstream(
+            "https://myres.openai.azure.com/openai/v1", {"authorization": "Bearer az-real"}
+        )
+
+
+class TestCodexProxiedEnv:
+    """Codex env redirect: placeholder key plus the proxy URL for config.toml."""
+
+    def test_openai_redirects(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="openai", OPENAI_API_KEY="sk-real", GITHUB_TOKEN="ghp"
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "job-1.tok"
+        assert env["OPENSCIENTIST_LLM_PROXY_URL"] == "http://openscientist:8081"
+        assert "sk-real" not in env.values()
+        assert "GITHUB_TOKEN" not in env
+
+    def test_azure_redirects(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="azure-openai",
+            AZURE_OPENAI_API_KEY="az-real",
+            AZURE_OPENAI_RESOURCE="myres",
+            AZURE_OPENAI_DEPLOYMENT="gpt5",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["AZURE_OPENAI_API_KEY"] == "job-1.tok"
+        assert env["OPENSCIENTIST_LLM_PROXY_URL"] == "http://openscientist:8081"
+        assert "az-real" not in env.values()
+
+
+class TestCodexConfigRedirect:
+    """codex config.toml base_url points at the proxy only when it is active."""
+
+    def test_openai_config_points_at_proxy(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="openai",
+            OPENAI_API_KEY="sk-real",
+            OPENSCIENTIST_LLM_PROXY_URL="http://openscientist:8081",
+        )
+        toml = provider.codex_config_overrides()
+        assert "[model_providers.openai]" in toml
+        assert 'base_url = "http://openscientist:8081"' in toml
+        assert 'env_key = "OPENAI_API_KEY"' in toml
+
+    def test_openai_config_empty_without_proxy(self, active_provider):
+        provider = active_provider(OPENSCIENTIST_PROVIDER="openai", OPENAI_API_KEY="sk-real")
+        assert provider.codex_config_overrides() == []
+
+    def test_azure_config_points_at_proxy(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="azure-openai",
+            AZURE_OPENAI_API_KEY="az-real",
+            AZURE_OPENAI_RESOURCE="myres",
+            AZURE_OPENAI_DEPLOYMENT="gpt5",
+            OPENSCIENTIST_LLM_PROXY_URL="http://openscientist:8081",
+        )
+        assert 'base_url = "http://openscientist:8081"' in provider.codex_config_overrides()
+
+    def test_azure_config_uses_real_base_without_proxy(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="azure-openai",
+            AZURE_OPENAI_API_KEY="az-real",
+            AZURE_OPENAI_RESOURCE="myres",
+            AZURE_OPENAI_DEPLOYMENT="gpt5",
+        )
+        toml = provider.codex_config_overrides()
+        assert 'base_url = "https://myres.openai.azure.com/openai/v1"' in toml
 
 
 class TestProxyBaseUrl:
@@ -248,6 +342,29 @@ class TestProxyForwarding:
             )
         assert resp.status_code == 200
         assert recorded[0]["headers"]["authorization"] == "Bearer REAL-TOK"
+
+    def test_forwards_responses_wire_with_query(self):
+        master = "master-key"
+        placeholder = make_job_placeholder(master, "job-c")
+        recorded: list[dict] = []
+        app = create_llm_proxy_app(
+            master_key=lambda: master,
+            upstream=lambda: LlmUpstream(
+                "https://api.openai.com/v1", {"authorization": "Bearer REAL"}
+            ),
+            client=_recording_upstream(recorded),
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/responses?api-version=2024",
+                headers={"authorization": f"Bearer {placeholder}"},
+                content=b'{"input":1}',
+            )
+        assert resp.status_code == 200
+        assert recorded[0]["path"] == "/v1/responses"
+        assert recorded[0]["query"] == "api-version=2024"
+        assert recorded[0]["headers"]["authorization"] == "Bearer REAL"
+        assert recorded[0]["body"] == b'{"input":1}'
 
     def test_rejects_invalid_token_without_forwarding(self):
         recorded: list[dict] = []

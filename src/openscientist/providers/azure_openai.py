@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from openscientist.providers.base import CodexCompatible, CostInfo
+from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
 from openscientist.settings import get_settings
 
 
@@ -62,6 +62,20 @@ class AzureOpenAIProvider(CodexCompatible):
         # model name in the request body (see codex_model_name).
         return f"https://{get_settings().provider.azure_openai_resource}.openai.azure.com/openai/v1"
 
+    def llm_upstream(self) -> LlmUpstream | None:
+        s = get_settings().provider
+        if s.azure_openai_api_key and s.azure_openai_resource:
+            return LlmUpstream(
+                self._base_url(), {"authorization": f"Bearer {s.azure_openai_api_key}"}
+            )
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        s = get_settings().provider
+        if s.azure_openai_api_key and s.azure_openai_resource:
+            return {"AZURE_OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
+        return {}
+
     def codex_config_overrides(self) -> list[str]:
         # A [model_providers.azure-openai] TOML table. The key is sent as a
         # Bearer token (env_key). api-version is optional on the v1 surface, so
@@ -71,10 +85,11 @@ class AzureOpenAIProvider(CodexCompatible):
         # stream_max_retries makes codex reconnect through Azure's intermittent
         # streaming disconnects (a known Azure-side timeout, openai/codex#9936),
         # which it otherwise treats as a fatal "stream disconnected" error.
+        base_url = os.environ.get(LLM_PROXY_URL_ENV) or self._base_url()
         lines = [
             "[model_providers.azure-openai]",
             'name = "Azure OpenAI Service"',
-            f'base_url = "{self._base_url()}"',
+            f'base_url = "{base_url}"',
             'env_key = "AZURE_OPENAI_API_KEY"',
             'wire_api = "responses"',
             f"stream_max_retries = {s.azure_openai_stream_max_retries}",

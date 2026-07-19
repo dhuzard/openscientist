@@ -58,6 +58,11 @@ class LlmUpstream:
     auth_headers: dict[str, str]
 
 
+# Injected into the job container so codex's in-container config.toml points its
+# base_url at the proxy (codex has no base-URL env var, unlike the Claude CLI).
+LLM_PROXY_URL_ENV = "OPENSCIENTIST_LLM_PROXY_URL"
+
+
 class Provider(abc.ABC):
     """A model-hosting service. Family-specific behavior lives on the
     marker subclasses below; configuration validation and cost/budget
