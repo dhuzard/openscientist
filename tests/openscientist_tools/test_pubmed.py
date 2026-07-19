@@ -129,6 +129,19 @@ def test_empty_results(
     assert last_log["results_count"] == 0
 
 
+def test_parse_pubmed_xml_title_with_inline_markup() -> None:
+    from openscientist.literature import _parse_pubmed_xml
+
+    xml = (
+        "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID>"
+        "<Article><ArticleTitle><i>LAMA5</i> links matrix to a niche.</ArticleTitle>"
+        "<Abstract><AbstractText>Plain abstract.</AbstractText></Abstract>"
+        "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+    )
+    papers = _parse_pubmed_xml(xml, ["1"])
+    assert papers[0]["title"] == "LAMA5 links matrix to a niche."
+
+
 async def test_subprocess_smoke_real_ncbi(
     tmp_path: Path,
     server_env: Callable[..., dict[str, str]],
