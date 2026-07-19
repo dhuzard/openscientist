@@ -7,6 +7,7 @@ import hmac
 
 _JOB_SECRET_LABEL = "job_secret:"
 _LLM_PROXY_LABEL = "llm_proxy:"
+_EXEC_TOKEN_LABEL = "exec_token:"
 _PLACEHOLDER_SEP = "."
 
 
@@ -37,3 +38,14 @@ def verify_job_placeholder(master_key: str, placeholder: str) -> bool:
     if sep != _PLACEHOLDER_SEP or not job_id or not token:
         return False
     return hmac.compare_digest(derive_llm_proxy_token(master_key, job_id), token)
+
+
+def derive_exec_token(master_key: str, job_id: str) -> str:
+    """Per-job token the execution broker verifies, keyed by a distinct label."""
+    message = f"{_EXEC_TOKEN_LABEL}{job_id}".encode()
+    return hmac.new(master_key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def make_exec_placeholder(master_key: str, job_id: str) -> str:
+    """Execution credential "<job_id>.<token>" the broker recomputes and verifies."""
+    return f"{job_id}{_PLACEHOLDER_SEP}{derive_exec_token(master_key, job_id)}"
