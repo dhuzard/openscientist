@@ -448,7 +448,8 @@ class TestProviderContainerEnvVars:
         assert env["ANTHROPIC_BASE_URL"] == "https://api.example.com"
         assert env["OPENSCIENTIST_MODEL"] == "claude-sonnet-test"
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "model-b"
-        assert env["GITHUB_TOKEN"] == "ghp_example"
+        # GITHUB_TOKEN is web-side only (skill sync), never handed to the container.
+        assert "GITHUB_TOKEN" not in env
 
     def test_foundry_resource_still_exports_api_key(self):
         settings = ProviderSettings(
