@@ -843,7 +843,7 @@ class AgentSettings(BaseSettings):
 
 
 class AirgapSettings(BaseSettings):
-    """Master switch for air-gapped features (currently the local PubMed corpus)."""
+    """Master switch for air-gapped features."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -854,7 +854,7 @@ class AirgapSettings(BaseSettings):
     enabled: bool = Field(
         default=False,
         alias="OPENSCIENTIST_AIRGAPPED",
-        description="Route search_pubmed to the local Postgres corpus instead of NCBI.",
+        description="Enable air-gapped mode: local corpus, offline executor, and egress firewall.",
     )
 
 
