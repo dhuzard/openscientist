@@ -15,7 +15,7 @@ from ._anthropic_common import (
     send_anthropic_message_with_tools,
 )
 from ._env_cleanup import VERTEX_PROVIDER_ENV_VARS, clear_env_vars, clear_provider_mode_flags
-from .base import ClaudeCompatible, CostInfo
+from .base import ClaudeCompatible, CostInfo, LlmUpstream
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,17 @@ class AnthropicProvider(ClaudeCompatible):
             return {"CLAUDE_CODE_OAUTH_TOKEN": settings.provider.claude_code_oauth_token}
         if settings.provider.anthropic_api_key:
             return {"ANTHROPIC_API_KEY": settings.provider.anthropic_api_key}
+        return {}
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        key = get_settings().provider.anthropic_api_key
+        if key:
+            return LlmUpstream("https://api.anthropic.com", {"x-api-key": key})
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        if get_settings().provider.anthropic_api_key:
+            return {"ANTHROPIC_BASE_URL": proxy_base_url, "ANTHROPIC_API_KEY": placeholder}
         return {}
 
     def claude_model_name(self) -> str:

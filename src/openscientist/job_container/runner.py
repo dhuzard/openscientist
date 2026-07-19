@@ -25,8 +25,10 @@ from typing import Any, cast
 
 import docker
 from docker import errors as docker_errors
-from openscientist.job_container.secrets import derive_job_secret
+from openscientist.job_container.secrets import derive_job_secret, make_job_placeholder
 from openscientist.job_container.utils import resolve_docker_network, to_host_path
+from openscientist.llm_proxy import container_proxy_base_url
+from openscientist.providers import get_provider
 from openscientist.settings import Settings, get_settings
 from openscientist.version import SHORT_COMMIT_LENGTH
 
@@ -56,11 +58,11 @@ class JobContainerRunner:
         *,
         job_id: str,
         job_mount: str,
+        provider_env: dict[str, str],
         run_mode: str = "discovery",
     ) -> dict[str, str]:
         """Build the environment variables for the agent container."""
         cs = settings.container
-        provider_env = settings.provider.get_container_env_vars()
         # Inject a per-job derived secret, never the master key (untrusted container).
         env: dict[str, str] = {
             "JOB_ID": job_id,
@@ -153,8 +155,16 @@ class JobContainerRunner:
             JobContainerRunner._agent_runtime_settings(settings)
         )
         job_mount = f"{AGENT_APP_DIR}/jobs/{job_id}"
+        provider_env = get_provider().proxied_container_env(
+            proxy_base_url=container_proxy_base_url(),
+            placeholder=make_job_placeholder(settings.secret_key, job_id),
+        )
         env = JobContainerRunner._build_container_environment(
-            settings, job_id=job_id, job_mount=job_mount, run_mode=run_mode
+            settings,
+            job_id=job_id,
+            job_mount=job_mount,
+            provider_env=provider_env,
+            run_mode=run_mode,
         )
         volumes = JobContainerRunner._build_container_volumes(
             settings, job_dir_host=job_dir_host, job_mount=job_mount

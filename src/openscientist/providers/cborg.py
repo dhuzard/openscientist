@@ -11,7 +11,7 @@ from typing import Any
 import requests
 
 from openscientist.exceptions import ProviderError
-from openscientist.providers.base import ClaudeCompatible, CostInfo
+from openscientist.providers.base import ClaudeCompatible, CostInfo, LlmUpstream
 from openscientist.settings import get_settings
 
 from ._anthropic_common import (
@@ -63,6 +63,19 @@ class CborgProvider(ClaudeCompatible):
         if settings.provider.anthropic_base_url:
             env["ANTHROPIC_BASE_URL"] = settings.provider.anthropic_base_url
         return env
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        s = get_settings().provider
+        if s.anthropic_base_url and s.anthropic_auth_token:
+            base = s.anthropic_base_url.rstrip("/")
+            return LlmUpstream(base, {"authorization": f"Bearer {s.anthropic_auth_token}"})
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        s = get_settings().provider
+        if s.anthropic_base_url and s.anthropic_auth_token:
+            return {"ANTHROPIC_BASE_URL": proxy_base_url, "ANTHROPIC_AUTH_TOKEN": placeholder}
+        return {}
 
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
