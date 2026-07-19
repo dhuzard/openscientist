@@ -97,11 +97,17 @@ def _parse_pubmed_xml(xml_text: str, pmids: list[str]) -> list[dict[str, Any]]:
 
                 # Extract title
                 title_elem = article.find(".//ArticleTitle")
-                title = title_elem.text if title_elem is not None else "No title"
+                title = (
+                    ("".join(title_elem.itertext()).strip() or "No title")
+                    if title_elem is not None
+                    else "No title"
+                )
 
                 # Extract abstract
                 abstract_elems = article.findall(".//AbstractText")
-                abstract_parts = [elem.text for elem in abstract_elems if elem.text]
+                abstract_parts = [
+                    t for t in ("".join(e.itertext()).strip() for e in abstract_elems) if t
+                ]
                 abstract = " ".join(abstract_parts) if abstract_parts else "No abstract available"
 
                 # Extract authors
