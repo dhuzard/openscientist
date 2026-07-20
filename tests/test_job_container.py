@@ -11,7 +11,7 @@ import pytest
 
 from docker import errors as docker_errors
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
-from openscientist.job_container.secrets import derive_job_secret
+from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
 from openscientist.settings import Settings
 
 
@@ -106,6 +106,30 @@ class TestJobContainerRunner:
         assert environment["OPENSCIENTIST_HOST_PROJECT_DIR"] == "/host/project"
         assert environment["OPENSCIENTIST_CONTAINER_APP_DIR"] == AGENT_APP_DIR
         assert run_kwargs["volumes"]["/host/project/jobs/job-123"]["bind"] == environment["JOB_DIR"]
+
+    def test_launch_omits_docker_socket_and_group_add(self):
+        """The job container no longer mounts the Docker socket or joins its group."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.short_id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        settings = self._make_settings(host_project_dir="/host/project")
+
+        with (
+            patch("openscientist.job_container.runner.docker.from_env", return_value=mock_client),
+            patch("openscientist.job_container.runner.get_settings", return_value=settings),
+            patch.object(JobContainerRunner, "_get_network", return_value="bridge"),
+            patch(
+                "openscientist.job_container.runner.to_host_path",
+                return_value=Path("/host/project/jobs/job-123"),
+            ),
+        ):
+            runner = JobContainerRunner()
+            runner.launch("job-123", Path("/app/jobs/job-123"))
+
+        run_kwargs = cast(MagicMock, mock_client.containers.run).call_args.kwargs
+        assert "/var/run/docker.sock" not in run_kwargs["volumes"]
+        assert "group_add" not in run_kwargs
 
     def test_launch_uses_agent_image_from_settings(self):
         """Launch passes the configured agent_image to containers.run.
@@ -319,6 +343,7 @@ class TestPhenixMount:
         settings.provider.get_container_env_vars.return_value = {}
         settings.provider.google_application_credentials = None
         settings.provider.codex_auth_host_path = None
+        settings.airgap.enabled = False
 
         phenix = MagicMock()
         type(phenix).is_available = PropertyMock(return_value=phenix_available)
@@ -461,6 +486,7 @@ class TestJobSecretInjection:
             provider=provider,
             database=SimpleNamespace(effective_database_url="postgresql://db"),
             phenix=SimpleNamespace(phenix_host_path=None),
+            airgap=SimpleNamespace(enabled=False),
             secret_key=master,
         )
 
@@ -508,3 +534,94 @@ class TestJobSecretInjection:
         assert settings.secret_key == derived
         expected_storage = hmac.new(derived.encode(), b"storage_secret", hashlib.sha256).hexdigest()
         assert settings.auth.storage_secret == expected_storage
+
+    def test_env_injects_exec_token_and_broker_url(self) -> None:
+        """The container env carries a per-job exec placeholder and the broker URL."""
+        settings = self._settings(master="master-key")
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, settings), job_id="job-x", job_mount="/agent/jobs/job-x", provider_env={}
+        )
+        assert env["OPENSCIENTIST_EXEC_TOKEN"] == make_exec_placeholder("master-key", "job-x")
+        assert env["OPENSCIENTIST_EXEC_TOKEN"].startswith("job-x.")
+        assert env["OPENSCIENTIST_EXEC_BROKER_URL"].endswith(":8082")
+
+
+class TestAirgapFirewallLaunch:
+    """The job container runs behind the nftables egress firewall when air-gapped."""
+
+    @staticmethod
+    def _settings(*, airgap: bool, provider_id: str = "ollama") -> SimpleNamespace:
+        provider = MagicMock()
+        provider.get_container_env_vars.return_value = {}
+        provider.codex_auth_host_path = None
+        provider.google_application_credentials = None
+        provider.provider_id = provider_id
+        provider.ollama_base_url = "http://host.docker.internal:11434/v1"
+        provider.aws_region = "us-east-1"
+        provider.cloud_ml_region = "us-east5"
+        return SimpleNamespace(
+            container=SimpleNamespace(
+                host_project_dir=None,
+                container_app_dir="/app",
+                agent_network=None,
+                agent_memory="8g",
+                agent_cpu=2.0,
+                agent_platform=None,
+                agent_image="openscientist-agent:latest",
+            ),
+            provider=provider,
+            database=SimpleNamespace(
+                effective_database_url="postgresql+asyncpg://u:p@postgres:5432/db"
+            ),
+            phenix=SimpleNamespace(phenix_host_path=None),
+            secret_key="secret",
+            airgap=SimpleNamespace(enabled=airgap),
+        )
+
+    def _launch(self, settings: SimpleNamespace) -> dict[str, object]:
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.short_id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        with (
+            patch("openscientist.job_container.runner.docker.from_env", return_value=mock_client),
+            patch("openscientist.job_container.runner.get_settings", return_value=settings),
+            patch.object(JobContainerRunner, "_get_network", return_value="bridge"),
+            patch(
+                "openscientist.job_container.runner.to_host_path",
+                return_value=Path("/app/jobs/job-123"),
+            ),
+            patch(
+                "openscientist.agent.factory.agent_class_for_provider_id",
+                return_value=MagicMock(),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            runner = JobContainerRunner()
+            runner.launch("job-123", Path("/app/jobs/job-123"))
+        return cast(dict[str, object], mock_client.containers.run.call_args.kwargs)
+
+    def test_airgap_launch_applies_firewall(self) -> None:
+        run_kwargs = self._launch(self._settings(airgap=True))
+        assert run_kwargs["cap_add"] == ["NET_ADMIN"]
+        assert run_kwargs["user"] == "root"
+        assert run_kwargs["entrypoint"] == ["/agent-firewall-entrypoint.sh"]
+        environment = cast(dict[str, str], run_kwargs["environment"])
+        entries = set(environment["OPENSCIENTIST_FIREWALL_ALLOW"].split(","))
+        assert "postgres:5432" in entries
+        assert "openscientist:8082" in entries
+        assert "host.docker.internal:11434" in entries
+
+    def test_non_airgap_launch_has_no_firewall(self) -> None:
+        run_kwargs = self._launch(self._settings(airgap=False))
+        assert run_kwargs["cap_add"] is None
+        assert run_kwargs["user"] is None
+        assert run_kwargs["entrypoint"] is None
+        environment = cast(dict[str, str], run_kwargs["environment"])
+        assert "OPENSCIENTIST_FIREWALL_ALLOW" not in environment
+
+    def test_airgap_launch_supports_bedrock(self) -> None:
+        run_kwargs = self._launch(self._settings(airgap=True, provider_id="bedrock"))
+        environment = cast(dict[str, str], run_kwargs["environment"])
+        entries = set(environment["OPENSCIENTIST_FIREWALL_ALLOW"].split(","))
+        assert "bedrock-runtime.us-east-1.amazonaws.com:443" in entries

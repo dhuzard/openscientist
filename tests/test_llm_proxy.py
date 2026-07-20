@@ -408,6 +408,7 @@ class TestRunnerInjection:
             provider=SimpleNamespace(google_application_credentials=None),
             database=SimpleNamespace(effective_database_url="postgresql://db"),
             phenix=SimpleNamespace(phenix_host_path=None),
+            airgap=SimpleNamespace(enabled=False),
             secret_key="master-key",
         )
         provider_env = {
