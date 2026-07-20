@@ -481,7 +481,6 @@ class ProviderSettings(BaseSettings):
         self._apply_vertex_env_vars(env_vars, gcp_credentials_container_path)
         self._apply_bedrock_env_vars(env_vars)
         self._apply_foundry_env_vars(env_vars)
-        self._set_env_if_present(env_vars, "GITHUB_TOKEN", self.github_token)
         return env_vars
 
 

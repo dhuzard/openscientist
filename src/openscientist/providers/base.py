@@ -50,6 +50,14 @@ class CostInfo:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class LlmUpstream:
+    """Real endpoint and auth headers the LLM proxy forwards to."""
+
+    base_url: str
+    auth_headers: dict[str, str]
+
+
 class Provider(abc.ABC):
     """A model-hosting service. Family-specific behavior lives on the
     marker subclasses below; configuration validation and cost/budget
@@ -204,6 +212,20 @@ class Provider(abc.ABC):
         return default_model_profile(
             self.effective_model_name(), get_settings().provider.model_context_tokens
         )
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        """Real endpoint and auth headers for the proxy, or None if not proxied."""
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        """Env that routes this provider's LLM calls through the proxy, or {}."""
+        return {}
+
+    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        """Job-container provider env with LLM traffic routed through the proxy."""
+        env = get_settings().provider.get_container_env_vars()
+        env.update(self.proxy_env_overrides(proxy_base_url=proxy_base_url, placeholder=placeholder))
+        return env
 
 
 class ClaudeCompatible(Provider, abc.ABC):

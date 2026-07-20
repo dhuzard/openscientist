@@ -406,6 +406,14 @@ async def _start_background_tasks(engine: Any) -> None:
     except Exception as e:
         logger.warning("Failed to start skill sync scheduler: %s", e)
 
+    # Start the LLM key-replacement proxy
+    try:
+        from openscientist.llm_proxy import start_llm_proxy
+
+        await start_llm_proxy()
+    except Exception as e:
+        logger.warning("Failed to start LLM proxy: %s", e)
+
 
 def _initialize_job_manager_runtime(jobs_dir: Path) -> None:
     if _state.job_manager is not None:

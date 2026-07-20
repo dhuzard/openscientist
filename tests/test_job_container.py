@@ -15,6 +15,17 @@ from openscientist.job_container.secrets import derive_job_secret
 from openscientist.settings import Settings
 
 
+class _FakeProvider:
+    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        return {"EXTRA_ENV": "1"}
+
+
+@pytest.fixture(autouse=True)
+def _fake_provider():
+    with patch("openscientist.job_container.runner.get_provider", return_value=_FakeProvider()):
+        yield
+
+
 class TestJobContainerRunner:
     """Tests for JobContainerRunner."""
 
@@ -457,7 +468,7 @@ class TestJobSecretInjection:
         """The injected key is HMAC(master, "job_secret:" + job_id), not the master."""
         settings = self._settings(master="master-key")
         env = JobContainerRunner._build_container_environment(
-            cast(Settings, settings), job_id="job-1", job_mount="/agent/jobs/job-1"
+            cast(Settings, settings), job_id="job-1", job_mount="/agent/jobs/job-1", provider_env={}
         )
         expected = hmac.new(b"master-key", b"job_secret:job-1", hashlib.sha256).hexdigest()
         assert env["OPENSCIENTIST_SECRET_KEY"] == expected
@@ -467,10 +478,16 @@ class TestJobSecretInjection:
         """Two jobs get two different injected secrets, and neither is the master."""
         settings = self._settings(master="master-key")
         env_a = JobContainerRunner._build_container_environment(
-            cast(Settings, settings), job_id="job-a", job_mount="/agent/jobs/job-a"
+            cast(Settings, settings),
+            job_id="job-a",
+            job_mount="/agent/jobs/job-a",
+            provider_env={},
         )
         env_b = JobContainerRunner._build_container_environment(
-            cast(Settings, settings), job_id="job-b", job_mount="/agent/jobs/job-b"
+            cast(Settings, settings),
+            job_id="job-b",
+            job_mount="/agent/jobs/job-b",
+            provider_env={},
         )
         secret_a = env_a["OPENSCIENTIST_SECRET_KEY"]
         secret_b = env_b["OPENSCIENTIST_SECRET_KEY"]

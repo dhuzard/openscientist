@@ -6,6 +6,8 @@ import hashlib
 import hmac
 
 _JOB_SECRET_LABEL = "job_secret:"
+_LLM_PROXY_LABEL = "llm_proxy:"
+_PLACEHOLDER_SEP = "."
 
 
 def derive_job_secret(master_key: str, job_id: str) -> str:
@@ -16,3 +18,22 @@ def derive_job_secret(master_key: str, job_id: str) -> str:
     """
     message = f"{_JOB_SECRET_LABEL}{job_id}".encode()
     return hmac.new(master_key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def derive_llm_proxy_token(master_key: str, job_id: str) -> str:
+    """Per-job token presented to the LLM proxy, keyed by a distinct label."""
+    message = f"{_LLM_PROXY_LABEL}{job_id}".encode()
+    return hmac.new(master_key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def make_job_placeholder(master_key: str, job_id: str) -> str:
+    """Placeholder LLM credential: "<job_id>.<token>", verifiable by the proxy."""
+    return f"{job_id}{_PLACEHOLDER_SEP}{derive_llm_proxy_token(master_key, job_id)}"
+
+
+def verify_job_placeholder(master_key: str, placeholder: str) -> bool:
+    """True when placeholder is a valid "<job_id>.<token>" for the master key."""
+    job_id, sep, token = placeholder.rpartition(_PLACEHOLDER_SEP)
+    if sep != _PLACEHOLDER_SEP or not job_id or not token:
+        return False
+    return hmac.compare_digest(derive_llm_proxy_token(master_key, job_id), token)

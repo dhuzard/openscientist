@@ -1,0 +1,308 @@
+"""Tests for the LLM key-replacement proxy (Claude backend)."""
+
+import hashlib
+import hmac
+from types import SimpleNamespace
+from typing import cast
+
+import httpx
+import pytest
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import StreamingResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from openscientist.job_container.runner import JobContainerRunner
+from openscientist.job_container.secrets import (
+    derive_job_secret,
+    derive_llm_proxy_token,
+    make_job_placeholder,
+    verify_job_placeholder,
+)
+from openscientist.llm_proxy import container_proxy_base_url, create_llm_proxy_app
+from openscientist.providers import get_provider
+from openscientist.providers.base import LlmUpstream
+from openscientist.settings import Settings, get_settings
+
+
+@pytest.fixture
+def active_provider(monkeypatch):
+    """Select the global provider from env and return its Provider instance."""
+    reset = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "GITHUB_TOKEN",
+    )
+
+    def _select(**env: str):
+        for key in reset:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("OPENSCIENTIST_PROVIDER", env.pop("OPENSCIENTIST_PROVIDER"))
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        get_settings.cache_clear()
+        return get_provider()
+
+    yield _select
+    get_settings.cache_clear()
+
+
+class TestProxyToken:
+    """Per-job proxy token and placeholder derivation."""
+
+    def test_token_matches_reference_and_is_distinct(self):
+        reference = hmac.new(b"master", b"llm_proxy:job-1", hashlib.sha256).hexdigest()
+        assert derive_llm_proxy_token("master", "job-1") == reference
+        assert len(reference) == 64
+        # Distinct label from the settings secret, so one does not reveal the other.
+        assert derive_llm_proxy_token("master", "job-1") != derive_job_secret("master", "job-1")
+        assert derive_llm_proxy_token("master", "job-1") != "master"
+
+    def test_placeholder_round_trip(self):
+        placeholder = make_job_placeholder("master", "job-1")
+        assert placeholder == "job-1." + derive_llm_proxy_token("master", "job-1")
+        assert verify_job_placeholder("master", placeholder)
+
+    def test_placeholder_rejects_tampering_and_wrong_master(self):
+        placeholder = make_job_placeholder("master", "job-1")
+        flipped = placeholder[:-1] + ("0" if placeholder[-1] != "0" else "1")
+        assert not verify_job_placeholder("master", flipped)
+        assert not verify_job_placeholder("other-master", placeholder)
+        assert not verify_job_placeholder("master", "no-separator")
+        assert not verify_job_placeholder("master", ".onlytoken")
+        assert not verify_job_placeholder("master", "jobonly.")
+
+    def test_placeholder_tolerates_job_id_with_separator(self):
+        placeholder = make_job_placeholder("master", "job.with.dots")
+        assert verify_job_placeholder("master", placeholder)
+
+
+class TestClaudeUpstream:
+    """Real upstream and auth-header derivation, on the Provider hierarchy."""
+
+    def test_anthropic_upstream(self, active_provider):
+        provider = active_provider(OPENSCIENTIST_PROVIDER="anthropic", ANTHROPIC_API_KEY="real-key")
+        assert provider.llm_upstream() == LlmUpstream(
+            "https://api.anthropic.com", {"x-api-key": "real-key"}
+        )
+
+    def test_cborg_upstream_strips_trailing_slash(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="cborg",
+            ANTHROPIC_AUTH_TOKEN="real-tok",
+            ANTHROPIC_BASE_URL="https://api.cborg.lbl.gov/",
+        )
+        assert provider.llm_upstream() == LlmUpstream(
+            "https://api.cborg.lbl.gov", {"authorization": "Bearer real-tok"}
+        )
+
+    def test_unsupported_provider_has_no_upstream(self, active_provider):
+        provider = active_provider(OPENSCIENTIST_PROVIDER="openai", OPENAI_API_KEY="sk")
+        assert provider.llm_upstream() is None
+
+    def test_anthropic_without_api_key_has_no_upstream(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="anthropic", CLAUDE_CODE_OAUTH_TOKEN="oauth-token"
+        )
+        assert provider.llm_upstream() is None
+
+
+class TestProxiedContainerEnv:
+    """The job-container env transform: redirect LLM traffic, drop GITHUB_TOKEN."""
+
+    def test_anthropic_redirects_and_drops_github(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="anthropic",
+            ANTHROPIC_API_KEY="real-key",
+            GITHUB_TOKEN="ghp_secret",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["ANTHROPIC_BASE_URL"] == "http://openscientist:8081"
+        assert env["ANTHROPIC_API_KEY"] == "job-1.tok"
+        assert "GITHUB_TOKEN" not in env
+        assert "real-key" not in env.values()
+
+    def test_cborg_redirects(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="cborg",
+            ANTHROPIC_AUTH_TOKEN="real-tok",
+            ANTHROPIC_BASE_URL="https://api.cborg.lbl.gov",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["ANTHROPIC_BASE_URL"] == "http://openscientist:8081"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "job-1.tok"
+        assert "real-tok" not in env.values()
+
+    def test_fallback_keeps_llm_key_but_drops_github(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="openai",
+            OPENAI_API_KEY="sk-real",
+            GITHUB_TOKEN="ghp_secret",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "sk-real"
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert "GITHUB_TOKEN" not in env
+
+
+class TestProxyBaseUrl:
+    def test_default_and_override(self, monkeypatch):
+        monkeypatch.delenv("OPENSCIENTIST_WEB_HOST", raising=False)
+        assert container_proxy_base_url() == "http://openscientist:8081"
+        monkeypatch.setenv("OPENSCIENTIST_WEB_HOST", "web.internal")
+        assert container_proxy_base_url() == "http://web.internal:8081"
+
+
+def _recording_upstream(recorded: list[dict]) -> httpx.AsyncClient:
+    """An in-memory ASGI upstream that records the forwarded request and streams
+    a response, so the proxy's real streaming path is exercised."""
+
+    async def endpoint(request: Request) -> StreamingResponse:
+        body = await request.body()
+        recorded.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": request.url.query,
+                "headers": dict(request.headers),
+                "body": body,
+            }
+        )
+
+        async def stream():
+            yield b"upstream-"
+            yield b"body"
+
+        return StreamingResponse(stream(), media_type="application/json")
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/{path:path}",
+                endpoint,
+                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            )
+        ]
+    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+
+
+class TestProxyForwarding:
+    """The proxy authenticates, substitutes the real key, and forwards."""
+
+    def test_substitutes_key_and_preserves_request(self):
+        master = "master-key"
+        placeholder = make_job_placeholder(master, "job-1")
+        recorded: list[dict] = []
+        app = create_llm_proxy_app(
+            master_key=lambda: master,
+            upstream=lambda: LlmUpstream("https://upstream.test", {"x-api-key": "REAL-KEY"}),
+            client=_recording_upstream(recorded),
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/v1/messages?beta=1",
+                headers={
+                    "x-api-key": placeholder,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                content=b'{"m":1}',
+            )
+        assert resp.status_code == 200
+        assert resp.content == b"upstream-body"
+        assert len(recorded) == 1
+        forwarded = recorded[0]
+        assert forwarded["path"] == "/v1/messages"
+        assert forwarded["query"] == "beta=1"
+        assert forwarded["headers"]["x-api-key"] == "REAL-KEY"
+        assert forwarded["headers"]["anthropic-version"] == "2023-06-01"
+        assert forwarded["body"] == b'{"m":1}'
+
+    def test_accepts_bearer_and_sets_authorization(self):
+        master = "master-key"
+        placeholder = make_job_placeholder(master, "job-x")
+        recorded: list[dict] = []
+        app = create_llm_proxy_app(
+            master_key=lambda: master,
+            upstream=lambda: LlmUpstream(
+                "https://cborg.test", {"authorization": "Bearer REAL-TOK"}
+            ),
+            client=_recording_upstream(recorded),
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/v1/messages",
+                headers={"authorization": f"Bearer {placeholder}"},
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        assert recorded[0]["headers"]["authorization"] == "Bearer REAL-TOK"
+
+    def test_rejects_invalid_token_without_forwarding(self):
+        recorded: list[dict] = []
+        app = create_llm_proxy_app(
+            master_key=lambda: "master-key",
+            upstream=lambda: LlmUpstream("https://upstream.test", {"x-api-key": "REAL-KEY"}),
+            client=_recording_upstream(recorded),
+        )
+        with TestClient(app) as client:
+            bad = client.post(
+                "/v1/messages", headers={"x-api-key": "job-1.deadbeef"}, content=b"{}"
+            )
+            missing = client.post("/v1/messages", content=b"{}")
+        assert bad.status_code == 401
+        assert missing.status_code == 401
+        assert recorded == []
+
+    def test_unsupported_provider_returns_502(self):
+        master = "master-key"
+        placeholder = make_job_placeholder(master, "job-1")
+
+        def _raise() -> LlmUpstream:
+            raise ValueError("not supported")
+
+        app = create_llm_proxy_app(
+            master_key=lambda: master,
+            upstream=_raise,
+            client=_recording_upstream([]),
+        )
+        with TestClient(app) as client:
+            resp = client.post("/v1/messages", headers={"x-api-key": placeholder}, content=b"{}")
+        assert resp.status_code == 502
+
+
+class TestRunnerInjection:
+    """The runner merges the provider env and injects the per-job secret."""
+
+    def test_build_env_merges_provider_env_and_secret(self):
+        settings = SimpleNamespace(
+            container=SimpleNamespace(host_project_dir=None),
+            provider=SimpleNamespace(google_application_credentials=None),
+            database=SimpleNamespace(effective_database_url="postgresql://db"),
+            phenix=SimpleNamespace(phenix_host_path=None),
+            secret_key="master-key",
+        )
+        provider_env = {
+            "ANTHROPIC_BASE_URL": "http://openscientist:8081",
+            "ANTHROPIC_API_KEY": "job-1.tok",
+        }
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, settings),
+            job_id="job-1",
+            job_mount="/agent/jobs/job-1",
+            provider_env=provider_env,
+        )
+        assert env["ANTHROPIC_BASE_URL"] == "http://openscientist:8081"
+        assert env["ANTHROPIC_API_KEY"] == "job-1.tok"
+        assert env["OPENSCIENTIST_SECRET_KEY"] == derive_job_secret("master-key", "job-1")
