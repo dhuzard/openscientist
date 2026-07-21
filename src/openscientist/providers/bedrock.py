@@ -9,7 +9,13 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from openscientist.providers.base import ClaudeCompatible, CostInfo
+from openscientist.providers.base import (
+    AirgapEgress,
+    AirgapPosture,
+    ClaudeCompatible,
+    CostInfo,
+    LlmUpstream,
+)
 from openscientist.settings import get_settings
 
 from ._anthropic_common import (
@@ -82,6 +88,43 @@ class BedrockProvider(ClaudeCompatible):
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
         return get_settings().provider.model or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        p = get_settings().provider
+        if p.aws_bearer_token_bedrock and p.aws_region:
+            base = f"https://bedrock-runtime.{p.aws_region}.amazonaws.com"
+            return LlmUpstream(base, {"authorization": f"Bearer {p.aws_bearer_token_bedrock}"})
+        return None
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        p = get_settings().provider
+        if p.aws_bearer_token_bedrock and p.aws_region:
+            return {
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                "ANTHROPIC_BEDROCK_BASE_URL": proxy_base_url,
+                "AWS_BEARER_TOKEN_BEDROCK": placeholder,
+            }
+        return {}
+
+    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        # Strip any SigV4 credential: bearer mode routes through the proxy.
+        env = super().proxied_container_env(proxy_base_url=proxy_base_url, placeholder=placeholder)
+        if env.get("ANTHROPIC_BEDROCK_BASE_URL") == proxy_base_url:
+            for key in (
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_PROFILE",
+                "AWS_SESSION_TOKEN",
+            ):
+                env.pop(key, None)
+        return env
+
+    def airgap_egress(self) -> AirgapPosture:
+        p = get_settings().provider
+        if p.aws_bearer_token_bedrock:
+            return AirgapPosture(AirgapEgress.PROXY)
+        host = f"bedrock-runtime.{p.aws_region}.amazonaws.com"
+        return AirgapPosture(AirgapEgress.DIRECT, direct_endpoints=((host, 443),))
 
     def _validate_optional_config(self) -> list[str]:
         """Check optional Bedrock configuration."""

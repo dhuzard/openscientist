@@ -16,11 +16,12 @@ the host (for example ``http://host.docker.internal:11434/v1``).
 from __future__ import annotations
 
 import logging
+import os
 
 import requests
 
 from openscientist.models import _DEFAULT_CONTEXT_TOKENS, ModelProfile
-from openscientist.providers.base import CodexCompatible, CostInfo
+from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -96,23 +97,32 @@ class OllamaProvider(CodexCompatible):
             data_lag_note="Local Ollama inference incurs no API cost.",
         )
 
+    def llm_upstream(self) -> LlmUpstream | None:
+        # Keyless: forward to Ollama with no injected auth.
+        return LlmUpstream(get_settings().provider.ollama_base_url, {})
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        # Codex sends the placeholder so the proxy authenticates the container.
+        return {"OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
+
     def codex_config_overrides(self) -> list[str]:
-        # The id is "ollama-local", not "ollama", because codex reserves
-        # "ollama" as a built-in provider we cannot override to set our own
-        # base_url (e.g. host.docker.internal from a container). Ollama needs no
-        # auth, and codex only supports wire_api = "responses".
-        return [
+        # id is "ollama-local", not "ollama": codex reserves "ollama" as a
+        # built-in provider we cannot repoint at our own base_url.
+        proxy = os.environ.get(LLM_PROXY_URL_ENV)
+        lines = [
             "[model_providers.ollama-local]",
             'name = "Ollama (local)"',
-            f'base_url = "{get_settings().provider.ollama_base_url}"',
+            f'base_url = "{proxy or get_settings().provider.ollama_base_url}"',
             'wire_api = "responses"',
-            "requires_openai_auth = false",
-            # A CPU-offloaded model can stay silent for minutes during prefill
-            # before the first SSE token, tripping codex's default 5-minute idle
-            # timeout. Raise it to 1 hour, with a few reconnects as insurance.
-            "stream_idle_timeout_ms = 3600000",
-            "stream_max_retries = 5",
+            f"requires_openai_auth = {'true' if proxy else 'false'}",
         ]
+        if proxy:
+            lines.append('env_key = "OPENAI_API_KEY"')
+        # A CPU-offloaded model can stay silent for minutes during prefill before
+        # the first SSE token, tripping codex's default 5-minute idle timeout.
+        # Raise it to 1 hour, with a few reconnects as insurance.
+        lines += ["stream_idle_timeout_ms = 3600000", "stream_max_retries = 5"]
+        return lines
 
     def codex_model_name(self) -> str | None:
         # Default to the configured Ollama model unless OPENSCIENTIST_MODEL is set.

@@ -63,14 +63,22 @@ class AnthropicProvider(ClaudeCompatible):
         return {}
 
     def llm_upstream(self) -> LlmUpstream | None:
-        key = get_settings().provider.anthropic_api_key
-        if key:
-            return LlmUpstream("https://api.anthropic.com", {"x-api-key": key})
+        p = get_settings().provider
+        if p.anthropic_api_key:
+            return LlmUpstream("https://api.anthropic.com", {"x-api-key": p.anthropic_api_key})
+        if p.claude_code_oauth_token:
+            return LlmUpstream(
+                "https://api.anthropic.com",
+                {"authorization": f"Bearer {p.claude_code_oauth_token}"},
+            )
         return None
 
     def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
-        if get_settings().provider.anthropic_api_key:
+        p = get_settings().provider
+        if p.anthropic_api_key:
             return {"ANTHROPIC_BASE_URL": proxy_base_url, "ANTHROPIC_API_KEY": placeholder}
+        if p.claude_code_oauth_token:
+            return {"ANTHROPIC_BASE_URL": proxy_base_url, "CLAUDE_CODE_OAUTH_TOKEN": placeholder}
         return {}
 
     def claude_model_name(self) -> str:

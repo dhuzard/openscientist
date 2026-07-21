@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from openscientist.providers.base import AirgapEgress
 from openscientist.providers.vertex import VertexProvider
 from openscientist.settings import clear_settings_cache
 
@@ -29,6 +30,25 @@ class TestVertexProviderValidation:
             clear_settings_cache()
             provider = VertexProvider()
             assert "vertex" in provider.display_name.lower()
+
+    def test_airgap_egress_is_direct(self, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text('{"type": "service_account"}')
+        with patch.dict(
+            os.environ,
+            {
+                "OPENSCIENTIST_PROVIDER": "vertex",
+                "ANTHROPIC_VERTEX_PROJECT_ID": "my-project",
+                "GOOGLE_APPLICATION_CREDENTIALS": str(creds),
+                "GCP_BILLING_ACCOUNT_ID": "012345-ABCDEF",
+                "CLOUD_ML_REGION": "us-east5",
+            },
+        ):
+            clear_settings_cache()
+            posture = VertexProvider().airgap_egress()
+        assert posture.mode is AirgapEgress.DIRECT
+        assert ("us-east5-aiplatform.googleapis.com", 443) in posture.direct_endpoints
+        assert ("oauth2.googleapis.com", 443) in posture.direct_endpoints
 
     def test_missing_creds_file_raises(self):
         with patch.dict(

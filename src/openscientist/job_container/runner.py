@@ -198,7 +198,8 @@ class JobContainerRunner:
             format_egress_allowlist,
         )
 
-        allow = format_egress_allowlist(derive_egress_allowlist(settings))
+        posture = get_provider().airgap_egress()
+        allow = format_egress_allowlist(derive_egress_allowlist(settings, posture))
         return (
             ["NET_ADMIN"],
             "root",

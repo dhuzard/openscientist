@@ -10,7 +10,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from openscientist.providers.base import ClaudeCompatible, CostInfo
+from openscientist.providers.base import ClaudeCompatible, CostInfo, LlmUpstream
 from openscientist.settings import get_settings
 
 from ._anthropic_common import (
@@ -120,6 +120,30 @@ class FoundryProvider(ClaudeCompatible):
             env["ANTHROPIC_FOUNDRY_BASE_URL"] = p.anthropic_foundry_base_url
         if p.anthropic_foundry_api_key:
             env["ANTHROPIC_FOUNDRY_API_KEY"] = p.anthropic_foundry_api_key
+        return env
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        # Foundry authenticates with x-api-key (API key or minted Entra ID token).
+        p = get_settings().provider
+        if not (p.anthropic_foundry_base_url or p.anthropic_foundry_resource):
+            return None
+        return LlmUpstream(self._resolve_base_url(), {"x-api-key": self._resolve_api_key()})
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        p = get_settings().provider
+        if not (p.anthropic_foundry_base_url or p.anthropic_foundry_resource):
+            return {}
+        return {
+            "ANTHROPIC_FOUNDRY_BASE_URL": proxy_base_url,
+            "ANTHROPIC_FOUNDRY_API_KEY": placeholder,
+        }
+
+    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        # Claude CLI foundry mode rejects resource and base_url together, so when
+        # routing through the proxy the base_url wins and the resource is dropped.
+        env = super().proxied_container_env(proxy_base_url=proxy_base_url, placeholder=placeholder)
+        if env.get("ANTHROPIC_FOUNDRY_BASE_URL") == proxy_base_url:
+            env.pop("ANTHROPIC_FOUNDRY_RESOURCE", None)
         return env
 
     def claude_model_name(self) -> str:
