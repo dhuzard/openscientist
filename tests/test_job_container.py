@@ -12,12 +12,19 @@ import pytest
 from docker import errors as docker_errors
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
 from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
+from openscientist.providers.base import AirgapEgress, AirgapPosture
 from openscientist.settings import Settings
 
 
 class _FakeProvider:
+    def __init__(self, posture: AirgapPosture | None = None) -> None:
+        self._posture = posture
+
     def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
         return {"EXTRA_ENV": "1"}
+
+    def airgap_egress(self) -> AirgapPosture:
+        return self._posture or AirgapPosture(AirgapEgress.PROXY)
 
 
 @pytest.fixture(autouse=True)
@@ -578,7 +585,9 @@ class TestAirgapFirewallLaunch:
             airgap=SimpleNamespace(enabled=airgap),
         )
 
-    def _launch(self, settings: SimpleNamespace) -> dict[str, object]:
+    def _launch(
+        self, settings: SimpleNamespace, posture: AirgapPosture | None = None
+    ) -> dict[str, object]:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.short_id = "abc123"
@@ -586,6 +595,10 @@ class TestAirgapFirewallLaunch:
         with (
             patch("openscientist.job_container.runner.docker.from_env", return_value=mock_client),
             patch("openscientist.job_container.runner.get_settings", return_value=settings),
+            patch(
+                "openscientist.job_container.runner.get_provider",
+                return_value=_FakeProvider(posture),
+            ),
             patch.object(JobContainerRunner, "_get_network", return_value="bridge"),
             patch(
                 "openscientist.job_container.runner.to_host_path",
@@ -610,7 +623,10 @@ class TestAirgapFirewallLaunch:
         entries = set(environment["OPENSCIENTIST_FIREWALL_ALLOW"].split(","))
         assert "postgres:5432" in entries
         assert "openscientist:8082" in entries
-        assert "host.docker.internal:11434" in entries
+        # Ollama is a proxied provider now, so the container reaches the proxy,
+        # not the model server directly.
+        assert "openscientist:8081" in entries
+        assert "host.docker.internal:11434" not in entries
 
     def test_non_airgap_launch_has_no_firewall(self) -> None:
         run_kwargs = self._launch(self._settings(airgap=False))
@@ -621,7 +637,83 @@ class TestAirgapFirewallLaunch:
         assert "OPENSCIENTIST_FIREWALL_ALLOW" not in environment
 
     def test_airgap_launch_supports_bedrock(self) -> None:
-        run_kwargs = self._launch(self._settings(airgap=True, provider_id="bedrock"))
+        posture = AirgapPosture(
+            AirgapEgress.DIRECT,
+            direct_endpoints=(("bedrock-runtime.us-east-1.amazonaws.com", 443),),
+        )
+        run_kwargs = self._launch(self._settings(airgap=True, provider_id="bedrock"), posture)
         environment = cast(dict[str, str], run_kwargs["environment"])
         entries = set(environment["OPENSCIENTIST_FIREWALL_ALLOW"].split(","))
         assert "bedrock-runtime.us-east-1.amazonaws.com:443" in entries
+        assert "openscientist:8081" not in entries
+
+
+class TestChatTurnLaunch:
+    """In-page chat runs one turn in an ephemeral, hardened container."""
+
+    @staticmethod
+    def _settings() -> SimpleNamespace:
+        provider = MagicMock()
+        provider.get_container_env_vars.return_value = {}
+        provider.codex_auth_host_path = None
+        provider.google_application_credentials = None
+        provider.provider_id = "anthropic"
+        return SimpleNamespace(
+            container=SimpleNamespace(
+                host_project_dir=None,
+                container_app_dir="/app",
+                agent_network=None,
+                agent_memory="8g",
+                agent_cpu=2.0,
+                agent_platform=None,
+                agent_image="openscientist-agent:latest",
+            ),
+            provider=provider,
+            database=SimpleNamespace(
+                effective_database_url="postgresql+asyncpg://u:p@postgres:5432/db"
+            ),
+            phenix=SimpleNamespace(phenix_host_path=None),
+            secret_key="master-key",
+            airgap=SimpleNamespace(enabled=False),
+        )
+
+    def _run_chat(self, settings: SimpleNamespace, *, exit_code: int = 0):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.short_id = "abc123"
+        mock_container.wait.return_value = {"StatusCode": exit_code}
+        mock_container.logs.return_value = b"container log"
+        mock_client.containers.run.return_value = mock_container
+        with (
+            patch("openscientist.job_container.runner.docker.from_env", return_value=mock_client),
+            patch("openscientist.job_container.runner.get_settings", return_value=settings),
+            patch.object(JobContainerRunner, "_get_network", return_value="bridge"),
+            patch(
+                "openscientist.job_container.runner.to_host_path",
+                return_value=Path("/app/jobs/job-123"),
+            ),
+            patch(
+                "openscientist.agent.factory.agent_class_for_provider_id",
+                return_value=MagicMock(),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            JobContainerRunner().run_chat_turn("job-123", Path("/app/jobs/job-123"))
+        return mock_client, mock_container
+
+    def test_chat_turn_launches_hardened_container(self) -> None:
+        mock_client, mock_container = self._run_chat(self._settings())
+        run_kwargs = cast(dict[str, object], mock_client.containers.run.call_args.kwargs)
+        labels = cast(dict[str, str], run_kwargs["labels"])
+        assert labels["openscientist.type"] == "chat"
+        assert cast(str, run_kwargs["name"]).startswith("openscientist-chat-")
+        env = cast(dict[str, str], run_kwargs["environment"])
+        # The chat container carries the per-job derived secret, never the master.
+        assert env["OPENSCIENTIST_SECRET_KEY"] != "master-key"
+        assert env["OPENSCIENTIST_RUN_MODE"] == "chat"
+        mock_container.wait.assert_called_once()
+        mock_container.remove.assert_called_once_with(force=True)
+
+    def test_chat_turn_raises_on_nonzero_exit(self) -> None:
+        with pytest.raises(RuntimeError, match="exited with code 1"):
+            self._run_chat(self._settings(), exit_code=1)

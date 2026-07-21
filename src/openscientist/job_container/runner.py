@@ -227,17 +227,35 @@ class JobContainerRunner:
         Raises:
             RuntimeError: If Docker is unavailable or launch fails
         """
+        container = self._start_agent_container(
+            job_id=job_id,
+            job_dir=job_dir,
+            run_mode=run_mode,
+            name=f"openscientist-agent-{job_id[:SHORT_COMMIT_LENGTH]}",
+            container_type="agent",
+        )
+        logger.info("Launched agent container %s for job %s", container.short_id, job_id)
+        return container
+
+    def _start_agent_container(
+        self,
+        *,
+        job_id: str,
+        job_dir: Path,
+        run_mode: str,
+        name: str,
+        container_type: str,
+    ) -> Any:
+        """Build the hardened launch config and start a detached agent container.
+        Shared by discovery/report launches and one-off chat turns."""
         settings: Settings = get_settings()
         cs = settings.container
 
-        # Translate job_dir from container-internal path to host path.
-        # Must resolve to absolute FIRST (so relative paths like "jobs/uuid" become
-        # "/app/jobs/uuid" inside the web container), then translate to the host
-        # path.  Docker requires absolute paths for bind mounts; relative paths
-        # are misinterpreted as named volumes.
+        # Translate job_dir to a host-absolute path: resolve first so a relative
+        # path becomes container-absolute, then map to the host (Docker bind
+        # mounts require host-absolute paths).
         job_dir_resolved = job_dir.resolve()
-        # Host-side, pre-launch prep is the agent backend's own concern. Ask the
-        # backend class for the configured provider (no agent instance here).
+        # Host-side pre-launch prep is the agent backend's concern.
         from openscientist.agent.factory import agent_class_for_provider_id
 
         agent_class_for_provider_id(settings.provider.provider_id).provision_host_prelaunch(
@@ -256,9 +274,9 @@ class JobContainerRunner:
         cap_add, run_user, entrypoint, firewall_env = self._airgap_firewall_config(settings)
         env.update(firewall_env)
 
-        container = self._docker.containers.run(
+        return self._docker.containers.run(
             image=cs.agent_image,
-            name=f"openscientist-agent-{job_id[:SHORT_COMMIT_LENGTH]}",
+            name=name,
             detach=True,
             remove=False,
             environment=env,
@@ -271,19 +289,45 @@ class JobContainerRunner:
             cap_add=cap_add,
             user=run_user,
             entrypoint=entrypoint,
-            # Map host.docker.internal to the host gateway so a job can reach a
-            # model server running on the host (e.g. a local Ollama at
-            # http://host.docker.internal:11434/v1). Harmless for providers that
-            # do not use it. On Linux this is not provided by default.
+            # Map host.docker.internal to the host gateway so the container can
+            # reach a model server on the host (e.g. a local Ollama). Harmless
+            # otherwise. On Linux this is not provided by default.
             extra_hosts={"host.docker.internal": "host-gateway"},
             labels={
                 "openscientist.job_id": job_id,
-                "openscientist.type": "agent",
+                "openscientist.type": container_type,
             },
         )
 
-        logger.info("Launched agent container %s for job %s", container.short_id, job_id)
-        return container
+    def run_chat_turn(self, job_id: str, job_dir: Path, *, timeout: int = 300) -> None:
+        """Run one chat turn in an ephemeral hardened container and wait for it.
+
+        Inherits the job launch posture. Prompt and reply cross through files in
+        job_dir, not the database. Raises on timeout or non-zero exit, and the
+        container is always removed."""
+        name = f"openscientist-chat-{job_id[:SHORT_COMMIT_LENGTH]}-{os.urandom(4).hex()}"
+        container = self._start_agent_container(
+            job_id=job_id,
+            job_dir=job_dir,
+            run_mode="chat",
+            name=name,
+            container_type="chat",
+        )
+        try:
+            try:
+                outcome = container.wait(timeout=timeout)
+            except Exception as error:
+                raise RuntimeError(f"Chat turn did not finish within {timeout}s") from error
+            exit_code = int(outcome.get("StatusCode", 1)) if isinstance(outcome, dict) else 1
+            if exit_code != 0:
+                logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+                raise RuntimeError(f"Chat container exited with code {exit_code}: {logs[-2000:]}")
+        finally:
+            try:
+                container.remove(force=True)
+            except docker_errors.APIError as error:
+                if not self._is_not_found_error(error):
+                    logger.warning("Failed to remove chat container %s: %s", name, error)
 
     def stop(self, job_id: str, timeout: int = 10) -> None:
         """Stop the container for a job (graceful → SIGKILL)."""
