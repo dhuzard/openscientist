@@ -13,7 +13,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_EXCLUDE_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
+_EXCLUDE_DIRS = {".codex", ".git", "__pycache__", ".pytest_cache", "node_modules"}
 _EXCLUDE_FILES = {"config.json"}
 
 
@@ -23,16 +23,31 @@ def _iter_artifact_files(
 ) -> Iterator[tuple[Path, Path]]:
     """Yield (absolute_path, archive_relative_path) pairs for artifact files."""
     excluded_paths = excluded_paths or set()
-    for file_path in job_dir.rglob("*"):
-        if file_path.resolve() in excluded_paths:
-            continue
-        if file_path.is_dir():
-            continue
-        if any(parent.name in _EXCLUDE_DIRS for parent in file_path.parents):
-            continue
-        if file_path.name in _EXCLUDE_FILES:
-            continue
-        yield file_path, file_path.relative_to(job_dir)
+    for root, dirnames, filenames in job_dir.walk(top_down=True, follow_symlinks=False):
+        # Prune before descent so linked directories are never traversed.
+        safe_dirnames: list[str] = []
+        for dirname in dirnames:
+            dir_path = root / dirname
+            if dirname in _EXCLUDE_DIRS:
+                continue
+            if dir_path.is_symlink():
+                continue
+            if dir_path.resolve() in excluded_paths:
+                continue
+            safe_dirnames.append(dirname)
+        dirnames[:] = safe_dirnames
+
+        for filename in filenames:
+            file_path = root / filename
+            # Job directories are agent-writable. Do not let file links smuggle
+            # runtime credentials or files outside the job directory into an export.
+            if file_path.is_symlink():
+                continue
+            if file_path.resolve() in excluded_paths:
+                continue
+            if filename in _EXCLUDE_FILES:
+                continue
+            yield file_path, file_path.relative_to(job_dir)
 
 
 def _write_artifacts_zip(
