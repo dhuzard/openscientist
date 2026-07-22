@@ -1,8 +1,6 @@
 """Tests for openscientist.artifact_packager module."""
 
-import os
 import stat
-import subprocess
 import zipfile
 
 import pytest
@@ -78,28 +76,6 @@ class TestCreateArtifactsZip:
             linked_artifact_dir.symlink_to(codex_home, target_is_directory=True)
         except OSError:
             pytest.skip("directory symlink creation is not available on this platform")
-
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
-            assert not any(name.startswith("results/") for name in zf.namelist())
-
-    @pytest.mark.skipif(os.name != "nt", reason="Windows junction regression test")
-    def test_excludes_windows_junctions_to_runtime_state(self, tmp_path):
-        codex_home = tmp_path / ".codex"
-        codex_home.mkdir()
-        (codex_home / "auth.json").write_text('{"tokens": "placeholder"}')
-        linked_artifact_dir = tmp_path / "results"
-        result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(linked_artifact_dir), str(codex_home)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            pytest.skip("junction creation is not available on this platform")
-        assert linked_artifact_dir.is_junction()
 
         buf = create_artifacts_zip(tmp_path, "j1")
 

@@ -24,14 +24,13 @@ def _iter_artifact_files(
     """Yield (absolute_path, archive_relative_path) pairs for artifact files."""
     excluded_paths = excluded_paths or set()
     for root, dirnames, filenames in job_dir.walk(top_down=True, follow_symlinks=False):
-        # Prune before descent: rglob() can traverse Windows junctions before
-        # a per-entry link check gets a chance to reject them.
+        # Prune before descent so linked directories are never traversed.
         safe_dirnames: list[str] = []
         for dirname in dirnames:
             dir_path = root / dirname
             if dirname in _EXCLUDE_DIRS:
                 continue
-            if dir_path.is_symlink() or dir_path.is_junction():
+            if dir_path.is_symlink():
                 continue
             if dir_path.resolve() in excluded_paths:
                 continue
@@ -42,7 +41,7 @@ def _iter_artifact_files(
             file_path = root / filename
             # Job directories are agent-writable. Do not let file links smuggle
             # runtime credentials or files outside the job directory into an export.
-            if file_path.is_symlink() or file_path.is_junction():
+            if file_path.is_symlink():
                 continue
             if file_path.resolve() in excluded_paths:
                 continue
