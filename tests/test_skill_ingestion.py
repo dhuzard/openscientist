@@ -754,7 +754,7 @@ class TestBuiltinSkillsIngestion:
         stats = await ingester.sync_source(db_session, source)
 
         assert stats["errors"] == 0
-        assert stats["created"] == 10
+        assert stats["created"] == 11
 
         # Verify all expected slugs are present
         stmt = select(Skill).where(Skill.source_id == source.id)
@@ -763,6 +763,7 @@ class TestBuiltinSkillsIngestion:
 
         expected_slugs = {
             "data-science",
+            "digital-ventilated-cage-analysis",
             "genomics",
             "jgi-lakehouse",
             "kbase-query",
@@ -775,10 +776,10 @@ class TestBuiltinSkillsIngestion:
         }
         assert set(skills.keys()) == expected_slugs
 
-        # Verify 6 domain + 4 workflow category split
+        # Verify 7 domain + 4 workflow category split
         domain_skills = [s for s in skills.values() if s.category == "domain"]
         workflow_skills = [s for s in skills.values() if s.category == "workflow"]
-        assert len(domain_skills) == 6
+        assert len(domain_skills) == 7
         assert len(workflow_skills) == 4
 
         # Spot-check one skill's metadata
@@ -792,3 +793,9 @@ class TestBuiltinSkillsIngestion:
             phenix_reference.description
             == "Reference of available Phenix commands for structural biology analysis"
         )
+
+        dvc = skills["digital-ventilated-cage-analysis"]
+        assert dvc.name == "Digital Ventilated Cage Analysis"
+        assert "Type 1" in (dvc.description or "")
+        assert "vendor RDI" in dvc.content
+        assert "UDWA CV irregularity proxy" in dvc.content
