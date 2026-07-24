@@ -96,18 +96,22 @@ review before it controls an analysis.
 6. Recompute Type 2 group mean, sample SD, and conventional SEM independently.
    Preserve the vendor field as `vendor_group_sem`; never silently rename or
    reinterpret it when it matches another statistic.
-7. Assess metadata by scientific consequence. Ask a small number of prioritized
+7. Resolve each requested metric to a versioned contract. When the vendor
+   documentation is incomplete or conflicts with an implementation, keep the
+   values separately named and prepare focused clarification questions for
+   Tecniplast.
+8. Assess metadata by scientific consequence. Ask a small number of prioritized
    questions that would change the plan; do not summarize readiness with a
    generic completeness percentage alone.
-8. Propose a guarded plan. Mark blocked steps and the metadata or approval that
+9. Propose a guarded plan. Mark blocked steps and the metadata or approval that
    would unblock each one.
-9. Execute only supported deterministic tools with explicit parameters and
+10. Execute only supported deterministic tools with explicit parameters and
    versions. Capture warnings and failures as evidence.
-10. Replan after QC. If an event overlaps missing or low-coverage intervals,
+11. Replan after QC. If an event overlaps missing or low-coverage intervals,
     propose a retain-versus-approved-mask sensitivity analysis.
-11. Select literature for the exact scientific claim, record applicability and
+12. Select literature for the exact scientific claim, record applicability and
     conflicts, and distinguish prior evidence from the current result.
-12. Report evidence-linked results, sensitivity analyses, limitations,
+13. Report evidence-linked results, sensitivity analyses, limitations,
     unresolved questions, and negative or inconclusive findings.
 
 ## Export contracts
@@ -189,9 +193,70 @@ Do not conflate two different contracts:
 - UDWA revision `1291a968` implements `compute_rdi` as the coefficient of
   variation of binned summed activity: `sample SD / mean`.
 
-Label the UDWA result `UDWA CV irregularity proxy` unless an export-contract
-validation establishes equivalence. Never compare it numerically with vendor
-RDI as though they were the same metric.
+Use three unambiguous names and provenances:
+
+- `vendor_rdi` for the value exported by DVC Analytics. Treat it as a recorded
+  vendor result.
+- `legacy_udwa_rdi_proxy` or `cv_irregularity` for the existing UDWA
+  coefficient-of-variation computation. Describe it as the
+  `UDWA CV irregularity proxy`.
+- `sample_entropy_candidate` for any independently implemented, fully
+  parameterized sample-entropy calculation that has not passed vendor
+  conformance testing.
+
+Do not transform CV into sample entropy, relabel an old CV result, or compare
+the proxy numerically with vendor RDI as though they were the same metric. CV
+does not use observation order; sample entropy does. Use an original-versus-
+shuffled-series check as a minimum discriminating test because shuffling
+preserves CV while generally changing sample entropy.
+
+Before reproducing vendor RDI, obtain or explicitly mark unknown:
+
+- the exact ALI-smoothed input, sampling interval, preprocessing, and
+  light/dark window boundaries;
+- sample-entropy embedding dimension, tolerance and normalization, distance
+  function, and self-match convention;
+- missing-value, gap, constant-series, low-activity, and short-series behavior;
+- minimum observation count, scaling, clipping, rounding, and software-version
+  dependencies.
+
+Request vendor-backed golden fixtures containing the exact input series and
+exported RDI for constant, periodic, random, shuffled, scaled, sparse, gapped,
+low-activity, and short-phase cases across cages and software versions.
+Predeclare the numerical tolerance and required fixture coverage. Promote
+`sample_entropy_candidate` to `vendor_rdi_recomputed` only after the complete
+contract is versioned and the implementation passes those fixtures. Treat
+algorithmic conformance and biological validity as separate validations.
+
+If Tecniplast does not disclose enough detail, keep `vendor_rdi` as a
+proprietary black-box output and report the open sample-entropy metric
+separately. Preserve historical proxy results with their original code revision
+and parameters; never overwrite them or silently recompute them under a new
+name.
+
+### Vendor metric clarification
+
+When a Tecniplast metric is ambiguous, internally inconsistent, or
+insufficiently specified, tell the user that OpenScientist can prepare specific
+questions for Tecniplast if they are willing to provide further explanation.
+Do not contact Tecniplast without the user's authorization.
+
+Ask only questions whose answers would change computation or interpretation.
+For each question, include the metric and Analytics version, the precise manual
+statement or observed discrepancy, a minimal example where useful, and the
+decision the answer will unblock. Prioritize:
+
+- exact input signal and preprocessing;
+- formula, parameters, thresholds, and units;
+- temporal and group aggregation;
+- missing-data, event, boundary, and edge-case behavior;
+- export-field meaning, precision, and software-version changes;
+- availability of reference outputs or conformance fixtures.
+
+Record a response as vendor-provided contract evidence with its date, responder,
+document or correspondence reference, affected software versions, and any
+remaining ambiguity. Do not treat a private clarification as peer-reviewed
+biological validation.
 
 ### Rest and wake
 
@@ -317,6 +382,8 @@ Block or narrow the plan when:
 - the requested claim requires a tool, model, or vendor formula that is not
   implemented or contract-validated;
 - vendor and UDWA definitions conflict;
+- a candidate or legacy proxy is presented as equivalent to a vendor metric
+  without a versioned contract and conformance evidence;
 - exclusions, baseline overrides, group-mean imputation, or causal conclusions
   lack approval.
 

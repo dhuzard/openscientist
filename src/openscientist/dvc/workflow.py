@@ -222,6 +222,7 @@ EVALUATION_WEIGHTS = {
 
 MANDATORY_GATES = (
     "numerical fidelity with UDWA for identical approved parameters",
+    "no vendor metric equivalence without a versioned contract and conformance evidence",
     "no unsupported biological grouping",
     "no individual-animal attribution from group-housed cage signals",
     "no ZT or light/dark interpretation without a light schedule",

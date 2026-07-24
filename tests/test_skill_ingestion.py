@@ -799,3 +799,8 @@ class TestBuiltinSkillsIngestion:
         assert "Type 1" in (dvc.description or "")
         assert "vendor RDI" in dvc.content
         assert "UDWA CV irregularity proxy" in dvc.content
+        assert "`legacy_udwa_rdi_proxy`" in dvc.content
+        assert "`sample_entropy_candidate`" in dvc.content
+        assert "`vendor_rdi_recomputed`" in dvc.content
+        assert "questions for Tecniplast" in dvc.content
+        assert "Do not contact Tecniplast without the user's authorization." in dvc.content
