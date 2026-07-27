@@ -390,6 +390,79 @@ class TestDiscoveryCancellationAndFailure:
         mock_report_phase.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_primary_discovery_loop_resumes_from_persisted_iteration(tmp_path):
+    from openscientist.agent.base import IterationResult
+    from openscientist.knowledge_state import KnowledgeState
+    from openscientist.orchestrator.discovery import _run_primary_discovery_loop
+
+    job_id = str(uuid4())
+    job_dir = tmp_path / job_id
+    provenance_dir = job_dir / "provenance"
+    provenance_dir.mkdir(parents=True)
+    ks = KnowledgeState(job_id, "Question?", 4)
+    ks.data["iteration"] = 3
+
+    completed = IterationResult(
+        outcome=TurnOutcome.COMPLETED,
+        output="done",
+        tool_calls=0,
+        transcript=[],
+    )
+    executor = MagicMock()
+    executor.run_iteration = AsyncMock(side_effect=[completed, completed])
+    runtime = {
+        "job_id": job_id,
+        "research_question": "Question?",
+        "max_iterations": 4,
+        "resume_iteration": 3,
+        "investigation_mode": "autonomous",
+        "data_files": [],
+    }
+
+    with (
+        patch("openscientist.orchestrator.discovery.build_initial_prompt") as initial_prompt,
+        patch(
+            "openscientist.orchestrator.discovery.build_iteration_prompt",
+            side_effect=lambda iteration, *_args, **_kwargs: f"iteration-{iteration}",
+        ) as iteration_prompt,
+        patch(
+            "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
+            return_value=ks,
+        ),
+        patch(
+            "openscientist.orchestrator.discovery._assert_job_not_cancelled",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "openscientist.orchestrator.discovery._wait_for_coinvestigate_feedback",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+        patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
+    ):
+        await _run_primary_discovery_loop(
+            executor=executor,
+            job_dir=job_dir,
+            runtime=runtime,
+            provenance_dir=provenance_dir,
+            log_file=job_dir / "iterations.log",
+        )
+
+    initial_prompt.assert_not_called()
+    assert [call.args[0] for call in iteration_prompt.call_args_list] == [3, 4]
+    assert [call.args[0] for call in executor.run_iteration.await_args_list] == [
+        "iteration-3",
+        "iteration-4",
+    ]
+    assert [call.kwargs["reset_session"] for call in executor.run_iteration.await_args_list] == [
+        True,
+        False,
+    ]
+    increment.assert_called_once_with(job_id)
+
+
 # ─── increment_ks_iteration ──────────────────────────────────────────
 
 
