@@ -1,7 +1,7 @@
 """Figure inventory builder.
 
-Scans provenance/ for plot PNGs and their JSON metadata to build a catalog
-of available figures for the report agent.
+Scans provenance/ and plots/ for plot PNGs and their JSON metadata to build a
+catalog of available figures for the report agent.
 """
 
 from __future__ import annotations
@@ -27,64 +27,67 @@ class FigureCard:
 
 
 def build_figure_inventory(job_dir: Path) -> list[FigureCard]:
-    """Scan provenance/*.json + orphaned *.png for plot metadata.
+    """Scan figure directories for adjacent JSON metadata and orphaned PNGs.
 
     Primary: parse companion JSON metadata files.
     Fallback: create synthetic entries for PNGs without JSON metadata.
 
     Args:
-        job_dir: Root job directory containing provenance/.
+        job_dir: Root job directory containing provenance/ and/or plots/.
 
     Returns:
         List of FigureCard entries sorted by iteration then filename.
     """
-    provenance_dir = job_dir / "provenance"
-    if not provenance_dir.exists():
+    figure_dirs = [path for path in (job_dir / "provenance", job_dir / "plots") if path.exists()]
+    if not figure_dirs:
         return []
 
     cards: list[FigureCard] = []
     seen_pngs: set[str] = set()
 
     # Primary: scan JSON metadata files for plot info
-    for json_file in sorted(provenance_dir.glob("*.json")):
-        png_file = json_file.with_suffix(".png")
-        if not png_file.exists():
-            continue
+    for figure_dir in figure_dirs:
+        for json_file in sorted(figure_dir.glob("*.json")):
+            png_file = json_file.with_suffix(".png")
+            if not png_file.exists() or png_file.name in seen_pngs:
+                continue
 
-        try:
-            metadata = json.loads(json_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            logger.debug("Skipping unreadable metadata: %s", json_file)
-            continue
+            try:
+                metadata = json.loads(json_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                logger.debug("Skipping unreadable metadata: %s", json_file)
+                continue
 
-        # Skip non-plot JSON files (e.g. iteration transcripts)
-        if "iteration" not in metadata and "description" not in metadata:
-            continue
+            # Skip non-plot JSON files (e.g. iteration transcripts)
+            if "iteration" not in metadata and "description" not in metadata:
+                continue
 
-        seen_pngs.add(png_file.name)
-        cards.append(
-            FigureCard(
-                figure_id=png_file.stem,
-                filename=png_file.name,
-                path=png_file,
-                iteration=metadata.get("iteration"),
-                description=metadata.get("description", ""),
-                finding_ids=metadata.get("finding_ids", []),
+            seen_pngs.add(png_file.name)
+            cards.append(
+                FigureCard(
+                    figure_id=png_file.stem,
+                    filename=png_file.name,
+                    path=png_file,
+                    iteration=metadata.get("iteration"),
+                    description=metadata.get("description", ""),
+                    finding_ids=metadata.get("finding_ids", []),
+                )
             )
-        )
 
     # Fallback: orphaned PNGs without JSON metadata
-    for png_file in sorted(provenance_dir.glob("*.png")):
-        if png_file.name in seen_pngs:
-            continue
-        cards.append(
-            FigureCard(
-                figure_id=png_file.stem,
-                filename=png_file.name,
-                path=png_file,
-                description=png_file.stem.replace("_", " ").title(),
+    for figure_dir in figure_dirs:
+        for png_file in sorted(figure_dir.glob("*.png")):
+            if png_file.name in seen_pngs:
+                continue
+            seen_pngs.add(png_file.name)
+            cards.append(
+                FigureCard(
+                    figure_id=png_file.stem,
+                    filename=png_file.name,
+                    path=png_file,
+                    description=png_file.stem.replace("_", " ").title(),
+                )
             )
-        )
 
     # Sort by iteration (None last) then filename
     cards.sort(key=lambda c: (c.iteration if c.iteration is not None else 9999, c.filename))
