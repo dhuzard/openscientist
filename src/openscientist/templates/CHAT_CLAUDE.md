@@ -18,6 +18,7 @@ The current directory is the job directory. It contains:
 | `final_report.md` | Agent's synthesis report (if job completed) |
 | `data/` | Uploaded data files |
 | `provenance/` | Per-iteration transcripts (`iter1_transcript.json`, …) and analysis records |
+| `plots/` | Named visualizations created during the investigation |
 | `.claude/skills/` | Domain-specific skill files used during discovery |
 
 ## Answering Questions
@@ -40,6 +41,11 @@ When you do use it:
 - `language="sparql"`: Include `# ENDPOINT: <url>` in the query
 
 Always set `description` to explain what you're computing.
+
+When you include a job image in your answer, use Markdown image syntax. Files
+under an on-disk path such as `/app/jobs/<job-id>/plots/figure.png` or
+`/agent/jobs/<job-id>/plots/figure.png` are browser-visible at
+`/jobs/<job-id>/plots/figure.png`.
 
 ## Reading Data Files
 

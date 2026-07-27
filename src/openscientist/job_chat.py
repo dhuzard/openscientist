@@ -7,6 +7,7 @@ access to tools (execute_code, search_pubmed, etc.) for follow-up analysis.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -19,6 +20,34 @@ from openscientist.database.session import AsyncSessionLocal
 from openscientist.knowledge_state import KnowledgeState
 
 logger = logging.getLogger(__name__)
+
+_RELATIVE_ARTIFACT_LINK_RE = re.compile(
+    r"(?P<prefix>\]\(|\bsrc=[\"'])"
+    r"(?P<path>(?:\./)?(?:plots|provenance)/[^)\"'\s]+)"
+)
+
+
+def normalize_chat_artifact_links(content: str, job_id: UUID | str) -> str:
+    """Translate agent-container artifact paths into browser-visible job URLs.
+
+    Chat agents work below ``/app/jobs`` or ``/agent/jobs``, while NiceGUI
+    exposes the same files below ``/jobs``.  Also make bare ``plots/...`` and
+    ``provenance/...`` Markdown/HTML targets absolute so they do not resolve
+    relative to the job-detail page.
+    """
+    job_id_text = str(job_id)
+    normalized = content
+    for container_root in ("/app/jobs", "/agent/jobs"):
+        normalized = normalized.replace(
+            f"{container_root}/{job_id_text}/",
+            f"/jobs/{job_id_text}/",
+        )
+
+    def _replace_relative(match: re.Match[str]) -> str:
+        path = match.group("path").removeprefix("./")
+        return f"{match.group('prefix')}/jobs/{job_id_text}/{path}"
+
+    return _RELATIVE_ARTIFACT_LINK_RE.sub(_replace_relative, normalized)
 
 
 async def _load_research_question_from_db(job_id: str) -> str | None:
@@ -214,7 +243,10 @@ async def send_chat_message(
         Exception: If executor call fails
     """
     # Use executor (context is read on-demand by the agent from job_dir files)
-    assistant_message = await _send_message_via_executor(session, job_id, message, job_dir)
+    assistant_message = normalize_chat_artifact_links(
+        await _send_message_via_executor(session, job_id, message, job_dir),
+        job_id,
+    )
 
     # Store both messages in database
     user_msg = JobChatMessage(

@@ -23,7 +23,11 @@ from openscientist.auth import get_current_user_id, is_current_user_admin, requi
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session_ctx
 from openscientist.job.types import JobInfo, JobStatus
-from openscientist.job_chat import get_chat_history, send_chat_message
+from openscientist.job_chat import (
+    get_chat_history,
+    normalize_chat_artifact_links,
+    send_chat_message,
+)
 from openscientist.job_manager import _db_get_job, _db_get_share_permission
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
@@ -1571,7 +1575,9 @@ class _ChatTabController:
         with ui.row().classes("items-start gap-2 mb-3"):
             ui.html(_CHAT_AVATAR_HTML)
             with ui.element("div").classes("chat-bubble-assistant"):
-                ui.markdown(content).classes("text-sm")
+                ui.markdown(normalize_chat_artifact_links(content, self.context.job_id)).classes(
+                    "text-sm"
+                )
 
     def _render_empty_state(self) -> None:
         with ui.column().classes("w-full items-center py-8"):

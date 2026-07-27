@@ -27,6 +27,25 @@ logger = logging.getLogger(__name__)
 _FIGURE_START_RE = re.compile(r"^(?! {4}|\t)\s*\{\{figure:")
 
 
+def _find_image_path(provenance_dir: Path, reference: str) -> Path | None:
+    """Find a report image in either legacy ``provenance/`` or ``plots/``.
+
+    The managed code executor writes figures to ``provenance/``. Some agent
+    backends and older jobs write named figures to ``plots/`` instead, so both
+    locations are part of the report's figure store.
+    """
+    ref = Path(reference)
+    candidates = [
+        provenance_dir / ref,
+        provenance_dir.parent / ref,
+        provenance_dir.parent / "plots" / ref.name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 class FigureBlockProcessor(BlockProcessor):
     """Convert ``{{figure:filename|caption=...|width=...}}`` blocks to <figure> elements."""
 
@@ -64,9 +83,14 @@ class FigureBlockProcessor(BlockProcessor):
         caption = params.get("caption", "")
         width = params.get("width", "")
 
-        image_path = self.provenance_dir / filename
-        if not image_path.exists():
-            logger.warning("Figure not found: %s", image_path)
+        image_path = _find_image_path(self.provenance_dir, filename)
+        if image_path is None:
+            logger.warning(
+                "Figure not found in %s or %s: %s",
+                self.provenance_dir,
+                self.provenance_dir.parent / "plots",
+                filename,
+            )
             if caption:
                 p = etree.SubElement(parent, "p")
                 p.text = f"[Figure: {caption}]"
@@ -113,12 +137,9 @@ class ImageSrcTreeProcessor(Treeprocessor):
                 if not src or src.startswith(("http://", "https://", "data:", "file://")):
                     continue
 
-                # Try resolving relative to provenance dir
-                image_path = self.provenance_dir / Path(src).name
-                if not image_path.exists():
-                    image_path = self.provenance_dir.parent / src
-                    if not image_path.exists():
-                        continue
+                image_path = _find_image_path(self.provenance_dir, src)
+                if image_path is None:
+                    continue
 
                 resolved = _resolve_image_src(image_path, self.use_base64)
                 alt = child.get("alt", "")

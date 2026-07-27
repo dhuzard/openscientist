@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openscientist.agent.base import AbstractAgent, AgentConfig, IterationResult, TurnOutcome
 from openscientist.database.models import Job, JobChatMessage, User
 from openscientist.database.rls import set_current_user
-from openscientist.job_chat import get_chat_history, load_job_context, send_chat_message
+from openscientist.job_chat import (
+    get_chat_history,
+    load_job_context,
+    normalize_chat_artifact_links,
+    send_chat_message,
+)
 from openscientist.providers.base import Provider
 from tests.helpers import StubClaudeProvider as _ChatProvider
 from tests.helpers import enable_rls
@@ -508,6 +513,23 @@ async def test_send_chat_message_success(
     assert history[0].content == "What are the main findings?"
     assert history[1].role == "assistant"
     assert history[1].content == "The main findings indicate..."
+
+
+def test_normalize_chat_artifact_links_translates_container_path() -> None:
+    job_id = UUID("1db3e835-d47a-4cef-967a-a3131ca5c55e")
+    content = "![Profile](/app/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png)"
+
+    assert normalize_chat_artifact_links(content, job_id) == (
+        "![Profile](/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png)"
+    )
+
+
+def test_normalize_chat_artifact_links_makes_relative_plot_absolute() -> None:
+    job_id = UUID("1db3e835-d47a-4cef-967a-a3131ca5c55e")
+
+    assert normalize_chat_artifact_links("![Profile](plots/reference.png)", job_id) == (
+        "![Profile](/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png)"
+    )
 
 
 @pytest.mark.asyncio
