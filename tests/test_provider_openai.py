@@ -79,6 +79,7 @@ def test_get_cost_info_unavailable() -> None:
     info = OpenAIDirectProvider().get_cost_info()
     assert info.total_spend_usd is None
     assert info.recent_spend_usd is None
+    assert "Admin API key" in (info.data_lag_note or "")
 
 
 def test_budget_cost_info_uses_recorded_costs() -> None:

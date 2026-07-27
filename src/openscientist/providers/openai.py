@@ -62,7 +62,10 @@ class OpenAIDirectProvider(CodexCompatible):
             total_spend_usd=None,
             recent_spend_usd=None,
             recent_period_hours=lookback_hours,
-            data_lag_note="OpenAI per-key cost tracking is not available.",
+            data_lag_note=(
+                "OpenAI organization cost data requires a separate Admin API key; "
+                "the inference credential cannot query it."
+            ),
         )
 
     def llm_upstream(self) -> LlmUpstream | None:
