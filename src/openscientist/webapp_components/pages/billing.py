@@ -9,25 +9,53 @@ from openscientist.database.models import CostRecord
 from openscientist.database.session import get_admin_session
 from openscientist.providers import get_provider
 from openscientist.webapp_components.ui_components import render_empty_state, render_stat_badges
+from openscientist.webapp_components.utils.client_guard import guard_client, setup_timer_cleanup
 
 logger = logging.getLogger(__name__)
 
 
 async def render_billing_panel() -> None:
     """Render the billing panel (for use as an admin subtab)."""
+    active_timers = setup_timer_cleanup()
+
     with ui.column().classes("w-full gap-6"):
-        await _render_db_cost_section()
-        _render_provider_cost_section()
+
+        @ui.refreshable
+        def render_billing_snapshot(cost_records: list[CostRecord]) -> None:
+            _render_db_cost_records(cost_records)
+            _render_provider_cost_section()
+
+        render_billing_snapshot(await _load_cost_records())
+
+        @guard_client
+        async def refresh_billing_snapshot() -> None:
+            render_billing_snapshot.refresh(await _load_cost_records())
+
+        active_timers.append(ui.timer(5.0, refresh_billing_snapshot))
+
+
+async def _load_cost_records() -> list[CostRecord]:
+    """Load cost rows for the live billing summary."""
+    async with get_admin_session() as session:
+        records = await session.execute(select(CostRecord).order_by(CostRecord.created_at.desc()))
+        return list(records.scalars().all())
 
 
 async def _render_db_cost_section() -> None:
-    """Query CostRecord and display per-job cost breakdown."""
-    async with get_admin_session() as session:
-        records = await session.execute(select(CostRecord).order_by(CostRecord.created_at.desc()))
-        cost_records = records.scalars().all()
+    """Query CostRecord and display per-turn cost breakdown."""
+    _render_db_cost_records(await _load_cost_records())
+
+
+def _render_db_cost_records(cost_records: list[CostRecord]) -> None:
+    """Display a snapshot of recorded costs."""
+    ui.label("Live estimates refresh every 5 seconds after each completed agent turn.").classes(
+        "text-sm text-grey-6"
+    )
 
     if not cost_records:
-        render_empty_state("No cost records yet. Costs are recorded when jobs complete.")
+        render_empty_state(
+            "No cost records yet. Costs appear after the first agent turn completes."
+        )
         return
 
     total_input = sum(r.input_tokens for r in cost_records)
@@ -84,7 +112,7 @@ def _render_provider_cost_section() -> None:
 
         try:
             provider = get_provider()
-            cost_info = provider.get_cost_info(lookback_hours=24)
+            cost_info = provider.get_budget_cost_info(lookback_hours=24)
             budget_check = provider.evaluate_budget(cost_info)
 
             with ui.row().classes("w-full gap-8 mb-4"):

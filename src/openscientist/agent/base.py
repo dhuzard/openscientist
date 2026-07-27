@@ -228,6 +228,11 @@ class AbstractAgent[P: Provider](abc.ABC):
     def total_tokens(self) -> TokenUsage:
         return self._token_usage
 
+    @property
+    def effective_model_name(self) -> str | None:
+        """Model id used by this agent execution, when known."""
+        return self._provider.effective_model_name()
+
     @abc.abstractmethod
     async def run_iteration(
         self, prompt: str, *, reset_session: bool = False

@@ -160,6 +160,11 @@ Budget limits are checked before job creation. The web UI displays:
 - Recent spend (last 24h)
 - Budget remaining (if provider supports it)
 
+For OpenAI, budget checks automatically use estimated costs recorded after each
+OpenScientist agent turn because ordinary API keys cannot read organization
+billing data. Running jobs therefore update the local counter between turns.
+These estimates do not include OpenAI usage outside this app.
+
 ### Other Settings
 
 ```bash

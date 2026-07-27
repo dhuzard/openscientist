@@ -33,6 +33,10 @@ class OpenAIDirectProvider(CodexCompatible):
     def display_name(self) -> str:
         return "OpenAI API"
 
+    @property
+    def use_recorded_cost_fallback(self) -> bool:
+        return True
+
     def validate_required_config(self) -> list[str]:
         # Auth is satisfied by an API key, a configured codex auth file (which
         # the container runner provisions into the per-job CODEX_HOME), or a
@@ -50,13 +54,18 @@ class OpenAIDirectProvider(CodexCompatible):
         ]
 
     def get_cost_info(self, lookback_hours: int = 24) -> CostInfo:
-        # OpenAI exposes no simple per-key spend endpoint, so report unavailable.
+        # OpenAI's organization Costs API requires a separate Admin API key and
+        # cannot scope costs to the inference key. Application budget checks
+        # therefore opt into the local cost-record fallback above.
         return CostInfo(
             provider_name=self.display_name,
             total_spend_usd=None,
             recent_spend_usd=None,
             recent_period_hours=lookback_hours,
-            data_lag_note="OpenAI per-key cost tracking is not available.",
+            data_lag_note=(
+                "OpenAI organization cost data requires a separate Admin API key; "
+                "the inference credential cannot query it."
+            ),
         )
 
     def llm_upstream(self) -> LlmUpstream | None:

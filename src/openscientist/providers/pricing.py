@@ -62,7 +62,13 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
     Returns 0.0 if no pricing entry is found.
     """
     pricing = _get_litellm_pricing()
-    entry = pricing.get(model) or pricing.get(normalize_model_name(model))
+    normalized = normalize_model_name(model)
+    entry = (
+        pricing.get(model)
+        or pricing.get(normalized)
+        or _FALLBACK_PRICING.get(model)
+        or _FALLBACK_PRICING.get(normalized)
+    )
     if not entry:
         return 0.0
     in_rate = float(entry.get("input_cost_per_token", 0.0))
@@ -72,6 +78,7 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
 
 # Fallback used only when the remote fetch fails and the cache is empty.
 _FALLBACK_PRICING: dict[str, Any] = {
+    "gpt-5.5": {"input_cost_per_token": 5e-6, "output_cost_per_token": 30e-6},
     "claude-opus-4-6": {"input_cost_per_token": 15e-6, "output_cost_per_token": 75e-6},
     "claude-sonnet-4-6": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
     "claude-sonnet-4-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},

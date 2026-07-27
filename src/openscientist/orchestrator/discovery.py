@@ -202,7 +202,14 @@ async def _run_primary_discovery_loop(
     )
 
     logger.info("Iteration 1/%d: Starting session", max_iterations)
-    result = await executor.run_iteration(initial_prompt, reset_session=True)
+    result = await _run_cost_tracked_iteration(
+        executor,
+        job_id,
+        initial_prompt,
+        reset_session=True,
+        iteration=1,
+        operation_type="discovery",
+    )
     _check_turn_outcome(result, 1)
 
     _sync_version_metadata_if_available(job_id)
@@ -255,7 +262,14 @@ async def _run_primary_discovery_loop(
             "fresh session" if should_reset else "continuing",
         )
 
-        result = await executor.run_iteration(iteration_prompt, reset_session=should_reset)
+        result = await _run_cost_tracked_iteration(
+            executor,
+            job_id,
+            iteration_prompt,
+            reset_session=should_reset,
+            iteration=iteration,
+            operation_type="discovery",
+        )
         _check_turn_outcome(result, iteration)
         _append_iteration_artifacts(
             provenance_dir=provenance_dir,
@@ -431,7 +445,13 @@ async def _run_report_turn(
     )
     logger.info("Report generation turn (prompt: %d chars)", len(prompt))
 
-    result = await executor.run_iteration(prompt, reset_session=False)
+    result = await _run_cost_tracked_iteration(
+        executor,
+        job_dir.name,
+        prompt,
+        reset_session=False,
+        operation_type="report",
+    )
     for attempt in range(1, _MAX_REPORT_ATTEMPTS + 1):
         if _ensure_report_written(report_path, result, baseline_mtime_ns=baseline_mtime_ns):
             if attempt > 1:
@@ -442,7 +462,9 @@ async def _run_report_turn(
         logger.warning(
             "Report file missing after attempt %d/%d; re-asking", attempt, _MAX_REPORT_ATTEMPTS
         )
-        result = await executor.run_iteration(
+        result = await _run_cost_tracked_iteration(
+            executor,
+            job_dir.name,
             build_report_retry_prompt(
                 research_question,
                 ks,
@@ -452,6 +474,7 @@ async def _run_report_turn(
                 context_window_tokens=context_window_tokens,
             ),
             reset_session=False,
+            operation_type="report",
         )
     logger.error("Report file not written after %d attempts", _MAX_REPORT_ATTEMPTS)
     return result, False
@@ -477,7 +500,13 @@ async def _set_consensus_answer(
             if attempt == 1
             else build_consensus_retry_prompt(research_question)
         )
-        await executor.run_iteration(prompt, reset_session=False)
+        await _run_cost_tracked_iteration(
+            executor,
+            job_dir.name,
+            prompt,
+            reset_session=False,
+            operation_type="consensus",
+        )
         current = KnowledgeState.load_from_database_sync(job_dir.name).data.get("consensus_answer")
         if current and current != baseline:
             if attempt > 1:
@@ -600,23 +629,15 @@ def get_version_metadata() -> dict[str, str]:
     return metadata
 
 
-_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
-    "Anthropic": "claude-sonnet-4-20250514",
-    "CBORG": "claude-sonnet-4-20250514",
-    "Vertex AI": "claude-sonnet-4-5@20250929",
-    "AWS Bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "Azure AI Foundry": "claude-sonnet-4-5",
-}
-
-
 async def _persist_job_cost_record(
     job_id: str,
     tokens: TokenUsage,
     provider_name: str,
     model_name: str,
     operation_type: str = "discovery",
+    iteration: int | None = None,
 ) -> None:
-    """Write a CostRecord for the completed job execution."""
+    """Write a CostRecord for one completed agent turn."""
     from openscientist.database.models import CostRecord
     from openscientist.providers.pricing import estimate_cost_usd
 
@@ -624,7 +645,7 @@ async def _persist_job_cost_record(
     async with AsyncSessionLocal(thread_safe=True) as session:
         record = CostRecord(
             job_id=UUID(job_id),
-            iteration=None,
+            iteration=iteration,
             operation_type=operation_type,
             provider=provider_name,
             model=model_name,
@@ -636,11 +657,58 @@ async def _persist_job_cost_record(
         await session.commit()
 
 
+async def _run_cost_tracked_iteration(
+    executor: AbstractAgent[Provider],
+    job_id: str,
+    prompt: str,
+    *,
+    reset_session: bool,
+    operation_type: str,
+    iteration: int | None = None,
+) -> IterationResult:
+    """Run one model turn and immediately record its incremental token cost."""
+    current_usage = getattr(executor, "total_tokens", None)
+    before = TokenUsage(**vars(current_usage)) if isinstance(current_usage, TokenUsage) else None
+    result = await executor.run_iteration(prompt, reset_session=reset_session)
+    after = getattr(executor, "total_tokens", None)
+    if before is None or not isinstance(after, TokenUsage):
+        return result
+    delta = TokenUsage(
+        input_tokens=max(0, after.input_tokens - before.input_tokens),
+        output_tokens=max(0, after.output_tokens - before.output_tokens),
+        cache_write_tokens=max(0, after.cache_write_tokens - before.cache_write_tokens),
+        cache_read_tokens=max(0, after.cache_read_tokens - before.cache_read_tokens),
+        reasoning_tokens=max(0, after.reasoning_tokens - before.reasoning_tokens),
+    )
+    if not any(vars(delta).values()):
+        return result
+
+    try:
+        provider = getattr(executor, "provider", None) or get_provider()
+        model_name = (
+            getattr(executor, "effective_model_name", None)
+            or provider.effective_model_name()
+            or "unknown"
+        )
+        await _persist_job_cost_record(
+            job_id,
+            delta,
+            provider.display_name,
+            model_name,
+            operation_type,
+            iteration,
+        )
+    except Exception as cost_err:
+        logger.warning("Failed to persist live cost record for job %s: %s", job_id, cost_err)
+    return result
+
+
 async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> None:
-    """Log token usage, persist a cost record, and shut the executor down.
+    """Log cumulative token usage and shut the executor down.
 
     Shared ``finally`` handling for both the full discovery run and the
-    report-only regeneration run so neither leaks the executor or its cost.
+    report-only regeneration run. Individual turns persist their incremental
+    cost as soon as they finish, so finalization must not record them again.
     """
     tokens = executor.total_tokens
     logger.info(
@@ -648,17 +716,6 @@ async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> 
         tokens.input_tokens,
         tokens.output_tokens,
     )
-    try:
-        settings = get_settings()
-        provider = get_provider()
-        model_name = (
-            settings.provider.model
-            or settings.provider.anthropic_default_sonnet_model
-            or _PROVIDER_DEFAULT_MODELS.get(provider.display_name, "unknown")
-        )
-        await _persist_job_cost_record(job_id, tokens, provider.display_name, model_name)
-    except Exception as cost_err:
-        logger.warning("Failed to persist cost record for job %s: %s", job_id, cost_err)
     await executor.shutdown()
 
 

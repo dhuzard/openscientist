@@ -946,7 +946,7 @@ class JobManager:
         # Get project-level cost info from provider
         try:
             provider = get_provider()
-            cost_info = provider.get_cost_info(lookback_hours=24)
+            cost_info = provider.get_budget_cost_info(lookback_hours=24)
             budget_check = provider.evaluate_budget(cost_info)
         except (ValueError, ProviderError) as e:
             logger.warning("Could not fetch cost info: %s", e)
