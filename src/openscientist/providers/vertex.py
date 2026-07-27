@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openscientist.exceptions import ProviderError
-from openscientist.providers.base import ClaudeCompatible, CostInfo
+from openscientist.providers.base import AirgapEgress, AirgapPosture, ClaudeCompatible, CostInfo
 from openscientist.settings import get_settings
 
 from ._anthropic_common import (
@@ -81,6 +81,16 @@ class VertexProvider(ClaudeCompatible):
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
         return get_settings().provider.model or "claude-sonnet-4-5@20250929"
+
+    def airgap_egress(self) -> AirgapPosture:
+        region = get_settings().provider.cloud_ml_region
+        return AirgapPosture(
+            AirgapEgress.DIRECT,
+            direct_endpoints=(
+                (f"{region}-aiplatform.googleapis.com", 443),
+                ("oauth2.googleapis.com", 443),
+            ),
+        )
 
     def _validate_optional_config(self) -> list[str]:
         """Check optional Vertex AI configuration."""

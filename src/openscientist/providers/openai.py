@@ -11,7 +11,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
+from openscientist.providers.base import (
+    LLM_PROXY_URL_ENV,
+    AirgapEgress,
+    AirgapPosture,
+    CodexCompatible,
+    CostInfo,
+    LlmUpstream,
+)
 from openscientist.settings import get_settings
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -69,6 +76,18 @@ class OpenAIDirectProvider(CodexCompatible):
         if get_settings().provider.openai_api_key:
             return {"OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
         return {}
+
+    def airgap_egress(self) -> AirgapPosture:
+        if get_settings().provider.openai_api_key:
+            return AirgapPosture(AirgapEgress.PROXY)
+        return AirgapPosture(
+            AirgapEgress.UNSUPPORTED,
+            reason=(
+                "OpenAI codex ChatGPT-login cannot be air-gapped: its model turn "
+                "targets chatgpt.com over a websocket that no base-url config "
+                "redirects. Set OPENAI_API_KEY for a proxied, air-gappable setup."
+            ),
+        )
 
     def codex_config_overrides(self) -> list[str]:
         # Codex ships a built-in "openai" entry at the default endpoint. When the

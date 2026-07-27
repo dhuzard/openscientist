@@ -21,7 +21,7 @@ from starlette.routing import Route
 
 from openscientist.job_container.secrets import verify_job_placeholder
 from openscientist.providers import get_provider
-from openscientist.providers.base import LlmUpstream
+from openscientist.providers.base import AirgapEgress, LlmUpstream
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ async def start_llm_proxy() -> None:
     global _proxy_server, _proxy_task
     if _proxy_task is not None:
         return
-    if get_provider().llm_upstream() is None:
+    if get_provider().airgap_egress().mode is not AirgapEgress.PROXY:
         logger.info(
             "LLM proxy: provider %r not covered, not starting",
             get_settings().provider.provider_id,

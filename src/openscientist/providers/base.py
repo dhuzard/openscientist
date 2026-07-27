@@ -10,6 +10,7 @@ driven by the Claude Code agent or the Codex agent respectively.
 from __future__ import annotations
 
 import abc
+import enum
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -56,6 +57,23 @@ class LlmUpstream:
 
     base_url: str
     auth_headers: dict[str, str]
+
+
+class AirgapEgress(enum.Enum):
+    """How the job container reaches the LLM under air-gap, deciding the firewall allowlist."""
+
+    PROXY = "proxy"
+    DIRECT = "direct"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True)
+class AirgapPosture:
+    """A provider's air-gapped egress posture for the active configuration."""
+
+    mode: AirgapEgress
+    direct_endpoints: tuple[tuple[str, int], ...] = ()
+    reason: str = ""
 
 
 # Injected into the job container so codex's in-container config.toml points its
@@ -225,6 +243,18 @@ class Provider(abc.ABC):
     def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
         """Env that routes this provider's LLM calls through the proxy, or {}."""
         return {}
+
+    def airgap_egress(self) -> AirgapPosture:
+        """Air-gapped egress posture for the active config, read as the single
+        source of truth by the firewall and proxy-start. Pure, no network.
+        Defaults to PROXY when the provider proxies its LLM, and providers
+        override to DIRECT or UNSUPPORTED."""
+        if self.proxy_env_overrides(proxy_base_url="", placeholder=""):
+            return AirgapPosture(AirgapEgress.PROXY)
+        return AirgapPosture(
+            AirgapEgress.UNSUPPORTED,
+            reason=f"{self.display_name} cannot be air-gapped.",
+        )
 
     def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
         """Job-container provider env with LLM traffic routed through the proxy."""
