@@ -153,7 +153,11 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
         from openscientist.agent.skills import write_skills_to_claude_dir
 
-        await write_skills_to_claude_dir(self._config.job_dir, use_hypotheses=use_hypotheses)
+        await write_skills_to_claude_dir(
+            self._config.job_dir,
+            use_hypotheses=use_hypotheses,
+            skill_ids=self._config.assigned_skill_ids,
+        )
 
     def apply_runtime_environment(self) -> None:
         # Auth/routing flags for the Claude CLI and the tools subprocess.

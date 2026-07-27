@@ -323,6 +323,9 @@ async def test_cost_record_creation(db_session: AsyncSession, test_job: Job):
         model="claude-3-5-sonnet",
         input_tokens=1000,
         output_tokens=500,
+        cache_write_tokens=100,
+        cache_read_tokens=250,
+        reasoning_tokens=50,
         cost_usd=0.015,
     )
     db_session.add(cost)
@@ -332,6 +335,9 @@ async def test_cost_record_creation(db_session: AsyncSession, test_job: Job):
     assert isinstance(cost.id, UUID)
     assert cost.input_tokens == 1000
     assert cost.output_tokens == 500
+    assert cost.cache_write_tokens == 100
+    assert cost.cache_read_tokens == 250
+    assert cost.reasoning_tokens == 50
     assert cost.cost_usd == 0.015
 
 

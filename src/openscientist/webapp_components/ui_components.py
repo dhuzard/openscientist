@@ -1032,6 +1032,7 @@ def _build_navigation_items(
     nav_items: list[tuple[str, str, str, bool]] = []
     if show_new_job and can_start_jobs:
         nav_items.append(("New", "add", "/new", active_page == "new"))
+    nav_items.append(("Jobs", "work", "/jobs", active_page == "jobs"))
     nav_items.extend(
         [
             ("Skills", "school", "/skills", active_page == "skills"),
@@ -1149,7 +1150,7 @@ def render_navigator(
     Render the standard navigation header for all authenticated pages.
 
     Provides consistent navigation across the application with links to
-    New Job, Billing, Docs, and Admin pages. The OpenScientist logo/title acts
+    New Job, Jobs, Skills, API Keys, Docs, and Admin pages. The OpenScientist logo/title acts
     as a home button linking to the jobs list.
     """
     _inject_navigation_responsive_css()

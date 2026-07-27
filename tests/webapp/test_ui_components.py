@@ -13,6 +13,7 @@ from openscientist.webapp_components.ui_components import (
     OPENSCIENTIST_RELEASE_URL,
     STATUS_COLORS,
     STATUS_ICONS,
+    _build_navigation_items,
     _get_job_id_badge_html,
     _get_pubmed_badge_html,
     _inject_thinking_status_styles,
@@ -27,6 +28,48 @@ from openscientist.webapp_components.ui_components import (
     render_thinking_status,
     transform_pmid_references,
 )
+
+
+class TestNavigationItems:
+    """Tests for shared desktop and mobile navigation entries."""
+
+    def test_jobs_immediately_follows_new_job(self):
+        """Jobs should be the next navigation item after New."""
+        items = _build_navigation_items(
+            active_page=None,
+            show_new_job=True,
+            can_start_jobs=True,
+            show_admin=False,
+        )
+
+        assert [(label, route) for label, _icon, route, _active in items[:2]] == [
+            ("New", "/new"),
+            ("Jobs", "/jobs"),
+        ]
+
+    def test_jobs_remains_available_when_new_job_is_hidden(self):
+        """Users who cannot start jobs should still have a Jobs link."""
+        items = _build_navigation_items(
+            active_page=None,
+            show_new_job=True,
+            can_start_jobs=False,
+            show_admin=False,
+        )
+
+        assert items[0][:3] == ("Jobs", "work", "/jobs")
+        assert all(route != "/new" for _label, _icon, route, _active in items)
+
+    def test_jobs_item_reflects_active_page(self):
+        """Jobs should use the active navigation style on the jobs route."""
+        items = _build_navigation_items(
+            active_page="jobs",
+            show_new_job=False,
+            can_start_jobs=True,
+            show_admin=True,
+        )
+
+        jobs_item = next(item for item in items if item[2] == "/jobs")
+        assert jobs_item == ("Jobs", "work", "/jobs", True)
 
 
 class TestStatusConstants:

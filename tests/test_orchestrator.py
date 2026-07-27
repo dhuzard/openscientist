@@ -1487,7 +1487,13 @@ async def test_cost_tracked_iteration_persists_incremental_usage() -> None:
             return provider
 
         async def run_iteration(self, prompt: str, *, reset_session: bool = False):
-            self.total_tokens += TokenUsage(input_tokens=100, output_tokens=20)
+            self.total_tokens += TokenUsage(
+                input_tokens=100,
+                output_tokens=20,
+                cache_write_tokens=3,
+                cache_read_tokens=40,
+                reasoning_tokens=5,
+            )
             return IterationResult(
                 outcome=TurnOutcome.COMPLETED,
                 output=prompt,
@@ -1508,8 +1514,66 @@ async def test_cost_tracked_iteration_persists_incremental_usage() -> None:
 
     assert result.output == "turn"
     persisted_tokens = persist.await_args.args[1]
-    assert persisted_tokens == TokenUsage(input_tokens=100, output_tokens=20)
+    assert persisted_tokens == TokenUsage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
     assert persist.await_args.args[2:] == ("OpenAI API", "gpt-5.5", "discovery", 3)
+
+
+@pytest.mark.asyncio
+async def test_persist_job_cost_record_keeps_every_token_category() -> None:
+    from openscientist.agent.base import TokenUsage
+    from openscientist.orchestrator import discovery
+
+    tokens = TokenUsage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
+    session = MagicMock()
+    session.commit = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch.object(discovery, "AsyncSessionLocal", return_value=session_context),
+        patch(
+            "openscientist.providers.pricing.estimate_cost_usd",
+            return_value=0.0123,
+        ) as estimate,
+    ):
+        await discovery._persist_job_cost_record(
+            str(uuid4()),
+            tokens,
+            "OpenAI API",
+            "gpt-5.5",
+            "report",
+            None,
+        )
+
+    estimate.assert_called_once_with(
+        "gpt-5.5",
+        100,
+        20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
+    record = session.add.call_args.args[0]
+    assert record.input_tokens == 100
+    assert record.output_tokens == 20
+    assert record.cache_write_tokens == 3
+    assert record.cache_read_tokens == 40
+    assert record.reasoning_tokens == 5
+    assert record.cost_usd == 0.0123
+    session.commit.assert_awaited_once()
 
 
 class TestEnsureReportWritten:

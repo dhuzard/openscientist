@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID
 
 from nicegui import ui
+from sqlalchemy import select
 
 from openscientist.agent.factory import backend_for_provider_id
 from openscientist.artifact_packager import create_artifacts_zip
@@ -25,6 +26,7 @@ from openscientist.auth import (
     is_current_user_admin,
     require_auth,
 )
+from openscientist.database.models import CostRecord
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session_ctx
 from openscientist.job.types import JobInfo, JobStatus
@@ -37,6 +39,12 @@ from openscientist.job_manager import _db_get_job, _db_get_share_permission
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
 from openscientist.pdf_generator import markdown_to_pdf
+from openscientist.skill_provenance import build_job_skill_provenance
+from openscientist.usage_summary import (
+    aggregate_model_usage,
+    aggregate_operation_usage,
+    summarize_usage,
+)
 from openscientist.webapp_components.error_handler import get_user_friendly_error
 from openscientist.webapp_components.ui_components import (
     STATUS_COLORS,
@@ -89,6 +97,24 @@ def _load_knowledge_state(job_id: str, user_id: str) -> tuple[dict[str, Any] | N
     except Exception as e:
         logger.warning("Failed to load knowledge state from database for %s: %s", job_id, e)
         return None, "Knowledge state is unavailable. Please refresh the page."
+
+
+async def _load_job_cost_records(job_id: str, user_id: str) -> list[CostRecord]:
+    """Load model-turn usage visible to this user through job-scoped RLS."""
+    try:
+        async with get_session_ctx() as session:
+            await set_current_user(session, UUID(user_id))
+            result = await session.execute(
+                select(CostRecord)
+                .where(CostRecord.job_id == UUID(job_id))
+                .order_by(CostRecord.created_at.asc())
+            )
+            return list(result.scalars().all())
+    except (TypeError, ValueError):
+        logger.warning("Invalid job or user ID while loading usage for job %s", job_id)
+    except Exception:
+        logger.warning("Failed to load model usage for job %s", job_id, exc_info=True)
+    return []
 
 
 def _show_no_timeline_activity() -> None:
@@ -742,6 +768,7 @@ class _JobDetailContext:
     job_dir: Path
     ks_data: dict[str, Any] | None
     ks_load_error: str | None
+    cost_records: list[CostRecord]
     state: dict[str, Any]
     active_timers: list[Any]
     share_dialog: Any
@@ -820,6 +847,7 @@ def _build_job_detail_context(job_id: str) -> _JobDetailContext | None:
 
     job_dir = job_manager.jobs_dir / job_id
     ks_data, ks_load_error = _load_knowledge_state(job_id, user_id)
+    cost_records = run_sync(_load_job_cost_records(job_id, user_id))
 
     # Derive progress from already-loaded KS data instead of loading it again via get_job()
     iterations_completed, findings_count = _derive_progress_from_ks(
@@ -844,6 +872,7 @@ def _build_job_detail_context(job_id: str) -> _JobDetailContext | None:
         job_dir=job_dir,
         ks_data=ks_data,
         ks_load_error=ks_load_error,
+        cost_records=cost_records,
         state=_initial_job_state(job_info, ks_data),
         active_timers=active_timers,
         share_dialog=share_dialog,
@@ -1381,7 +1410,365 @@ def _render_missing_report_state(context: _JobDetailContext) -> None:
     ui.label("Report will be available when job completes").classes("text-gray-500 italic")
 
 
+def _render_job_agent_usage(cost_records: list[CostRecord]) -> None:
+    """Render transparent model/task usage alongside the scientific report."""
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Agentic Model Usage").classes("text-h6 font-bold")
+        ui.label(
+            "Token and estimated cost totals for completed model turns in this job. "
+            "This updates after each turn; an in-progress turn is not included yet."
+        ).classes("text-sm text-gray-600")
+
+        if not cost_records:
+            ui.label("No completed model turns have been recorded yet.").classes(
+                "text-sm text-gray-500 italic"
+            )
+            return
+
+        totals = summarize_usage(cost_records)
+        render_stat_badges(
+            [
+                ("Estimated Cost", f"${totals.cost_usd:.4f}", "green"),
+                ("Fresh Input", f"{totals.input_tokens:,}", "blue"),
+                ("Visible Output", f"{totals.output_tokens:,}", "orange"),
+                ("Cache Read", f"{totals.cache_read_tokens:,}", "teal"),
+                ("Cache Write", f"{totals.cache_write_tokens:,}", "cyan"),
+                ("Reasoning", f"{totals.reasoning_tokens:,}", "deep-purple"),
+                ("Total Tokens", f"{totals.total_tokens:,}", "indigo"),
+                ("Model Turns", f"{totals.turn_count:,}", "purple"),
+                ("Models", f"{totals.model_count:,}", "cyan"),
+            ]
+        )
+
+        ui.label("Model Totals").classes("font-bold mt-2")
+        model_columns = [
+            {"name": "model", "label": "Model", "field": "model", "align": "left"},
+            {"name": "provider", "label": "Provider", "field": "provider", "align": "left"},
+            {"name": "turns", "label": "Turns", "field": "turns", "align": "right"},
+            {"name": "input", "label": "Fresh Input", "field": "input", "align": "right"},
+            {
+                "name": "output",
+                "label": "Visible Output",
+                "field": "output",
+                "align": "right",
+            },
+            {
+                "name": "cache_read",
+                "label": "Cache Read",
+                "field": "cache_read",
+                "align": "right",
+            },
+            {
+                "name": "cache_write",
+                "label": "Cache Write",
+                "field": "cache_write",
+                "align": "right",
+            },
+            {
+                "name": "reasoning",
+                "label": "Reasoning",
+                "field": "reasoning",
+                "align": "right",
+            },
+            {"name": "total", "label": "Total", "field": "total", "align": "right"},
+            {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+        ]
+        model_rows = [
+            {
+                "id": f"{index}:{usage.provider}:{usage.model}",
+                "model": usage.model,
+                "provider": usage.provider,
+                "turns": usage.turn_count,
+                "input": f"{usage.input_tokens:,}",
+                "output": f"{usage.output_tokens:,}",
+                "cache_read": f"{usage.cache_read_tokens:,}",
+                "cache_write": f"{usage.cache_write_tokens:,}",
+                "reasoning": f"{usage.reasoning_tokens:,}",
+                "total": f"{usage.total_tokens:,}",
+                "cost": f"${usage.cost_usd:.4f}",
+            }
+            for index, usage in enumerate(aggregate_model_usage(cost_records))
+        ]
+        ui.table(columns=model_columns, rows=model_rows, row_key="id").classes("w-full")
+
+        ui.label("Usage by Task / Operation").classes("font-bold mt-2")
+        operation_columns = [
+            {
+                "name": "operation",
+                "label": "Task / Operation",
+                "field": "operation",
+                "align": "left",
+            },
+            {"name": "model", "label": "Model", "field": "model", "align": "left"},
+            {"name": "iterations", "label": "Iterations", "field": "iterations", "align": "right"},
+            {"name": "turns", "label": "Turns", "field": "turns", "align": "right"},
+            {"name": "input", "label": "Fresh Input", "field": "input", "align": "right"},
+            {
+                "name": "output",
+                "label": "Visible Output",
+                "field": "output",
+                "align": "right",
+            },
+            {
+                "name": "cache_read",
+                "label": "Cache Read",
+                "field": "cache_read",
+                "align": "right",
+            },
+            {
+                "name": "cache_write",
+                "label": "Cache Write",
+                "field": "cache_write",
+                "align": "right",
+            },
+            {
+                "name": "reasoning",
+                "label": "Reasoning",
+                "field": "reasoning",
+                "align": "right",
+            },
+            {"name": "total", "label": "Total", "field": "total", "align": "right"},
+            {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+        ]
+        operation_rows = [
+            {
+                "id": f"{index}:{usage.provider}:{usage.model}:{usage.operation_type}",
+                "operation": usage.operation_type or "Unspecified",
+                "model": usage.model,
+                "iterations": usage.iteration_label,
+                "turns": usage.turn_count,
+                "input": f"{usage.input_tokens:,}",
+                "output": f"{usage.output_tokens:,}",
+                "cache_read": f"{usage.cache_read_tokens:,}",
+                "cache_write": f"{usage.cache_write_tokens:,}",
+                "reasoning": f"{usage.reasoning_tokens:,}",
+                "total": f"{usage.total_tokens:,}",
+                "cost": f"${usage.cost_usd:.4f}",
+            }
+            for index, usage in enumerate(aggregate_operation_usage(cost_records))
+        ]
+        ui.table(columns=operation_columns, rows=operation_rows, row_key="id").classes("w-full")
+
+        with ui.expansion("Completed model turns", icon="receipt_long").classes("w-full mt-2"):
+            turn_columns = [
+                {
+                    "name": "operation",
+                    "label": "Task / Operation",
+                    "field": "operation",
+                    "align": "left",
+                },
+                {
+                    "name": "iteration",
+                    "label": "Iteration",
+                    "field": "iteration",
+                    "align": "right",
+                },
+                {"name": "model", "label": "Model", "field": "model", "align": "left"},
+                {"name": "provider", "label": "Provider", "field": "provider", "align": "left"},
+                {
+                    "name": "input",
+                    "label": "Fresh Input",
+                    "field": "input",
+                    "align": "right",
+                },
+                {
+                    "name": "output",
+                    "label": "Visible Output",
+                    "field": "output",
+                    "align": "right",
+                },
+                {
+                    "name": "cache_read",
+                    "label": "Cache Read",
+                    "field": "cache_read",
+                    "align": "right",
+                },
+                {
+                    "name": "cache_write",
+                    "label": "Cache Write",
+                    "field": "cache_write",
+                    "align": "right",
+                },
+                {
+                    "name": "reasoning",
+                    "label": "Reasoning",
+                    "field": "reasoning",
+                    "align": "right",
+                },
+                {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+                {"name": "completed", "label": "Completed", "field": "completed", "align": "left"},
+            ]
+            turn_rows = [
+                {
+                    "id": str(record.id),
+                    "operation": record.operation_type or "Unspecified",
+                    "iteration": record.iteration if record.iteration is not None else "—",
+                    "model": record.model or "Unknown model",
+                    "provider": record.provider or "Unknown provider",
+                    "input": f"{record.input_tokens:,}",
+                    "output": f"{record.output_tokens:,}",
+                    "cache_read": f"{record.cache_read_tokens:,}",
+                    "cache_write": f"{record.cache_write_tokens:,}",
+                    "reasoning": f"{record.reasoning_tokens:,}",
+                    "cost": f"${record.cost_usd:.4f}",
+                    "completed": record.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                for record in cost_records
+            ]
+            ui.table(columns=turn_columns, rows=turn_rows, row_key="id").classes("w-full")
+
+        if any(not row.model or row.model.casefold() == "unknown" for row in cost_records):
+            ui.label(
+                "At least one turn has an unknown model. Token counts remain valid, but its "
+                "estimated cost may be zero or incomplete."
+            ).classes("text-sm text-yellow-800 mt-2")
+
+
+def _load_job_skill_usage(job_dir: Path) -> dict[str, Any]:
+    """Load transcript-backed skill usage plus assignment snapshot state."""
+    usage = build_job_skill_provenance(job_dir)
+    usage["assignment_snapshot_available"] = (
+        job_dir / ".openscientist_skill_manifest.json"
+    ).exists()
+    return usage
+
+
+def _render_job_skill_usage(usage: dict[str, Any]) -> None:
+    """Render assigned skills separately from evidence-backed invocations."""
+    assigned = usage.get("assigned_skills") or []
+    used = usage.get("used_skills") or []
+    invocations = usage.get("invocations") or []
+    used_keys = {str(skill.get("key")) for skill in used if isinstance(skill, dict)}
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Skill Assignment & Usage").classes("text-h6 font-bold")
+        ui.label(
+            "Assigned means the skill was available to this job. Used means its invocation "
+            "was found in the saved agent transcript; availability alone is never counted as use."
+        ).classes("text-sm text-gray-600")
+
+        render_stat_badges(
+            [
+                ("Assigned Skills", f"{len(assigned):,}", "blue"),
+                ("Used Skills", f"{len(used):,}", "green"),
+                ("Invocations", f"{len(invocations):,}", "purple"),
+            ]
+        )
+
+        if not usage.get("assignment_snapshot_available"):
+            ui.label(
+                "No assignment snapshot is available. This is expected for older jobs that "
+                "predate per-job skill assignment, or jobs whose workspace has not been prepared."
+            ).classes("text-sm text-yellow-800")
+        elif not assigned:
+            ui.label("This job was explicitly created without assigned skills.").classes(
+                "text-sm text-gray-500 italic"
+            )
+        else:
+            with ui.expansion(
+                f"Assigned skills ({len(assigned)})",
+                icon="assignment",
+                value=True,
+            ).classes("w-full mt-2"):
+                for skill in assigned:
+                    if not isinstance(skill, dict):
+                        continue
+                    key = str(skill.get("key") or skill.get("name") or "Unknown skill")
+                    name = str(skill.get("name") or key)
+                    category = str(skill.get("category") or "uncategorized")
+                    version = skill.get("version")
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(name).classes("font-medium")
+                        ui.badge(category, color="gray").props("outline")
+                        if version is not None:
+                            ui.badge(f"v{version}", color="blue").props("outline")
+                        if key in used_keys:
+                            ui.badge("Used", color="green")
+                        else:
+                            ui.badge("Available, not observed", color="gray").props("outline")
+
+        if not invocations:
+            ui.label("No transcript-backed skill invocation has been recorded yet.").classes(
+                "text-sm text-gray-500 italic mt-2"
+            )
+            return
+
+        with ui.expansion(
+            f"Skill invocation evidence ({len(invocations)})",
+            icon="fact_check",
+        ).classes("w-full mt-2"):
+            for index, invocation in enumerate(invocations, start=1):
+                if not isinstance(invocation, dict):
+                    continue
+                name = str(
+                    invocation.get("skill_name") or invocation.get("skill_key") or "Unknown skill"
+                )
+                phase = str(invocation.get("phase") or "unknown phase")
+                iteration = invocation.get("iteration")
+                location = phase if iteration is None else f"{phase}, iteration {iteration}"
+                succeeded = bool(invocation.get("success", False))
+                with ui.expansion(
+                    f"{index}. {name} — {location}",
+                    icon="check_circle" if succeeded else "error",
+                ).classes("w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.badge(
+                            "Succeeded" if succeeded else "Failed",
+                            color="green" if succeeded else "red",
+                        )
+                        ui.badge(
+                            str(invocation.get("source") or "unknown evidence"),
+                            color="gray",
+                        ).props("outline")
+
+                    evidence_sections = [
+                        (
+                            "Invocation prompt / context",
+                            invocation.get("prompt_summary"),
+                            "No invocation context was captured.",
+                        ),
+                        (
+                            "Skill instructions / tool answer",
+                            invocation.get("instruction_summary"),
+                            "No instruction or tool-result text was captured.",
+                        ),
+                        (
+                            "Produced agent response",
+                            invocation.get("produced_result_summary"),
+                            "No subsequent agent response was captured.",
+                        ),
+                    ]
+                    for title, value, empty_text in evidence_sections:
+                        ui.label(title).classes("font-medium mt-2")
+                        ui.label(str(value) if value else empty_text).classes(
+                            "text-sm whitespace-pre-wrap"
+                        )
+
+
 def _render_report_tab(context: _JobDetailContext) -> None:
+    skill_usage = {"value": _load_job_skill_usage(context.job_dir)}
+
+    @ui.refreshable
+    def render_skill_usage() -> None:
+        _render_job_skill_usage(skill_usage["value"])
+
+    @ui.refreshable
+    def render_agent_usage() -> None:
+        _render_job_agent_usage(context.cost_records)
+
+    render_skill_usage()
+    render_agent_usage()
+
+    @guard_client
+    async def refresh_agent_transparency() -> None:
+        context.cost_records = await _load_job_cost_records(context.job_id, context.user_id)
+        skill_usage["value"] = _load_job_skill_usage(context.job_dir)
+        render_skill_usage.refresh()
+        render_agent_usage.refresh()
+
+    if context.job_info.status in _polling_statuses():
+        context.active_timers.append(ui.timer(5.0, refresh_agent_transparency))
+
     report_path = context.job_dir / "final_report.md"
     html_path = context.job_dir / "final_report.html"
     pdf_path = context.job_dir / "final_report.pdf"

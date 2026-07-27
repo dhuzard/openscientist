@@ -127,7 +127,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
         from openscientist.agent.skills import write_skills_to_codex_dir
 
-        await write_skills_to_codex_dir(self._config.job_dir)
+        await write_skills_to_codex_dir(
+            self._config.job_dir,
+            skill_ids=self._config.assigned_skill_ids,
+        )
 
     # apply_runtime_environment, chat_system_prompt, write_chat_context, and
     # chat_model_override use the AbstractAgent defaults: codex configures its
@@ -343,20 +346,22 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         """Normalize the turn's token usage to ``TokenUsage``.
 
         The SDK reports per-turn usage as ``usage.last`` (a
-        ``TokenUsageBreakdown``) with ``input_tokens`` inclusive of
-        ``cached_input_tokens`` (Responses-API shape), so the fresh-input count
-        is the difference. ``usage.total`` is the running thread total, which we
-        do not use here since ``_token_usage`` accumulates per turn.
+        ``TokenUsageBreakdown``). Its Responses-API shape reports input tokens
+        inclusive of cached input and output tokens inclusive of reasoning
+        output, so each nested category is subtracted from its parent. The
+        resulting five ``TokenUsage`` fields are additive and non-overlapping.
+        ``usage.total`` is the running thread total, which we do not use here
+        since ``_token_usage`` accumulates per turn.
         """
         last = getattr(usage, "last", None)
         if last is None:
             return TokenUsage()
         return TokenUsage(
-            input_tokens=last.input_tokens - last.cached_input_tokens,
-            output_tokens=last.output_tokens,
-            cache_read_tokens=last.cached_input_tokens,
+            input_tokens=max(0, last.input_tokens - last.cached_input_tokens),
+            output_tokens=max(0, last.output_tokens - last.reasoning_output_tokens),
+            cache_read_tokens=max(0, last.cached_input_tokens),
             cache_write_tokens=0,
-            reasoning_tokens=last.reasoning_output_tokens,
+            reasoning_tokens=max(0, last.reasoning_output_tokens),
         )
 
     @staticmethod

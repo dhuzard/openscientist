@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -30,6 +32,55 @@ def _restart_context() -> SimpleNamespace:
         job_id="00000000-0000-0000-0000-000000000001",
         job_manager=SimpleNamespace(restart_job=MagicMock()),
     )
+
+
+@pytest.mark.asyncio
+async def test_load_job_cost_records_applies_user_rls_and_returns_turns() -> None:
+    job_id = uuid4()
+    user_id = uuid4()
+    turns = [SimpleNamespace(model="gpt-5.5")]
+    execute_result = MagicMock()
+    execute_result.scalars.return_value.all.return_value = turns
+    session = AsyncMock()
+    session.execute.return_value = execute_result
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch.object(job_detail, "get_session_ctx", return_value=session_context),
+        patch.object(job_detail, "set_current_user", new=AsyncMock()) as set_user,
+    ):
+        result = await job_detail._load_job_cost_records(str(job_id), str(user_id))
+
+    assert result == turns
+    set_user.assert_awaited_once_with(session, user_id)
+    session.execute.assert_awaited_once()
+
+
+def test_load_job_skill_usage_distinguishes_assignment_snapshot(tmp_path: Path) -> None:
+    without_snapshot = job_detail._load_job_skill_usage(tmp_path)
+    assert without_snapshot["assignment_snapshot_available"] is False
+    assert without_snapshot["assigned_skills"] == []
+
+    manifest = [
+        {
+            "id": str(uuid4()),
+            "key": "analysis--profile",
+            "name": "Profile analysis",
+            "category": "analysis",
+            "slug": "profile",
+            "version": 1,
+        }
+    ]
+    (tmp_path / ".openscientist_skill_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    with_snapshot = job_detail._load_job_skill_usage(tmp_path)
+    assert with_snapshot["assignment_snapshot_available"] is True
+    assert with_snapshot["assigned_skills"] == manifest
 
 
 @pytest.mark.parametrize(

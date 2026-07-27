@@ -9,6 +9,8 @@ from typing import Any
 from nicegui import ui
 
 from openscientist.auth import can_current_user_start_jobs, get_current_user_id, require_auth
+from openscientist.database.session import get_session_ctx
+from openscientist.prompts import get_enabled_skills
 from openscientist.providers import check_provider_config
 from openscientist.webapp_components.ui_components import (
     render_config_error_banner,
@@ -22,6 +24,13 @@ from openscientist.webapp_components.utils.session import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _load_skill_options() -> dict[str, str]:
+    """Return enabled skills as ``id -> display label`` for job assignment."""
+    async with get_session_ctx() as session:
+        skills = await get_enabled_skills(session)
+    return {str(skill.id): f"{skill.name} · {skill.category}" for skill in skills}
 
 
 def _build_upload_session_id(user_id: str | None, client: object) -> str:
@@ -60,6 +69,7 @@ def _submit_job(
     max_iterations: ui.number,
     use_hypotheses: ui.switch,
     coinvestigate_mode: ui.switch,
+    assigned_skills: ui.select,
 ) -> None:
     """Validate input and create a new discovery job."""
     if not user_can_start_jobs:
@@ -91,6 +101,7 @@ def _submit_job(
             auto_start=True,
             investigation_mode=mode,
             owner_id=current_user_id,
+            skill_ids=list(assigned_skills.value or []),
         )
         ui.notify(f"Job {job_id} created and started!", type="positive")
         clear_uploaded_files(session_id)
@@ -116,7 +127,7 @@ async def _handle_upload(e: Any, session_id: str) -> None:
 
 @ui.page("/new")
 @require_auth
-def new_job_page() -> None:
+async def new_job_page() -> None:
     """Job submission form."""
     from openscientist import web_app
 
@@ -140,6 +151,12 @@ def new_job_page() -> None:
     if not is_configured:
         render_config_error_banner(provider_name, config_errors, show_back_button=True)
         return
+
+    try:
+        skill_options = await _load_skill_options()
+    except Exception as exc:
+        logger.warning("Could not load job skill options: %s", exc)
+        skill_options = {}
 
     async def on_upload(event: Any) -> None:
         await _handle_upload(event, session_id)
@@ -184,6 +201,22 @@ def new_job_page() -> None:
             "Requires you to stay near your computer. Auto-continues after 15 min if you don't respond."
         ).classes("text-xs text-orange-700")
 
+        ui.separator().classes("my-4")
+        assigned_skills = (
+            ui.select(
+                options=skill_options,
+                value=list(skill_options),
+                label="Skills available to this job",
+                multiple=True,
+            )
+            .props("use-chips clearable")
+            .classes("w-full")
+        )
+        ui.label(
+            "All enabled skills are selected by default. Remove skills to keep "
+            "the agent focused; clear all to run without specialized skills."
+        ).classes("text-sm text-gray-700 mt-1")
+
         ui.button(
             "Start Discovery",
             on_click=lambda: _submit_job(
@@ -194,5 +227,6 @@ def new_job_page() -> None:
                 max_iterations=max_iterations,
                 use_hypotheses=use_hypotheses,
                 coinvestigate_mode=coinvestigate_mode,
+                assigned_skills=assigned_skills,
             ),
         ).classes("w-full mt-4")

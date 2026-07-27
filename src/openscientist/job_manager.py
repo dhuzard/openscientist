@@ -20,7 +20,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openscientist.container_manager import get_container_manager
-from openscientist.database.models import User
+from openscientist.database.models import Skill, User
 from openscientist.database.models.job import Job as JobModel
 from openscientist.database.models.job_share import JobShare
 from openscientist.database.rls import set_current_user
@@ -110,6 +110,7 @@ async def _db_create_job(
     space_group: str | None = None,
     llm_provider: str | None = None,
     llm_config: dict[str, Any] | None = None,
+    assigned_skill_ids: list[str] | None = None,
 ) -> JobModel:
     """Create a job in the database (thread-safe for worker threads).
 
@@ -146,11 +147,39 @@ async def _db_create_job(
             space_group=space_group,
             llm_provider=llm_provider,
             llm_config=llm_config,
+            assigned_skill_ids=assigned_skill_ids,
         )
         session.add(job)
         await session.commit()
         await session.refresh(job)
         return job
+
+
+async def _db_validate_skill_ids(skill_ids: list[str]) -> list[str]:
+    """Validate and normalize an explicit per-job skill selection.
+
+    Disabled and unknown skills are rejected rather than silently broadening
+    the assignment. Order is retained and duplicates are removed.
+    """
+    try:
+        normalized = list(dict.fromkeys(str(UUID(skill_id)) for skill_id in skill_ids))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Every selected skill ID must be a valid UUID") from exc
+    if not normalized:
+        return []
+
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        stmt = select(Skill.id).where(
+            Skill.id.in_([UUID(skill_id) for skill_id in normalized]),
+            Skill.is_enabled.is_(True),
+        )
+        result = await session.execute(stmt)
+        enabled = {str(skill_id) for skill_id in result.scalars().all()}
+
+    unavailable = [skill_id for skill_id in normalized if skill_id not in enabled]
+    if unavailable:
+        raise ValueError("Selected skills are unavailable or disabled: " + ", ".join(unavailable))
+    return normalized
 
 
 async def _db_get_job(job_id: str, user_id: UUID | None = None) -> JobModel | None:
@@ -437,6 +466,7 @@ class JobManager:
         space_group: str | None,
         llm_provider: str | None = None,
         llm_config: dict[str, Any] | None = None,
+        assigned_skill_ids: list[str] | None = None,
     ) -> UUID | None:
         owner_uuid = UUID(owner_id) if owner_id else None
         try:
@@ -454,6 +484,7 @@ class JobManager:
                     space_group=space_group,
                     llm_provider=llm_provider,
                     llm_config=llm_config,
+                    assigned_skill_ids=assigned_skill_ids,
                 )
             )
         except Exception as e:
@@ -512,6 +543,7 @@ class JobManager:
         description: str | None = None,
         pdb_code: str | None = None,
         space_group: str | None = None,
+        skill_ids: list[str] | None = None,
     ) -> JobInfo:
         """
         Create a new discovery job.
@@ -529,6 +561,9 @@ class JobManager:
             description: Optional job description
             pdb_code: Optional PDB code metadata
             space_group: Optional crystal space group metadata
+            skill_ids: Explicit enabled skill UUIDs to assign. ``None`` keeps
+                the legacy/default behavior (all enabled skills); ``[]``
+                intentionally assigns no skills.
 
         Returns:
             JobInfo object
@@ -547,6 +582,9 @@ class JobManager:
         llm_provider = settings.provider.provider_id.lower()
         model = _effective_model(settings)
         llm_config = {"model": model} if model else None
+        assigned_skill_ids = (
+            _run_async(_db_validate_skill_ids(skill_ids)) if skill_ids is not None else None
+        )
 
         # Create job in database
         logger.info("Creating job %s in database", job_id)
@@ -563,6 +601,7 @@ class JobManager:
             space_group=space_group,
             llm_provider=llm_provider,
             llm_config=llm_config,
+            assigned_skill_ids=assigned_skill_ids,
         )
 
         # Create job directory and files

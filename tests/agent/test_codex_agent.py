@@ -225,8 +225,19 @@ def test_usage_from_payload_math() -> None:
     tu = CodexAgent._usage_from_payload(_usage(input_tokens=30, cached=12, output=7, reasoning=3))
     assert tu == TokenUsage(
         input_tokens=18,
-        output_tokens=7,
+        output_tokens=4,
         cache_read_tokens=12,
+        cache_write_tokens=0,
+        reasoning_tokens=3,
+    )
+
+
+def test_usage_from_payload_clamps_malformed_overlapping_counts() -> None:
+    tu = CodexAgent._usage_from_payload(_usage(input_tokens=5, cached=8, output=2, reasoning=3))
+    assert tu == TokenUsage(
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=8,
         cache_write_tokens=0,
         reasoning_tokens=3,
     )

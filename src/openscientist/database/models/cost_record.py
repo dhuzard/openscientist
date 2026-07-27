@@ -31,8 +31,11 @@ class CostRecord(UUIDv7Mixin, Base):
         operation_type: Type of operation (analysis/code_gen/chat/etc)
         provider: LLM provider (vertex/bedrock/cborg)
         model: Model name/ID used
-        input_tokens: Number of input tokens
-        output_tokens: Number of output tokens
+        input_tokens: Number of fresh, uncached input tokens
+        output_tokens: Number of visible, non-reasoning output tokens
+        cache_write_tokens: Number of tokens written to prompt cache
+        cache_read_tokens: Number of tokens read from prompt cache
+        reasoning_tokens: Number of non-visible reasoning tokens
         cost_usd: Cost in USD
         job: Related Job object
     """
@@ -74,13 +77,34 @@ class CostRecord(UUIDv7Mixin, Base):
     input_tokens: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        comment="Number of input tokens",
+        comment="Number of fresh, uncached input tokens",
     )
 
     output_tokens: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        comment="Number of output tokens",
+        comment="Number of visible, non-reasoning output tokens",
+    )
+
+    cache_write_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        comment="Tokens written to a provider-side prompt cache",
+    )
+
+    cache_read_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        comment="Tokens served from a provider-side prompt cache",
+    )
+
+    reasoning_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        comment="Internal non-visible reasoning tokens",
     )
 
     cost_usd: Mapped[float] = mapped_column(

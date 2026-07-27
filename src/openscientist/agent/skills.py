@@ -9,7 +9,9 @@ so the agents do not depend back on ``orchestrator.discovery``.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
 
 from openscientist.database.models import Skill
@@ -18,6 +20,31 @@ from openscientist.prompts import generate_job_claude_md, get_enabled_skills
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _replace_skill_directory(skills_dir: Path) -> None:
+    """Remove a prior materialization before writing the current assignment."""
+    if skills_dir.exists():
+        shutil.rmtree(skills_dir)
+
+
+def _write_skill_manifest(job_dir: Path, skills: list[Skill]) -> None:
+    """Write a non-secret assignment snapshot used by provenance readers."""
+    manifest = [
+        {
+            "id": str(skill.id),
+            "key": f"{skill.category}--{skill.slug}",
+            "name": skill.name,
+            "category": skill.category,
+            "slug": skill.slug,
+            "version": skill.version if isinstance(skill.version, int) else None,
+        }
+        for skill in skills
+    ]
+    (job_dir / ".openscientist_skill_manifest.json").write_text(
+        json.dumps(manifest, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _write_job_claude_md(claude_dir: Path, *, use_hypotheses: bool = False) -> None:
@@ -36,8 +63,13 @@ def _write_job_claude_md(claude_dir: Path, *, use_hypotheses: bool = False) -> N
         logger.warning("Failed to write job CLAUDE.md: %s", e)
 
 
-async def write_skills_to_claude_dir(job_dir: Path, *, use_hypotheses: bool = False) -> None:
-    """Write CLAUDE.md and enabled skill files into ``job_dir/.claude/``."""
+async def write_skills_to_claude_dir(
+    job_dir: Path,
+    *,
+    use_hypotheses: bool = False,
+    skill_ids: tuple[str, ...] | None = None,
+) -> None:
+    """Write the job's assigned, enabled skills into ``job_dir/.claude/``."""
     claude_dir = job_dir / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
 
@@ -46,11 +78,13 @@ async def write_skills_to_claude_dir(job_dir: Path, *, use_hypotheses: bool = Fa
 
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
-            skills = await get_enabled_skills(session)
-        if not skills:
-            logger.info("No enabled skills to write")
-            return
+            skills = await get_enabled_skills(session, skill_ids)
         skills_dir = claude_dir / "skills"
+        _replace_skill_directory(skills_dir)
+        _write_skill_manifest(job_dir, skills)
+        if not skills:
+            logger.info("No assigned, enabled skills to write")
+            return
         skills_dir.mkdir(parents=True, exist_ok=True)
         for skill in skills:
             filename = f"{skill.category}--{skill.slug}.md"
@@ -86,8 +120,10 @@ def codex_skill_markdown(skill: Skill) -> str:
     return frontmatter + skill.content
 
 
-async def write_skills_to_codex_dir(job_dir: Path) -> None:
-    """Write enabled skills as codex ``SKILL.md`` files into
+async def write_skills_to_codex_dir(
+    job_dir: Path, *, skill_ids: tuple[str, ...] | None = None
+) -> None:
+    """Write assigned, enabled skills as codex ``SKILL.md`` files into
     ``job_dir/.agents/skills/``.
 
     The codex agent runs with the job dir as its cwd (a git repo), so codex
@@ -98,11 +134,13 @@ async def write_skills_to_codex_dir(job_dir: Path) -> None:
     """
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
-            skills = await get_enabled_skills(session)
-        if not skills:
-            logger.info("No enabled skills to write")
-            return
+            skills = await get_enabled_skills(session, skill_ids)
         skills_root = job_dir / ".agents" / "skills"
+        _replace_skill_directory(skills_root)
+        _write_skill_manifest(job_dir, skills)
+        if not skills:
+            logger.info("No assigned, enabled skills to write")
+            return
         for skill in skills:
             skill_dir = skills_root / f"{skill.category}--{skill.slug}"
             skill_dir.mkdir(parents=True, exist_ok=True)

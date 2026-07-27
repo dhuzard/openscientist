@@ -11,6 +11,7 @@ Claude and Codex variants share one body. See `prompts.claude` /
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -606,12 +607,14 @@ def render_chat_context(frags: BackendFragments) -> str:
 
 async def get_enabled_skills(
     session: AsyncSession,
+    skill_ids: list[str] | tuple[str, ...] | None = None,
 ) -> list[Skill]:
     """
-    Get all enabled skills.
+    Get enabled skills available to a job.
 
-    All enabled skills are now available to every job - there is no
-    per-job skill selection.
+    ``None`` preserves the legacy/default behavior of returning every enabled
+    skill. An explicit empty collection returns none. Otherwise only enabled
+    skills whose UUID appears in ``skill_ids`` are returned.
 
     Args:
         session: Database session
@@ -619,6 +622,12 @@ async def get_enabled_skills(
     Returns:
         List of enabled Skill objects
     """
-    stmt = select(Skill).where(Skill.is_enabled.is_(True)).order_by(Skill.category, Skill.name)
+    if skill_ids is not None and not skill_ids:
+        return []
+
+    stmt = select(Skill).where(Skill.is_enabled.is_(True))
+    if skill_ids is not None:
+        stmt = stmt.where(Skill.id.in_([UUID(skill_id) for skill_id in skill_ids]))
+    stmt = stmt.order_by(Skill.category, Skill.name)
     result = await session.execute(stmt)
     return list(result.scalars().all())

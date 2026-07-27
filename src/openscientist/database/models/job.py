@@ -46,6 +46,8 @@ class Job(UUIDv7Mixin, Base):
         resume_iteration: Iteration to resume from (NULL for new jobs)
         llm_provider: LLM provider being used (vertex/bedrock/cborg)
         llm_config: LLM configuration (model, temperature, etc.)
+        assigned_skill_ids: Explicit skill IDs assigned at creation. NULL keeps
+            legacy behavior (all enabled skills); an empty list disables skills.
         error_message: Error message if job failed
         result_summary: Final analysis summary
         owner: Related User object
@@ -149,6 +151,15 @@ class Job(UUIDv7Mixin, Base):
         JSONB,
         nullable=True,
         comment="LLM configuration (model, temperature, etc.)",
+    )
+
+    assigned_skill_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment=(
+            "Skill UUIDs assigned to this job; NULL means all enabled skills "
+            "(legacy/default), [] means no skills"
+        ),
     )
 
     data_summary: Mapped[dict[str, Any] | None] = mapped_column(

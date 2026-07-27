@@ -78,6 +78,7 @@ def _build_agent_executor(
     *,
     use_hypotheses: bool = False,
     data_files: list[Path] | None = None,
+    assigned_skill_ids: list[str] | None = None,
 ) -> AbstractAgent[Provider]:
     """Create a configured agent for discovery/report phases.
 
@@ -98,6 +99,7 @@ def _build_agent_executor(
         system_prompt=system_prompt,
         use_hypotheses=use_hypotheses,
         data_files=tuple(data_files or ()),
+        assigned_skill_ids=(tuple(assigned_skill_ids) if assigned_skill_ids is not None else None),
     )
     return get_agent(config)
 
@@ -612,6 +614,7 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
         "max_iterations": job.max_iterations,
         "resume_iteration": getattr(job, "resume_iteration", None),
         "use_hypotheses": bool(job.use_hypotheses),
+        "assigned_skill_ids": getattr(job, "assigned_skill_ids", None),
         "investigation_mode": job.investigation_mode,
         "data_files": resolved_files,
     }
@@ -657,7 +660,14 @@ async def _persist_job_cost_record(
     from openscientist.database.models import CostRecord
     from openscientist.providers.pricing import estimate_cost_usd
 
-    cost_usd = estimate_cost_usd(model_name, tokens.input_tokens, tokens.output_tokens)
+    cost_usd = estimate_cost_usd(
+        model_name,
+        tokens.input_tokens,
+        tokens.output_tokens,
+        cache_write_tokens=tokens.cache_write_tokens,
+        cache_read_tokens=tokens.cache_read_tokens,
+        reasoning_tokens=tokens.reasoning_tokens,
+    )
     async with AsyncSessionLocal(thread_safe=True) as session:
         record = CostRecord(
             job_id=UUID(job_id),
@@ -667,6 +677,9 @@ async def _persist_job_cost_record(
             model=model_name,
             input_tokens=tokens.input_tokens,
             output_tokens=tokens.output_tokens,
+            cache_write_tokens=tokens.cache_write_tokens,
+            cache_read_tokens=tokens.cache_read_tokens,
+            reasoning_tokens=tokens.reasoning_tokens,
             cost_usd=cost_usd,
         )
         session.add(record)
@@ -754,6 +767,7 @@ async def _build_and_prepare_executor(
         data_file=_resolve_primary_data_file(runtime["data_files"]),
         use_hypotheses=use_hypotheses,
         data_files=all_data_files,
+        assigned_skill_ids=runtime.get("assigned_skill_ids"),
     )
     executor.apply_runtime_environment()
     await update_job_status(job_dir, "running")
@@ -905,6 +919,12 @@ async def run_discovery_async(job_dir: Path) -> dict[str, Any]:
 def _save_transcript(path: Path, transcript: list[TranscriptEntry]) -> None:
     """Save iteration transcript to JSON file."""
     save_transcript(path, transcript)
+    try:
+        from openscientist.skill_provenance import write_job_skill_provenance
+
+        write_job_skill_provenance(path.parent.parent)
+    except Exception as exc:
+        logger.warning("Failed to update skill provenance for %s: %s", path, exc)
     logger.info("Saved transcript to %s", path)
 
 
