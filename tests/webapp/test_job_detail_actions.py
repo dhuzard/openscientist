@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -13,7 +14,7 @@ from openscientist.webapp_components.pages import job_detail
 
 def _context(status: JobStatus) -> SimpleNamespace:
     """Minimal stand-in carrying only what _can_regenerate_report reads."""
-    return SimpleNamespace(job_info=SimpleNamespace(status=status))
+    return SimpleNamespace(job_info=SimpleNamespace(status=status), can_edit=True)
 
 
 def _action_context() -> SimpleNamespace:
@@ -21,6 +22,13 @@ def _action_context() -> SimpleNamespace:
     return SimpleNamespace(
         job_id="job-1",
         job_manager=SimpleNamespace(regenerate_report=MagicMock()),
+    )
+
+
+def _restart_context() -> SimpleNamespace:
+    return SimpleNamespace(
+        job_id="00000000-0000-0000-0000-000000000001",
+        job_manager=SimpleNamespace(restart_job=MagicMock()),
     )
 
 
@@ -60,6 +68,63 @@ def test_regenerate_action_calls_manager_for_admin() -> None:
     ):
         job_detail._regenerate_report(context)  # type: ignore[arg-type]
     context.job_manager.regenerate_report.assert_called_once_with("job-1")
+
+
+@pytest.mark.parametrize(
+    "can_edit,can_start,status,expected",
+    [
+        (True, True, JobStatus.FAILED, True),
+        (True, True, JobStatus.CANCELLED, True),
+        (False, True, JobStatus.FAILED, False),
+        (True, False, JobStatus.CANCELLED, False),
+        (True, True, JobStatus.COMPLETED, False),
+        (True, True, JobStatus.RUNNING, False),
+    ],
+)
+def test_can_restart_job_gating(
+    can_edit: bool,
+    can_start: bool,
+    status: JobStatus,
+    expected: bool,
+) -> None:
+    context = SimpleNamespace(
+        can_edit=can_edit,
+        job_info=SimpleNamespace(status=status),
+    )
+    with patch.object(
+        job_detail,
+        "can_current_user_start_jobs",
+        return_value=can_start,
+    ):
+        assert job_detail._can_restart_job(context) is expected  # type: ignore[arg-type]
+
+
+def test_restart_action_rechecks_permission_and_calls_manager() -> None:
+    context = _restart_context()
+    with (
+        patch.object(job_detail, "get_current_user_id", return_value=str(uuid4())),
+        patch.object(job_detail, "can_current_user_start_jobs", return_value=True),
+        patch.object(job_detail, "_load_db_job_for_user", return_value=SimpleNamespace()),
+        patch.object(job_detail, "_resolve_job_permissions", return_value=(True, True)),
+        patch.object(job_detail, "ui"),
+    ):
+        job_detail._restart_job(context)  # type: ignore[arg-type]
+
+    context.job_manager.restart_job.assert_called_once_with(context.job_id)
+
+
+def test_restart_action_blocks_when_edit_permission_was_revoked() -> None:
+    context = _restart_context()
+    with (
+        patch.object(job_detail, "get_current_user_id", return_value=str(uuid4())),
+        patch.object(job_detail, "can_current_user_start_jobs", return_value=True),
+        patch.object(job_detail, "_load_db_job_for_user", return_value=SimpleNamespace()),
+        patch.object(job_detail, "_resolve_job_permissions", return_value=(False, False)),
+        patch.object(job_detail, "ui"),
+    ):
+        job_detail._restart_job(context)  # type: ignore[arg-type]
+
+    context.job_manager.restart_job.assert_not_called()
 
 
 class TestTimelineHeaderText:

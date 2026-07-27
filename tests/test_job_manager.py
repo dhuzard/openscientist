@@ -638,6 +638,81 @@ class TestJobManagerCancellationConcurrency:
             assert manager._get_active_job_count() == 1
 
 
+class TestJobManagerRestart:
+    """Failed and cancelled jobs can be rescheduled without losing progress."""
+
+    @pytest.mark.parametrize("status", [JobStatus.FAILED, JobStatus.CANCELLED])
+    def test_restart_launches_worker(self, tmp_path, status):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        job = JobInfo(
+            job_id=job_id,
+            research_question="Q?",
+            status=status,
+            created_at="2026-02-01T00:00:00+00:00",
+        )
+        fake_thread = MagicMock()
+
+        with (
+            patch.object(manager, "_check_budget_before_creation"),
+            patch.object(manager, "get_job", return_value=job),
+            patch.object(manager, "_get_active_job_count", return_value=0),
+            patch(
+                "openscientist.job_manager._db_prepare_job_restart",
+                new_callable=AsyncMock,
+                return_value=3,
+            ) as prepare,
+            patch("openscientist.job_manager.threading.Thread", return_value=fake_thread),
+        ):
+            manager.restart_job(job_id)
+
+        prepare.assert_awaited_once_with(job_id, JobStatus.PENDING)
+        assert manager._running_jobs[job_id] is fake_thread
+        fake_thread.start.assert_called_once()
+
+    def test_restart_queues_when_capacity_is_full(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        job = JobInfo(
+            job_id=job_id,
+            research_question="Q?",
+            status=JobStatus.CANCELLED,
+            created_at="2026-02-01T00:00:00+00:00",
+        )
+
+        with (
+            patch.object(manager, "_check_budget_before_creation"),
+            patch.object(manager, "get_job", return_value=job),
+            patch.object(manager, "_get_active_job_count", return_value=1),
+            patch(
+                "openscientist.job_manager._db_prepare_job_restart",
+                new_callable=AsyncMock,
+                return_value=2,
+            ) as prepare,
+        ):
+            manager.restart_job(job_id)
+
+        prepare.assert_awaited_once_with(job_id, JobStatus.QUEUED)
+        assert job_id not in manager._running_jobs
+
+    def test_restart_rejects_non_terminal_job(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        job = JobInfo(
+            job_id=job_id,
+            research_question="Q?",
+            status=JobStatus.RUNNING,
+            created_at="2026-02-01T00:00:00+00:00",
+        )
+
+        with (
+            patch.object(manager, "_check_budget_before_creation"),
+            patch.object(manager, "get_job", return_value=job),
+            pytest.raises(ValueError, match="cannot be restarted"),
+        ):
+            manager.restart_job(job_id)
+
+
 class TestJobManagerCleanup:
     """Tests for old job cleanup."""
 

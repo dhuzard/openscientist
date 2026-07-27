@@ -231,6 +231,37 @@ async def _db_update_job_status(
     return result
 
 
+async def _db_prepare_job_restart(
+    job_id: str,
+    scheduled_status: JobStatus,
+) -> int:
+    """Prepare a failed or cancelled job for another worker run.
+
+    Returns the persisted iteration at which discovery should resume.
+    """
+    if scheduled_status not in {JobStatus.PENDING, JobStatus.QUEUED}:
+        raise ValueError(f"Invalid restart status: {scheduled_status.value}")
+
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        stmt = select(JobModel).where(JobModel.id == UUID(job_id))
+        result = await session.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+
+        current_status = JobStatus(job.status)
+        if current_status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
+            raise ValueError(f"Job {job_id} cannot be restarted from status {current_status.value}")
+
+        resume_iteration = max(1, min(int(job.current_iteration or 1), job.max_iterations))
+        job.status = scheduled_status.value
+        job.resume_iteration = resume_iteration
+        job.error_message = None
+        job.cancellation_reason = None
+        await session.commit()
+        return resume_iteration
+
+
 async def _db_get_job_statuses(job_ids: list[str]) -> dict[str, str]:
     """Batch-fetch job statuses by ID."""
     async with AsyncSessionLocal(thread_safe=True) as session:
@@ -621,6 +652,49 @@ class JobManager:
                 kwargs={"run_mode": "report_only"},
                 daemon=True,
             )
+            self._running_jobs[job_id] = thread
+            thread.start()
+
+    def restart_job(self, job_id: str) -> None:
+        """Resume a failed or cancelled job from its last persisted iteration.
+
+        The interrupted iteration is intentionally run again because an agent
+        process may have stopped midway through a turn. Findings and artifacts
+        persisted before the interruption remain available to the new agent.
+
+        Raises:
+            ValueError: If the job is missing, not restartable, still stopping,
+                or the provider budget does not allow another run.
+        """
+        self._check_budget_before_creation()
+
+        with self._lock:
+            job_info = self.get_job(job_id)
+            if job_info is None:
+                raise ValueError(f"Job {job_id} not found")
+            if job_info.status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
+                raise ValueError(
+                    f"Job {job_id} cannot be restarted from status {job_info.status.value}"
+                )
+            if job_id in self._running_jobs:
+                raise ValueError(f"Job {job_id} is still stopping; try again shortly")
+
+            if self._get_active_job_count() >= self.max_concurrent:
+                resume_iteration = _run_async(_db_prepare_job_restart(job_id, JobStatus.QUEUED))
+                logger.info(
+                    "Restart of job %s queued from iteration %d",
+                    job_id,
+                    resume_iteration,
+                )
+                return
+
+            resume_iteration = _run_async(_db_prepare_job_restart(job_id, JobStatus.PENDING))
+            logger.info(
+                "Restarting job %s from iteration %d",
+                job_id,
+                resume_iteration,
+            )
+            thread = threading.Thread(target=self._run_job, args=(job_id,), daemon=True)
             self._running_jobs[job_id] = thread
             thread.start()
 

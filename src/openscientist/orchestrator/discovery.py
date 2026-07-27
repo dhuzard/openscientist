@@ -191,49 +191,63 @@ async def _run_primary_discovery_loop(
     max_iterations = runtime["max_iterations"]
     data_files = runtime["data_files"]
     investigation_mode = runtime["investigation_mode"]
+    requested_resume = runtime.get("resume_iteration")
+    start_iteration = max(1, min(int(requested_resume), max_iterations)) if requested_resume else 1
 
     ks = KnowledgeState.load_from_database_sync(job_id)
-    initial_prompt = build_initial_prompt(
-        runtime["research_question"],
-        max_iterations,
-        data_files,
-        ks,
-        description=runtime.get("description"),
-    )
+    pending_feedback: str | None = None
+    iterative_start = start_iteration
 
-    logger.info("Iteration 1/%d: Starting session", max_iterations)
-    result = await executor.run_iteration(initial_prompt, reset_session=True)
-    _check_turn_outcome(result, 1)
+    if start_iteration == 1:
+        initial_prompt = build_initial_prompt(
+            runtime["research_question"],
+            max_iterations,
+            data_files,
+            ks,
+            description=runtime.get("description"),
+        )
 
-    _sync_version_metadata_if_available(job_id)
-    _append_iteration_artifacts(
-        provenance_dir=provenance_dir,
-        log_file=log_file,
-        iteration=1,
-        prompt=initial_prompt,
-        result=result,
-        overwrite_log=True,
-    )
-    if max_iterations > 1:
-        increment_ks_iteration(job_id)
-    await _assert_job_not_cancelled(job_id)
+        logger.info("Iteration 1/%d: Starting session", max_iterations)
+        result = await executor.run_iteration(initial_prompt, reset_session=True)
+        _check_turn_outcome(result, 1)
 
-    pending_feedback_result = await _wait_for_coinvestigate_feedback(
-        job_dir,
-        investigation_mode,
-        current_iteration=1,
-        max_iterations=max_iterations,
-    )
-    if pending_feedback_result and pending_feedback_result["outcome"] == "cancelled":
-        raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
-    pending_feedback = (
-        pending_feedback_result["feedback_text"]
-        if pending_feedback_result and pending_feedback_result["outcome"] == "feedback"
-        else None
-    )
+        _sync_version_metadata_if_available(job_id)
+        _append_iteration_artifacts(
+            provenance_dir=provenance_dir,
+            log_file=log_file,
+            iteration=1,
+            prompt=initial_prompt,
+            result=result,
+            overwrite_log=True,
+        )
+        if max_iterations > 1:
+            increment_ks_iteration(job_id)
+        await _assert_job_not_cancelled(job_id)
+
+        pending_feedback_result = await _wait_for_coinvestigate_feedback(
+            job_dir,
+            investigation_mode,
+            current_iteration=1,
+            max_iterations=max_iterations,
+        )
+        if pending_feedback_result and pending_feedback_result["outcome"] == "cancelled":
+            raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
+        pending_feedback = (
+            pending_feedback_result["feedback_text"]
+            if pending_feedback_result and pending_feedback_result["outcome"] == "feedback"
+            else None
+        )
+        iterative_start = 2
+    else:
+        logger.info(
+            "Resuming discovery at iteration %d/%d with persisted knowledge state",
+            start_iteration,
+            max_iterations,
+        )
+
     reset_interval = 5
 
-    for iteration in range(2, max_iterations + 1):
+    for iteration in range(iterative_start, max_iterations + 1):
         await _assert_job_not_cancelled(job_id)
         ks = KnowledgeState.load_from_database_sync(job_id)
         if pending_feedback is None:
@@ -247,7 +261,8 @@ async def _run_primary_discovery_loop(
             description=runtime.get("description"),
         )
         pending_feedback = None
-        should_reset = iteration % reset_interval == 1
+        should_reset = start_iteration > 1 and iteration == iterative_start
+        should_reset = should_reset or iteration % reset_interval == 1
         logger.info(
             "Iteration %d/%d (%s)",
             iteration,
@@ -566,6 +581,7 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
         "research_question": job.research_question,
         "description": getattr(job, "description", None),
         "max_iterations": job.max_iterations,
+        "resume_iteration": getattr(job, "resume_iteration", None),
         "use_hypotheses": bool(job.use_hypotheses),
         "investigation_mode": job.investigation_mode,
         "data_files": resolved_files,

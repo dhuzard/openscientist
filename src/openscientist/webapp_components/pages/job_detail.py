@@ -19,7 +19,12 @@ from nicegui import ui
 from openscientist.agent.factory import backend_for_provider_id
 from openscientist.artifact_packager import create_artifacts_zip
 from openscientist.async_tasks import run_sync
-from openscientist.auth import get_current_user_id, is_current_user_admin, require_auth
+from openscientist.auth import (
+    can_current_user_start_jobs,
+    get_current_user_id,
+    is_current_user_admin,
+    require_auth,
+)
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session_ctx
 from openscientist.job.types import JobInfo, JobStatus
@@ -861,8 +866,71 @@ def _render_job_status_notices(context: _JobDetailContext) -> None:
         render_error_card(error_info, context.job_info, context.job_dir)
     if context.job_info.status == JobStatus.CANCELLED:
         _render_cancelled_notice(context.job_info)
+    if _can_restart_job(context):
+        ui.button(
+            "Restart Job",
+            icon="restart_alt",
+            on_click=lambda: _confirm_restart_job(context),
+        ).props("color=primary").classes("mb-4")
     if context.ks_load_error:
         _render_ks_loading_notice(context.ks_load_error)
+
+
+def _can_restart_job(context: _JobDetailContext) -> bool:
+    return bool(
+        context.can_edit
+        and can_current_user_start_jobs()
+        and context.job_info.status in {JobStatus.FAILED, JobStatus.CANCELLED}
+    )
+
+
+def _restart_job(context: _JobDetailContext) -> None:
+    """Re-authorize and restart a terminal job from persisted progress."""
+    user_id = get_current_user_id()
+    if not user_id or not can_current_user_start_jobs():
+        ui.notify("You are not authorized to restart jobs.", type="negative")
+        return
+
+    db_job = _load_db_job_for_user(context.job_id, user_id)
+    if db_job is None:
+        ui.notify("Job not found or access denied.", type="negative")
+        return
+    _, can_edit = _resolve_job_permissions(context.job_id, user_id, db_job)
+    if not can_edit:
+        ui.notify("You do not have permission to restart this job.", type="negative")
+        return
+
+    try:
+        context.job_manager.restart_job(context.job_id)
+    except ValueError as exc:
+        ui.notify(str(exc), type="negative")
+        return
+    except Exception:
+        logger.exception("Failed to restart job %s", context.job_id)
+        ui.notify("Failed to restart job. Please try again.", type="negative")
+        return
+
+    ui.notify("Job restarted from its last recorded iteration.", type="positive")
+    ui.navigate.to(f"/job/{context.job_id}")
+
+
+def _confirm_restart_job(context: _JobDetailContext) -> None:
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Restart job?").classes("text-lg font-bold")
+        ui.label(
+            "The job will continue from its last recorded iteration. Existing "
+            "findings and artifacts will be kept, and the interrupted iteration "
+            "may be repeated."
+        ).classes("text-sm text-gray-600")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def _confirm() -> None:
+                dialog.close()
+                _restart_job(context)
+
+            ui.button("Restart", icon="restart_alt", on_click=_confirm).props("color=primary")
+    dialog.open()
 
 
 _PROVIDER_DISPLAY = {
