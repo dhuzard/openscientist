@@ -31,11 +31,18 @@ class _Provider(StubCodexProvider):
     def codex_model_provider_id(self) -> str:
         return "openai"
 
-    def codex_model_name(self) -> str:
+    def codex_model_name(self) -> str | None:
         return "gpt-test"
 
     def codex_sdk_env(self) -> dict[str, str]:
         return {"OPENAI_API_KEY": "sk-secret"}
+
+
+class _ImplicitModelProvider(_Provider):
+    """OpenAI-like provider that lets Codex select its account default."""
+
+    def codex_model_name(self) -> str | None:
+        return None
 
 
 class _Item:
@@ -133,6 +140,33 @@ async def test_run_iteration_success(tmp_path: Path) -> None:
     assert result.tool_calls == 1
     assert [e.type for e in result.transcript] == ["assistant_text", "shell_execution"]
     thread.run.assert_awaited_once_with("hello")
+
+
+async def test_warm_model_profile_resolves_codex_account_default(tmp_path: Path) -> None:
+    agent = CodexAgent(AgentConfig(job_dir=tmp_path), _ImplicitModelProvider())
+    mock_codex_cls = MagicMock(name="AsyncCodex")
+    mock_codex_cls.return_value.models = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[
+                SimpleNamespace(
+                    is_default=True,
+                    model="gpt-5.5",
+                    id="gpt-5.5",
+                )
+            ]
+        )
+    )
+
+    settings = SimpleNamespace(provider=SimpleNamespace(model_context_tokens=None))
+    with (
+        patch("openscientist.agent.codex_agent.AsyncCodex", mock_codex_cls),
+        patch("openscientist.settings.get_settings", return_value=settings),
+    ):
+        await agent.warm_model_profile()
+
+    assert agent.effective_model_name == "gpt-5.5"
+    assert agent.model_profile.id == "gpt-5.5"
+    assert agent.model_profile.context_window_tokens == 1_050_000
 
 
 async def test_run_iteration_cuts_runaway_turn(

@@ -129,8 +129,7 @@ class Provider(abc.ABC):
         """
         cost_info = self.get_cost_info(lookback_hours=lookback_hours)
         provider_costs_available = (
-            cost_info.total_spend_usd is not None
-            and cost_info.recent_spend_usd is not None
+            cost_info.total_spend_usd is not None and cost_info.recent_spend_usd is not None
         )
         if provider_costs_available or not self.use_recorded_cost_fallback:
             return cost_info

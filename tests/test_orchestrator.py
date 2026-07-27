@@ -1395,6 +1395,50 @@ class TestRegenerateReportAsync:
         finalize.assert_awaited_once()  # executor still cleaned up
 
 
+@pytest.mark.asyncio
+async def test_cost_tracked_iteration_persists_incremental_usage() -> None:
+    from openscientist.agent.base import IterationResult, TokenUsage
+    from openscientist.orchestrator import discovery
+
+    provider = SimpleNamespace(
+        display_name="OpenAI API",
+        effective_model_name=lambda: None,
+    )
+
+    class Executor:
+        total_tokens = TokenUsage(input_tokens=10, output_tokens=2)
+        effective_model_name = "gpt-5.5"
+
+        @property
+        def provider(self):
+            return provider
+
+        async def run_iteration(self, prompt: str, *, reset_session: bool = False):
+            self.total_tokens += TokenUsage(input_tokens=100, output_tokens=20)
+            return IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output=prompt,
+                tool_calls=0,
+                transcript=[],
+            )
+
+    executor = Executor()
+    with patch.object(discovery, "_persist_job_cost_record", new=AsyncMock()) as persist:
+        result = await discovery._run_cost_tracked_iteration(
+            executor,  # type: ignore[arg-type]
+            str(uuid4()),
+            "turn",
+            reset_session=False,
+            operation_type="discovery",
+            iteration=3,
+        )
+
+    assert result.output == "turn"
+    persisted_tokens = persist.await_args.args[1]
+    assert persisted_tokens == TokenUsage(input_tokens=100, output_tokens=20)
+    assert persist.await_args.args[2:] == ("OpenAI API", "gpt-5.5", "discovery", 3)
+
+
 class TestEnsureReportWritten:
     """Freshness check: a stale report from a prior run must not be mistaken
     for fresh output (the bug that made report regeneration a silent no-op)."""

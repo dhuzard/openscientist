@@ -2,7 +2,7 @@
 
 Some providers do not expose cost data for the credential used to run jobs.
 For those providers, OpenScientist can still enforce its own budgets from the
-``cost_records`` ledger populated when jobs complete.
+``cost_records`` ledger populated after each completed agent turn.
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ async def get_recorded_cost_info(
         recent_period_hours=lookback_hours,
         last_updated=now,
         data_lag_note=(
-            "Estimated from completed OpenScientist jobs; OpenAI activity "
-            "outside this app is not included."
+            "Estimated from completed OpenScientist agent turns; running jobs "
+            "update after each turn. OpenAI activity outside this app is not included."
         ),
         metadata={
             "source": "openscientist_cost_records",

@@ -43,6 +43,7 @@ from openscientist.agent.base import (
     TranscriptEntry,
     TurnOutcome,
 )
+from openscientist.models import default_model_profile
 from openscientist.providers.base import CodexCompatible
 from openscientist.transcript import CODEX
 
@@ -104,6 +105,7 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         super().__init__(config, provider)
         self._codex: AsyncCodex | None = None
         self._thread: AsyncThread | None = None
+        self._resolved_model_name = provider.codex_model_name()
 
     backend = AgentBackend.CODEX
     file_write_tool = "apply_patch"
@@ -211,7 +213,7 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             f"command = {_toml_str(sys.executable)}",
             'args = ["-m", "openscientist_tools"]',
             f"[mcp_servers.{_MCP_SERVER_NAME}.env]",
-            *(f"{key} = {_toml_str(value)}" for key, value in self._mcp_env().items()),
+            *(f"{_toml_str(key)} = {_toml_str(value)}" for key, value in self._mcp_env().items()),
         ]
         (home / "config.toml").write_text("\n".join(lines) + "\n")
 
@@ -253,6 +255,52 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             )
         )
 
+    def _ensure_codex_client(self) -> AsyncCodex:
+        """Create the configured SDK client without necessarily starting a thread."""
+        if self._codex is None:
+            self._write_codex_config()
+            self._write_agents_md()
+            self._ensure_auth()
+            self._codex = self._make_codex()
+        return self._codex
+
+    async def warm_model_profile(self) -> None:
+        """Resolve Codex's account default before prompt budgeting starts.
+
+        When no explicit model is configured, Codex chooses an account/config
+        default. Its public model catalog marks that entry with ``is_default``;
+        resolving it here keeps cost attribution and context budgeting aligned
+        with the model the subsequent thread will use.
+        """
+        if self._resolved_model_name:
+            await super().warm_model_profile()
+            return
+
+        try:
+            catalog = await self._ensure_codex_client().models()
+            default = next((model for model in catalog.data if model.is_default), None)
+            if default is None:
+                raise LookupError("Codex model catalog did not identify a default model")
+            self._resolved_model_name = default.model or default.id
+
+            from openscientist.settings import get_settings
+
+            self._model_profile = default_model_profile(
+                self._resolved_model_name,
+                get_settings().provider.model_context_tokens,
+            )
+            logger.info("Resolved Codex account default model: %s", self._resolved_model_name)
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve Codex account default model; using provider fallback: %s",
+                exc,
+            )
+            await super().warm_model_profile()
+
+    @property
+    def effective_model_name(self) -> str | None:
+        return self._resolved_model_name or super().effective_model_name
+
     async def _close_codex(self) -> None:
         """Tear down the app-server client and drop the thread."""
         if self._codex is not None:
@@ -271,13 +319,9 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         """
         if reset_session:
             self._thread = None
-        if self._codex is None:
-            self._write_codex_config()
-            self._write_agents_md()
-            self._ensure_auth()
-            self._codex = self._make_codex()
+        codex = self._ensure_codex_client()
         if self._thread is None:
-            self._thread = await self._codex.thread_start(
+            self._thread = await codex.thread_start(
                 model=self._provider.codex_model_name(),
                 model_provider=self._provider.codex_model_provider_id(),
                 # The agent already runs locked down in its own ephemeral

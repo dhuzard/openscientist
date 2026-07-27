@@ -130,12 +130,15 @@ def test_recorded_costs_enforce_budget_limit(monkeypatch: pytest.MonkeyPatch) ->
         clear_settings_cache()
 
     assert budget_check["can_proceed"] is False
-    assert any("Total spend $12.50 exceeds limit $10.00" in error for error in budget_check["errors"])
+    assert any(
+        "Total spend $12.50 exceeds limit $10.00" in error for error in budget_check["errors"]
+    )
 
 
 def test_get_provider_selects_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     """`provider_id="openai"` resolves to OpenAIDirectProvider via the factory."""
     from openscientist.providers import get_provider
+
     monkeypatch.setenv("OPENSCIENTIST_PROVIDER", "openai")
     clear_settings_cache()
     try:
