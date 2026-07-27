@@ -775,6 +775,18 @@ async def _build_and_prepare_executor(
     # Resolve the model's context window once per job, off the event loop (the
     # Ollama probe is blocking I/O). Cached on the agent for the report budget.
     await executor.warm_model_profile()
+    try:
+        from openscientist.agent_task_provenance import write_job_model_runtime
+
+        write_job_model_runtime(
+            job_dir,
+            provider=executor.provider.display_name,
+            model=executor.effective_model_name or "unknown",
+            backend=executor.backend.value,
+            context_window_tokens=executor.model_profile.context_window_tokens,
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist runtime model identity for %s: %s", job_dir.name, exc)
     return executor
 
 

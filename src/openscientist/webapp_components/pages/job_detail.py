@@ -18,6 +18,7 @@ from nicegui import ui
 from sqlalchemy import select
 
 from openscientist.agent.factory import backend_for_provider_id
+from openscientist.agent_task_provenance import build_job_agent_task_provenance
 from openscientist.artifact_packager import create_artifacts_zip
 from openscientist.async_tasks import run_sync
 from openscientist.auth import (
@@ -1619,9 +1620,130 @@ def _render_job_agent_usage(cost_records: list[CostRecord]) -> None:
 
         if any(not row.model or row.model.casefold() == "unknown" for row in cost_records):
             ui.label(
-                "At least one turn has an unknown model. Token counts remain valid, but its "
-                "estimated cost may be zero or incomplete."
+                "At least one legacy turn was saved before exact model resolution. Its token "
+                "counts remain valid, but the historical model and cost cannot be reconstructed "
+                "reliably. Current turns persist the resolved model before work begins."
             ).classes("text-sm text-yellow-800 mt-2")
+
+
+def _render_job_agent_task_trace(
+    provenance: dict[str, Any],
+    cost_records: list[CostRecord],
+) -> None:
+    """Render exact runtime identity and transcript-backed subagent tasks."""
+    runtime = provenance.get("runtime") or {}
+    subagents = provenance.get("subagents") or []
+    observed_models = sorted(
+        {
+            record.model
+            for record in cost_records
+            if record.model and record.model.casefold() != "unknown"
+        }
+    )
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("LLM Task & Subagent Trace").classes("text-h6 font-bold")
+        ui.label(
+            "The runtime model is recorded as soon as the agent starts. Parent-turn totals and "
+            "subagent evidence remain on this page after the job completes."
+        ).classes("text-sm text-gray-600")
+
+        if runtime:
+            render_stat_badges(
+                [
+                    ("Runtime Model", str(runtime.get("model") or "Unknown"), "indigo"),
+                    ("Provider", str(runtime.get("provider") or "Unknown"), "blue"),
+                    ("Agent Backend", str(runtime.get("backend") or "Unknown"), "purple"),
+                    (
+                        "Context Window",
+                        (
+                            f"{int(runtime['context_window_tokens']):,}"
+                            if runtime.get("context_window_tokens")
+                            else "Not exposed"
+                        ),
+                        "teal",
+                    ),
+                ]
+            )
+            ui.label(
+                "Resolved before the first LLM turn; this is the primary model used by the job."
+            ).classes("text-sm text-green-700")
+        elif observed_models:
+            ui.label(
+                "This job predates the runtime identity manifest. Exact models observed on "
+                f"completed turns: {', '.join(observed_models)}."
+            ).classes("text-sm text-yellow-800")
+        else:
+            ui.label(
+                "No exact model identity was persisted for this legacy job. The model cannot be "
+                "reconstructed from token totals alone."
+            ).classes("text-sm text-yellow-800")
+
+        ui.label(
+            "Parent tasks are itemized by operation and iteration in Agentic Model Usage below."
+        ).classes("text-sm text-gray-600 mt-2")
+
+        if not subagents:
+            ui.label(
+                "No subagent spawn is recorded. This job used only its primary agent, or its "
+                "legacy provider transcript did not expose subagent lifecycle events."
+            ).classes("text-sm text-gray-500 italic mt-2")
+            return
+
+        columns = [
+            {"name": "agent", "label": "Agent / Thread", "field": "agent", "align": "left"},
+            {"name": "task", "label": "Task Type", "field": "task", "align": "left"},
+            {"name": "location", "label": "Parent Task", "field": "location", "align": "left"},
+            {"name": "model", "label": "Exact Model", "field": "model", "align": "left"},
+            {"name": "source", "label": "Model Evidence", "field": "source", "align": "left"},
+            {"name": "status", "label": "Status", "field": "status", "align": "left"},
+            {"name": "tokens", "label": "Task Tokens", "field": "tokens", "align": "right"},
+        ]
+        rows = []
+        for index, task in enumerate(subagents):
+            iteration = task.get("iteration")
+            phase = str(task.get("phase") or "unknown")
+            rows.append(
+                {
+                    "id": f"{index}:{task.get('agent_id')}",
+                    "agent": str(task.get("agent_id") or "Unknown"),
+                    "task": str(task.get("task_type") or "subagent"),
+                    "location": phase if iteration is None else f"{phase} / iteration {iteration}",
+                    "model": str(task.get("model") or "Not exposed"),
+                    "source": str(task.get("model_source") or "not_exposed"),
+                    "status": str(task.get("status") or "unknown"),
+                    "tokens": (
+                        f"{int(task['total_tokens']):,}"
+                        if task.get("total_tokens") is not None
+                        else "Included in parent total"
+                    ),
+                }
+            )
+        ui.table(columns=columns, rows=rows, row_key="id").classes("w-full mt-2")
+
+        ui.label(
+            "When a provider does not expose per-subagent tokens, they are shown as included in "
+            "the parent turn total rather than estimated or double-counted."
+        ).classes("text-sm text-gray-600")
+
+        with ui.expansion("Subagent prompts and results", icon="account_tree").classes(
+            "w-full mt-2"
+        ):
+            for index, task in enumerate(subagents, start=1):
+                name = str(task.get("agent_id") or f"subagent-{index}")
+                with ui.expansion(f"{index}. {name}", icon="smart_toy").classes("w-full"):
+                    ui.label("Task / prompt").classes("font-medium")
+                    ui.label(
+                        str(
+                            task.get("prompt_summary")
+                            or task.get("description")
+                            or "No prompt text was exposed."
+                        )
+                    ).classes("text-sm whitespace-pre-wrap")
+                    ui.label("Result summary").classes("font-medium mt-2")
+                    ui.label(
+                        str(task.get("result_summary") or "No result summary was exposed.")
+                    ).classes("text-sm whitespace-pre-wrap")
 
 
 def _load_job_skill_usage(job_dir: Path) -> dict[str, Any]:
@@ -1747,6 +1869,11 @@ def _render_job_skill_usage(usage: dict[str, Any]) -> None:
 
 def _render_report_tab(context: _JobDetailContext) -> None:
     skill_usage = {"value": _load_job_skill_usage(context.job_dir)}
+    agent_task_usage = {"value": build_job_agent_task_provenance(context.job_dir)}
+
+    @ui.refreshable
+    def render_agent_task_usage() -> None:
+        _render_job_agent_task_trace(agent_task_usage["value"], context.cost_records)
 
     @ui.refreshable
     def render_skill_usage() -> None:
@@ -1756,6 +1883,7 @@ def _render_report_tab(context: _JobDetailContext) -> None:
     def render_agent_usage() -> None:
         _render_job_agent_usage(context.cost_records)
 
+    render_agent_task_usage()
     render_skill_usage()
     render_agent_usage()
 
@@ -1763,6 +1891,8 @@ def _render_report_tab(context: _JobDetailContext) -> None:
     async def refresh_agent_transparency() -> None:
         context.cost_records = await _load_job_cost_records(context.job_id, context.user_id)
         skill_usage["value"] = _load_job_skill_usage(context.job_dir)
+        agent_task_usage["value"] = build_job_agent_task_provenance(context.job_dir)
+        render_agent_task_usage.refresh()
         render_skill_usage.refresh()
         render_agent_usage.refresh()
 

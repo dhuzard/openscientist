@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from claude_agent_sdk.types import TaskStartedMessage
 
 from openscientist.agent.base import AgentConfig
-from openscientist.agent.claude_code_agent import ClaudeCodeAgent
+from openscientist.agent.claude_code_agent import ClaudeCodeAgent, _IterationState
 from openscientist.providers.base import ClaudeCompatible
+from openscientist.transcript import CLAUDE, TaskStarted
 from tests.helpers import StubClaudeProvider
 
 
@@ -62,6 +64,29 @@ def test_build_options_uses_stdio_spec_for_openscientist_tools(tmp_path: Path) -
     assert "env" in cfg
     assert cfg["env"]["OPENSCIENTIST_JOB_ID"] == tmp_path.name
     assert cfg["env"]["OPENSCIENTIST_JOB_DIR"] == str(tmp_path)
+
+
+def test_stream_handler_preserves_subagent_task_lifecycle(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    state = _IterationState()
+    message = TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="task-1",
+        description="Analyze a subproblem",
+        uuid="message-1",
+        session_id="session-1",
+        tool_use_id="tool-parent",
+        task_type="analysis",
+    )
+
+    agent._handle_stream_message(message, state)
+    translated = CLAUDE.deserialize(state.transcript)
+
+    task = next(entry for entry in translated if isinstance(entry, TaskStarted))
+    assert task.task_id == "task-1"
+    assert task.description == "Analyze a subproblem"
+    assert task.parent_tool_use_id == "tool-parent"
 
 
 def test_subprocess_env_passes_through_unrelated_openscientist_vars(

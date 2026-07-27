@@ -324,6 +324,11 @@ class TestCollabToolCallItem:
             "id": "ct1",
             "type": "collabAgentToolCall",
             "prompt": "investigate this",
+            "model": "gpt-5.5-mini",
+            "reasoning_effort": "high",
+            "receiver_thread_ids": ["child-thread"],
+            "sender_thread_id": "parent-thread",
+            "tool": "spawnAgent",
             "agents_states": {"child-thread": {"status": "completed", "message": "done"}},
             "status": "completed",
         }
@@ -334,6 +339,12 @@ class TestCollabToolCallItem:
         assert collabs[0].agents_states == {
             "child-thread": {"status": "completed", "message": "done"}
         }
+        assert collabs[0].model == "gpt-5.5-mini"
+        assert collabs[0].reasoning_effort == "high"
+        assert collabs[0].receiver_thread_ids == ["child-thread"]
+        assert collabs[0].sender_thread_id == "parent-thread"
+        assert collabs[0].tool == "spawnAgent"
+        assert collabs[0].status == "completed"
 
 
 class TestWebSearchItem:

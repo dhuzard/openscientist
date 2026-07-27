@@ -160,8 +160,9 @@ def _render_db_cost_records(cost_records: list[CostRecord]) -> None:
     if any(not r.model or r.model.casefold() == "unknown" for r in cost_records):
         with ui.card().classes("w-full bg-yellow-50 border border-yellow-300 p-3"):
             ui.label(
-                "Some turns have an unknown model. Their token counts are real, but their "
-                "estimated dollar cost may be zero or incomplete because no model price matched."
+                "Some legacy turns were saved before exact model resolution. Their token counts "
+                "are real, but the historical model and cost cannot be reconstructed reliably. "
+                "Current turns persist the resolved model before work begins."
             ).classes("text-sm text-yellow-800")
 
 
