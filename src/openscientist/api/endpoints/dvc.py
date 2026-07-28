@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,6 +52,7 @@ class ApprovalResponse(StrictModel):
     approved_by: str
     approved_at: datetime
     context_sha256: str
+    decision: Literal["approved"]
     pre_analysis_checkpoint_id: str
 
 
