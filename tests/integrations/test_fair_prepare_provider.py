@@ -11,28 +11,47 @@ from openscientist.integrations.fair_prepare import (
     HttpFairPrepareProvider,
     bundle_manifest_to_csv,
     context_to_csv,
+    context_to_metadata,
 )
 from openscientist.preclinical_context.models import (
     EvidenceStatus,
     EvidenceValue,
     PreclinicalStudyContext,
+    StudyDesign,
 )
+
+
+def known(value: object) -> EvidenceValue:
+    return EvidenceValue(value=value, status=EvidenceStatus.RECORDED, source="test")
 
 
 def test_context_conversion_is_deterministic():
     context = PreclinicalStudyContext(
         study_id="study-1",
-        objective=EvidenceValue(
-            value="Describe cage activity",
-            status=EvidenceStatus.RECORDED,
-            source="protocol",
-        ),
+        objective=known("Describe cage activity"),
     )
     first = context_to_csv(context)
     second = context_to_csv(context)
     assert first == second
     assert b"study_id" in first
     assert b"Describe cage activity" in first
+
+
+def test_context_metadata_crosswalk_uses_prepare_and_arrive_ids():
+    context = PreclinicalStudyContext(
+        study_id="study-1",
+        objective=known("Describe cage activity"),
+        design=StudyDesign(
+            experimental_unit=known("cage"),
+            randomization=known("computer-generated allocation"),
+            blinding=known("analyst blinded"),
+        ),
+    )
+    metadata = context_to_metadata(context)
+    assert metadata["experimental_unit"] == "cage"
+    assert metadata["prepare_experimental_unit"] == "cage"
+    assert metadata["randomisation_method"] == "computer-generated allocation"
+    assert metadata["prepare_randomisation_blinding_criteria"]["blinding"] == "analyst blinded"
 
 
 def test_bundle_manifest_contains_only_file_metadata(tmp_path: Path):
@@ -44,11 +63,15 @@ def test_bundle_manifest_contains_only_file_metadata(tmp_path: Path):
 
 def test_provider_calls_real_fair_vcg_contract():
     calls: list[tuple[str, str]] = []
+    submitted_metadata: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, request.url.path))
         if request.url.path == "/api/upload":
             return httpx.Response(200, json={"dataset_id": "remote-1"})
+        if request.url.path == "/api/metadata/remote-1":
+            submitted_metadata.update(json.loads(request.content))
+            return httpx.Response(200, json={"metadata": submitted_metadata})
         if request.url.path == "/api/fair-score/remote-1":
             return httpx.Response(
                 200,
@@ -87,12 +110,16 @@ def test_provider_calls_real_fair_vcg_contract():
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     results = provider.assess_context(
-        PreclinicalStudyContext(study_id="study-1"),
+        PreclinicalStudyContext(
+            study_id="study-1",
+            design=StudyDesign(experimental_unit=known("cage")),
+        ),
         frameworks=("prepare-v1", "arrive-v2"),
     )
 
     assert [result.framework for result in results] == ["FAIR", "prepare-v1", "arrive-v2"]
     assert results[0].context_hash == results[1].context_hash
+    assert submitted_metadata["experimental_unit"] == "cage"
     assert any(
         finding.requirement_id == "experimental_design"
         and finding.status.value == "missing"
@@ -100,6 +127,7 @@ def test_provider_calls_real_fair_vcg_contract():
     )
     assert calls == [
         ("POST", "/api/upload"),
+        ("PUT", "/api/metadata/remote-1"),
         ("GET", "/api/fair-score/remote-1"),
         ("POST", "/api/remote-1/template/apply-from-paper"),
         ("POST", "/api/remote-1/template/apply-from-paper"),
