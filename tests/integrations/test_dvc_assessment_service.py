@@ -51,10 +51,12 @@ class FakeProvider:
 
 
 def test_pre_analysis_persists_assessment(tmp_path: Path):
+    dataset_id = "dvc-00000000-0000-0000-0000-000000000000"
+    (tmp_path / "dvc_datasets" / dataset_id).mkdir(parents=True)
     provider = FakeProvider()
     service = DVCAssessmentService(tmp_path, provider=provider)
     result = service.pre_analysis(
-        "dvc-00000000-0000-0000-0000-000000000000",
+        dataset_id,
         PreclinicalStudyContext(study_id="study-1"),
     )
 
