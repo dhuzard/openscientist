@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -34,11 +35,21 @@ class DVCAssessmentService:
         self.job_dir = Path(job_dir)
         self.provider = provider or HttpFairPrepareProvider()
 
+    def _dataset_dir(self, dataset_id: str) -> Path:
+        if not re.fullmatch(r"dvc-[0-9a-fA-F-]{36}", dataset_id):
+            raise ValueError("Invalid DVC dataset id.")
+        root = (self.job_dir / "dvc_datasets").resolve()
+        path = (root / dataset_id).resolve()
+        if root not in path.parents or not path.is_dir():
+            raise FileNotFoundError(f"DVC dataset not found: {dataset_id}")
+        return path
+
     def pre_analysis(
         self,
         dataset_id: str,
         context: PreclinicalStudyContext,
     ) -> DVCCheckpointResult:
+        self._dataset_dir(dataset_id)
         assessments = self.provider.assess_context(
             context,
             frameworks=("prepare-v1", "arrive-v2"),
@@ -46,10 +57,8 @@ class DVCAssessmentService:
         return self._persist("pre_analysis", dataset_id, assessments)
 
     def post_analysis(self, dataset_id: str) -> DVCCheckpointResult:
-        dataset_dir = self.job_dir / "dvc_datasets" / dataset_id
+        dataset_dir = self._dataset_dir(dataset_id)
         analysis_root = self.job_dir / "dvc_analyses"
-        if not dataset_dir.is_dir():
-            raise FileNotFoundError(f"DVC dataset not found: {dataset_id}")
         bundle_dir = self.job_dir / "dvc_bundles" / dataset_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
         for name in ("manifest.json", "measurements.csv", "events.csv"):
