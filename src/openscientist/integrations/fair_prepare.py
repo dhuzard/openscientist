@@ -20,7 +20,8 @@ from openscientist.preclinical_context.models import AssessmentResult, Preclinic
 
 DEFAULT_FAIR_PREPARE_URL = "http://fair-vcg-mentor:8000"
 FAIR_VCG_API_VERSION = "1.0.0"
-FAIR_VCG_TEMPLATE_REVISION = "main"
+FAIR_VCG_REPOSITORY = "Neuronautix/FAIR-VCG-mentor"
+FAIR_VCG_PINNED_COMMIT = "11b0918c01062a0c9a388b33d28068982712d762"
 
 
 class FairPrepareError(RuntimeError):
@@ -233,7 +234,9 @@ class HttpFairPrepareProvider:
         return AssessmentResult(
             assessment_id=f"fair-vcg-{dataset_id}-{framework}",
             framework=framework,
-            framework_version=f"FAIR-VCG-mentor-template-{FAIR_VCG_TEMPLATE_REVISION}",
+            framework_version=(
+                f"FAIR-VCG-mentor-template-{FAIR_VCG_PINNED_COMMIT[:12]}"
+            ),
             context_hash=source_hash,
             findings=findings,
         )
