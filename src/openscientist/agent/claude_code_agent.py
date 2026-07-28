@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from claude_agent_sdk import (
@@ -44,6 +45,7 @@ from openscientist.providers.base import ClaudeCompatible
 from openscientist.transcript import CLAUDE
 
 if TYPE_CHECKING:
+    from openscientist.database.models import Skill
     from openscientist.prompts.common import BackendFragments
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,8 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
     backend = AgentBackend.CLAUDE_CODE
     file_write_tool = "Write"
+    display_name = "Claude Code"
+    skills_subdir = ".claude/skills"
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -151,9 +155,35 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         return cls.system_prompt()
 
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
-        from openscientist.agent.skills import write_skills_to_claude_dir
+        # Claude's rich per-job CLAUDE.md is always written; skills follow.
+        self._write_job_claude_md(use_hypotheses=use_hypotheses)
+        await super().prepare_job_workspace(use_hypotheses=use_hypotheses)
 
-        await write_skills_to_claude_dir(self._config.job_dir, use_hypotheses=use_hypotheses)
+    def _write_job_claude_md(self, *, use_hypotheses: bool = False) -> None:
+        from openscientist.prompts import generate_job_claude_md
+        from openscientist.settings import get_settings
+
+        claude_dir = self._config.job_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (claude_dir / "CLAUDE.md").write_text(
+                generate_job_claude_md(
+                    use_hypotheses=use_hypotheses,
+                    phenix_available=get_settings().phenix.is_available,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Failed to write job CLAUDE.md: %s", e)
+
+    def _write_skill(self, skills_root: Path, skill: Skill) -> None:
+        # Flat ``<name>.md`` with a human header (the claude-agent-sdk layout).
+        skills_root.mkdir(parents=True, exist_ok=True)
+        header = f"# {skill.name}\n*Category: {skill.category}*\n"
+        if skill.description:
+            header += f"\n{skill.description}\n"
+        path = skills_root / f"{skill.category}--{skill.slug}.md"
+        path.write_text(header + "\n" + skill.content, encoding="utf-8")
 
     def apply_runtime_environment(self) -> None:
         # Auth/routing flags for the Claude CLI and the tools subprocess.
@@ -209,18 +239,11 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         """
         config = self._config
         env = dict(os.environ)
-        env["OPENSCIENTIST_JOB_ID"] = config.job_dir.name
-        env["OPENSCIENTIST_JOB_DIR"] = str(config.job_dir)
-        env["OPENSCIENTIST_USE_HYPOTHESES"] = "1" if config.use_hypotheses else "0"
-        if config.data_file is not None:
-            env["OPENSCIENTIST_DATA_FILE"] = str(config.data_file)
-        else:
+        env.update(self._job_env_overlay(config.job_dir))
+        if config.data_file is None:
             env.pop("OPENSCIENTIST_DATA_FILE", None)
-        if config.data_files:
-            env["OPENSCIENTIST_DATA_FILES"] = os.pathsep.join(str(p) for p in config.data_files)
-        else:
+        if not config.data_files:
             env.pop("OPENSCIENTIST_DATA_FILES", None)
-        env.update(config.tool_server_env)
         return env
 
     def _build_options(self) -> ClaudeAgentOptions:

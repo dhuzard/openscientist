@@ -76,6 +76,12 @@ RUN uv pip install --system -e .
 COPY --from=codex-build /usr/local/bin/codex /usr/local/bin/codex
 RUN chmod +x /usr/local/bin/codex
 
+# omp harness CLI (OPENSCIENTIST_HARNESS=omp): pinned static binary onto PATH.
+ARG OMP_VERSION=v17.1.5
+ARG OMP_RELEASE_BASE=https://github.com/can1357/oh-my-pi/releases/download
+RUN curl -fsSL "${OMP_RELEASE_BASE}/${OMP_VERSION}/omp-linux-x64" -o /usr/local/bin/omp \
+    && chmod +x /usr/local/bin/omp
+
 # Copy agent entrypoint
 COPY docker/agent-entrypoint.py /agent-entrypoint.py
 

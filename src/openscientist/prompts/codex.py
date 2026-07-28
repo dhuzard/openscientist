@@ -1,11 +1,9 @@
 """Codex agent prompt variants.
 
-The Codex agent reads its instructions from ``AGENTS.md`` and has no
-``.claude/`` directory, so the fragments drop Claude-specific paths and
-the ``Read`` tool name. Skills are delivered as native codex ``SKILL.md``
-files under ``.agents/skills/`` (see ``agent.skills.write_skills_to_codex_dir``),
-which codex auto-injects as a ``## Skills`` section, so the prompt points at
-that section and drops the nonexistent ``search_skills`` tool.
+Codex reads its instructions from ``AGENTS.md`` and has no ``.claude/`` dir, so
+the fragments drop the Claude paths and the ``Read`` tool name. Skills arrive as
+native ``.agents/skills/*/SKILL.md`` that codex auto-injects as a ``## Skills``
+section, so the prompt points there and drops the ``search_skills`` tool.
 """
 
 from openscientist.prompts.common import BackendFragments

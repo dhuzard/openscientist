@@ -123,3 +123,52 @@ def test_get_agent_rejects_provider_without_family(tmp_path: Path) -> None:
     ):
         with pytest.raises(ValueError, match="compatibility family"):
             get_agent(AgentConfig(job_dir=tmp_path))
+
+
+def test_get_agent_omp_harness_drives_claude_provider(tmp_path: Path) -> None:
+    from openscientist.agent.omp_agent import OmpAgent
+
+    provider = _ClaudeStub()
+    with (
+        patch("openscientist.agent.factory._resolve_harness", return_value="omp"),
+        patch("openscientist.agent.factory._instantiate_provider", return_value=provider),
+    ):
+        agent = get_agent(AgentConfig(job_dir=tmp_path))
+    assert isinstance(agent, OmpAgent)
+    assert agent.provider is provider
+
+
+def test_get_agent_omp_harness_drives_codex_provider(tmp_path: Path) -> None:
+    from openscientist.agent.omp_agent import OmpAgent
+    from tests.helpers import StubCodexProvider
+
+    provider = StubCodexProvider()
+    with (
+        patch("openscientist.agent.factory._resolve_harness", return_value="omp"),
+        patch("openscientist.agent.factory._instantiate_provider", return_value=provider),
+    ):
+        agent = get_agent(AgentConfig(job_dir=tmp_path))
+    assert isinstance(agent, OmpAgent)
+
+
+def test_forced_claude_code_rejects_codex_provider(tmp_path: Path) -> None:
+    from tests.helpers import StubCodexProvider
+
+    with (
+        patch("openscientist.agent.factory._resolve_harness", return_value="claude_code"),
+        patch(
+            "openscientist.agent.factory._instantiate_provider",
+            return_value=StubCodexProvider(),
+        ),
+    ):
+        with pytest.raises(ValueError, match="requires a Claude-compatible"):
+            get_agent(AgentConfig(job_dir=tmp_path))
+
+
+def test_forced_codex_rejects_claude_provider(tmp_path: Path) -> None:
+    with (
+        patch("openscientist.agent.factory._resolve_harness", return_value="codex"),
+        patch("openscientist.agent.factory._instantiate_provider", return_value=_ClaudeStub()),
+    ):
+        with pytest.raises(ValueError, match="requires an OpenAI-compatible"):
+            get_agent(AgentConfig(job_dir=tmp_path))

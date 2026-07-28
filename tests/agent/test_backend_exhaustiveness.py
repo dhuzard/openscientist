@@ -24,6 +24,7 @@ from openscientist.agent.factory import (
     agent_class_for_provider_id,
     backend_for_provider_id,
 )
+from openscientist.agent.omp_agent import OmpAgent  # noqa: F401
 from openscientist.prompts.common import BackendFragments
 from openscientist.providers import provider_class, provider_ids
 from openscientist.providers.base import Provider
@@ -106,11 +107,11 @@ def test_every_provider_class_is_registered() -> None:
         assert cls in registered, f"{cls.__name__} is not in providers._PROVIDER_CLASS_PATHS"
 
 
-def test_every_backend_has_a_display_name() -> None:
-    # display_name is a dict lookup. A new AgentBackend member without an entry
-    # would KeyError only at UI render time, so assert it eagerly here.
-    for backend in AgentBackend:
-        assert isinstance(backend.display_name, str) and backend.display_name
+def test_every_concrete_agent_declares_a_display_name() -> None:
+    # Enforced in __init_subclass__; a backend missing its label would otherwise
+    # only surface at UI render time.
+    for cls in _concrete_agent_classes():
+        assert isinstance(cls.display_name, str) and cls.display_name, cls
 
 
 def test_prompts_are_fully_substituted() -> None:

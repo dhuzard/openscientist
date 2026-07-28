@@ -8,6 +8,7 @@ calls via asyncio.run().
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -574,8 +575,6 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
 
 def get_version_metadata() -> dict[str, str]:
     """Get OpenScientist version metadata for reproducibility."""
-    import os
-
     from openscientist.version import SHORT_COMMIT_LENGTH, get_commit
 
     metadata: dict[str, str] = {}
@@ -598,15 +597,6 @@ def get_version_metadata() -> dict[str, str]:
         pass
 
     return metadata
-
-
-_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
-    "Anthropic": "claude-sonnet-4-20250514",
-    "CBORG": "claude-sonnet-4-20250514",
-    "Vertex AI": "claude-sonnet-4-5@20250929",
-    "AWS Bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "Azure AI Foundry": "claude-sonnet-4-5",
-}
 
 
 async def _persist_job_cost_record(
@@ -654,7 +644,8 @@ async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> 
         model_name = (
             settings.provider.model
             or settings.provider.anthropic_default_sonnet_model
-            or _PROVIDER_DEFAULT_MODELS.get(provider.display_name, "unknown")
+            or provider.effective_model_name()
+            or "unknown"
         )
         await _persist_job_cost_record(job_id, tokens, provider.display_name, model_name)
     except Exception as cost_err:

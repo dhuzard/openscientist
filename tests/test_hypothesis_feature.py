@@ -513,7 +513,7 @@ class TestStatsBadgesHypotheses:
         # not the misleading "Model: Openai".
         badges = _stats_badges(self._make_job(llm_provider="openai"), lit_count=0)
         assert self._badge_value(badges, "Agent") == "Codex"
-        assert self._badge_value(badges, "Provider") == "OpenAI"
+        assert self._badge_value(badges, "Provider") == "OpenAI API"
         assert self._get_badge(badges, "Model") is None
 
     def test_azure_openai_job_shows_codex_and_azure_provider(self) -> None:
@@ -521,7 +521,7 @@ class TestStatsBadgesHypotheses:
 
         badges = _stats_badges(self._make_job(llm_provider="azure-openai"), lit_count=0)
         assert self._badge_value(badges, "Agent") == "Codex"
-        assert self._badge_value(badges, "Provider") == "Azure OpenAI"
+        assert self._badge_value(badges, "Provider") == "Azure OpenAI Service"
         assert self._get_badge(badges, "Model") is None
 
     def test_ollama_job_shows_codex_and_ollama_provider(self) -> None:
@@ -1070,49 +1070,39 @@ class TestGenerateJobClaudeMd:
 
 
 # ---------------------------------------------------------------------------
-# 15. _write_skills_to_claude_dir writes JOB_CLAUDE.md
+# 15. ClaudeCodeAgent writes the job CLAUDE.md
 # ---------------------------------------------------------------------------
 
 
 class TestWriteSkillsToClaudeDirJobClaudeMd:
-    """_write_skills_to_claude_dir writes the correct CLAUDE.md based on use_hypotheses."""
+    """ClaudeCodeAgent.prepare_job_workspace writes CLAUDE.md keyed on use_hypotheses,
+    even when the skills DB is unavailable."""
 
-    async def test_writes_job_claude_md_with_hypotheses(self, tmp_path: Path) -> None:
-        from openscientist.agent.skills import write_skills_to_claude_dir
+    async def _claude_md(self, tmp_path: Path, **kwargs: bool) -> str:
+        from openscientist.agent.base import AgentConfig
+        from openscientist.agent.claude_code_agent import ClaudeCodeAgent
+        from tests.helpers import StubClaudeProvider
 
+        agent = ClaudeCodeAgent(AgentConfig(job_dir=tmp_path), StubClaudeProvider())
         with patch(
-            "openscientist.agent.skills.AsyncSessionLocal",
+            "openscientist.database.session.AsyncSessionLocal",
             side_effect=Exception("no db"),
         ):
-            await write_skills_to_claude_dir(tmp_path, use_hypotheses=True)
+            await agent.prepare_job_workspace(**kwargs)
+        return (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
 
-        claude_md = (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    async def test_writes_job_claude_md_with_hypotheses(self, tmp_path: Path) -> None:
+        claude_md = await self._claude_md(tmp_path, use_hypotheses=True)
         assert "add_hypothesis" in claude_md
         assert "update_hypothesis" in claude_md
         assert "Hypothesis Tracking Workflow" in claude_md
 
     async def test_writes_job_claude_md_without_hypotheses(self, tmp_path: Path) -> None:
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with patch(
-            "openscientist.agent.skills.AsyncSessionLocal",
-            side_effect=Exception("no db"),
-        ):
-            await write_skills_to_claude_dir(tmp_path, use_hypotheses=False)
-
-        claude_md = (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        claude_md = await self._claude_md(tmp_path, use_hypotheses=False)
         assert "add_hypothesis" not in claude_md
         assert "update_hypothesis" not in claude_md
         assert "execute_code" in claude_md
 
     async def test_default_use_hypotheses_is_false(self, tmp_path: Path) -> None:
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with patch(
-            "openscientist.agent.skills.AsyncSessionLocal",
-            side_effect=Exception("no db"),
-        ):
-            await write_skills_to_claude_dir(tmp_path)
-
-        claude_md = (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        claude_md = await self._claude_md(tmp_path)
         assert "add_hypothesis" not in claude_md

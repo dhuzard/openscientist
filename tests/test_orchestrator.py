@@ -440,11 +440,11 @@ class TestIncrementKsIteration:
         assert ks.data["hypotheses"] == []
 
 
-# ─── _write_skills_to_claude_dir ──────────────────────────────────────
+# ─── ClaudeCodeAgent.prepare_job_workspace ────────────────────────────
 
 
 class TestWriteSkillsToClaudeDir:
-    """Tests for _write_skills_to_claude_dir."""
+    """ClaudeCodeAgent writes CLAUDE.md plus flat skill files into .claude/."""
 
     def _make_skill(self, *, name, category, slug, description=None, content="Skill content."):
         skill = MagicMock()
@@ -455,10 +455,27 @@ class TestWriteSkillsToClaudeDir:
         skill.content = content
         return skill
 
+    async def _prepare(self, tmp_path, skills):
+        from openscientist.agent.base import AgentConfig
+        from openscientist.agent.claude_code_agent import ClaudeCodeAgent
+        from tests.helpers import StubClaudeProvider
+
+        agent = ClaudeCodeAgent(AgentConfig(job_dir=tmp_path), StubClaudeProvider())
+        with (
+            patch("openscientist.database.session.AsyncSessionLocal") as mock_session_cls,
+            patch(
+                "openscientist.prompts.get_enabled_skills", new_callable=AsyncMock
+            ) as mock_get_skills,
+        ):
+            mock_get_skills.return_value = skills
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value = mock_cm
+            await agent.prepare_job_workspace()
+
     @pytest.mark.asyncio
     async def test_writes_skill_files(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skill = self._make_skill(
             name="Hypothesis Generation",
             category="analysis",
@@ -466,20 +483,7 @@ class TestWriteSkillsToClaudeDir:
             description="How to form hypotheses",
             content="Step 1: ...\nStep 2: ...",
         )
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = [skill]
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [skill])
 
         skills_dir = tmp_path / ".claude" / "skills"
         assert skills_dir.is_dir()
@@ -493,21 +497,7 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_no_skills_does_not_create_skills_dir(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = []
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [])
 
         # .claude/ dir and CLAUDE.md are always written; skills/ subdir is not
         assert (tmp_path / ".claude" / "CLAUDE.md").exists()
@@ -515,8 +505,6 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_skill_without_description(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skill = self._make_skill(
             name="Stopping Criteria",
             category="workflow",
@@ -524,20 +512,7 @@ class TestWriteSkillsToClaudeDir:
             description=None,
             content="Stop when done.",
         )
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = [skill]
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [skill])
 
         md_file = tmp_path / ".claude" / "skills" / "workflow--stopping-criteria.md"
         assert md_file.exists()
@@ -547,21 +522,7 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_always_writes_job_claude_md(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = []
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [])
 
         claude_md = tmp_path / ".claude" / "CLAUDE.md"
         assert claude_md.exists()
@@ -571,26 +532,11 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_writes_multiple_skill_files(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skills = [
             self._make_skill(name="Skill A", category="cat1", slug="skill-a", content="Content A"),
             self._make_skill(name="Skill B", category="cat2", slug="skill-b", content="Content B"),
         ]
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = skills
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, skills)
 
         skills_dir = tmp_path / ".claude" / "skills"
         assert len(list(skills_dir.glob("*.md"))) == 2
