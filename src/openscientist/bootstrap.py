@@ -34,6 +34,7 @@ _VALID_JOB_STATUSES = {
     "pending",
     "queued",
     "running",
+    "paused",
     "awaiting_feedback",
     "generating_report",
     "completed",

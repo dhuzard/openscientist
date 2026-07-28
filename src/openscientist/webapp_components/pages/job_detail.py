@@ -65,7 +65,7 @@ def _derive_progress_from_ks(
         return default_iterations, 0
     findings_count = len(ks_data.get("findings", []))
     ks_iteration = int(ks_data.get("iteration", 1))
-    if status in ("running", "awaiting_feedback"):
+    if status in ("running", "paused", "awaiting_feedback", "generating_report"):
         iterations_completed = ks_iteration - 1 if ks_iteration > 1 else 0
     else:
         iterations_completed = ks_iteration
@@ -849,6 +849,15 @@ def _render_cancelled_notice(job_info: Any) -> None:
         ui.label(job_info.cancellation_reason or "No reason provided").classes("text-orange-700")
 
 
+def _render_paused_notice() -> None:
+    with ui.card().classes("w-full bg-blue-50 border border-blue-300 mb-4 p-4"):
+        ui.label("Job Paused").classes("text-subtitle2 font-bold text-blue-800")
+        ui.label(
+            "Completed work is saved. Resume to continue from the first unfinished iteration, "
+            "or generate a report from the evidence collected so far."
+        ).classes("text-blue-700")
+
+
 def _render_ks_loading_notice(ks_load_error: str) -> None:
     with ui.card().classes("w-full bg-yellow-50 border border-yellow-300 mb-4 p-4"):
         ui.label("Loading...").classes("text-subtitle2 font-bold text-yellow-800")
@@ -861,6 +870,8 @@ def _render_job_status_notices(context: _JobDetailContext) -> None:
         render_error_card(error_info, context.job_info, context.job_dir)
     if context.job_info.status == JobStatus.CANCELLED:
         _render_cancelled_notice(context.job_info)
+    if context.job_info.status == JobStatus.PAUSED:
+        _render_paused_notice()
     if context.ks_load_error:
         _render_ks_loading_notice(context.ks_load_error)
 
@@ -974,6 +985,162 @@ def _render_research_question_card(context: _JobDetailContext) -> None:
         )
 
 
+def _run_owner_job_action(
+    context: _JobDetailContext,
+    method_name: str,
+    success_message: str,
+    *args: Any,
+) -> None:
+    """Run one owner-only lifecycle action and surface a stable UI result."""
+    if not context.is_owner:
+        ui.notify("Only the job owner can control this run.", type="negative")
+        return
+    try:
+        method = getattr(context.job_manager, method_name)
+        method(context.job_id, *args)
+    except ValueError as exc:
+        ui.notify(str(exc), type="warning")
+        return
+    except Exception:
+        logger.exception("Job control %s failed for %s", method_name, context.job_id)
+        ui.notify("The job control failed. Please try again.", type="negative")
+        return
+    ui.notify(success_message, type="positive")
+    ui.navigate.to(f"/job/{context.job_id}")
+
+
+def _confirm_stop_and_report(context: _JobDetailContext) -> None:
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Stop discovery and generate the report?").classes("text-lg font-bold")
+        ui.label(
+            "The active analysis turn will be stopped. OpenScientist will create the final "
+            "report using findings, literature, plots, and other evidence already persisted. "
+            "You will not be able to resume after the report completes."
+        ).classes("text-sm text-gray-600 max-w-lg")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Keep running", on_click=dialog.close).props("flat color=grey")
+
+            def confirm() -> None:
+                dialog.close()
+                _run_owner_job_action(
+                    context,
+                    "stop_and_generate_report",
+                    "Discovery stopped. Generating the report from saved work.",
+                )
+
+            ui.button("Stop and report", on_click=confirm).props("color=negative")
+    dialog.open()
+
+
+def _show_iteration_limit_dialog(context: _JobDetailContext) -> None:
+    current_iteration = max(context.job_info.iterations_completed + 1, 1)
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Reduce remaining iterations").classes("text-lg font-bold")
+        ui.label(
+            "The new limit cannot be below the iteration currently in progress and cannot "
+            "be increased later from this control."
+        ).classes("text-sm text-gray-600 max-w-lg")
+        new_limit = ui.number(
+            "New maximum iterations",
+            value=max(current_iteration, context.job_info.max_iterations - 1),
+            min=current_iteration,
+            max=context.job_info.max_iterations - 1,
+            step=1,
+        ).props("outlined")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def confirm() -> None:
+                dialog.close()
+                _run_owner_job_action(
+                    context,
+                    "update_iteration_limit",
+                    f"Iteration limit reduced to {int(new_limit.value)}.",
+                    int(new_limit.value),
+                )
+
+            ui.button("Apply limit", on_click=confirm).props("color=primary")
+    dialog.open()
+
+
+def _available_run_controls(context: _JobDetailContext) -> set[str]:
+    """Return lifecycle controls available to this user and job state."""
+    if not context.is_owner:
+        return set()
+    status = context.job_info.status
+    controls: set[str] = set()
+    if status in {JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK}:
+        controls.add("pause")
+    if status == JobStatus.PAUSED:
+        controls.add("resume")
+    if status in {
+        JobStatus.PENDING,
+        JobStatus.QUEUED,
+        JobStatus.RUNNING,
+        JobStatus.AWAITING_FEEDBACK,
+        JobStatus.PAUSED,
+    }:
+        current_iteration = max(context.job_info.iterations_completed + 1, 1)
+        if context.job_info.max_iterations > current_iteration:
+            controls.add("reduce_iterations")
+    if status in {
+        JobStatus.RUNNING,
+        JobStatus.AWAITING_FEEDBACK,
+        JobStatus.PAUSED,
+    }:
+        controls.add("stop_and_report")
+    return controls
+
+
+def _render_job_runtime_controls(context: _JobDetailContext) -> None:
+    """Render lifecycle controls for an active job owner."""
+    controls = _available_run_controls(context)
+    if not controls:
+        return
+
+    with ui.card().classes("w-full mb-4 border border-gray-200"):
+        with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
+            with ui.column().classes("gap-0"):
+                ui.label("Run controls").classes("font-semibold")
+                ui.label(
+                    "Completed iterations and tool results are persisted before these controls "
+                    "take effect."
+                ).classes("text-xs text-gray-600")
+            with ui.row().classes("gap-2 flex-wrap"):
+                if "pause" in controls:
+                    ui.button(
+                        "Pause",
+                        icon="pause",
+                        on_click=lambda: _run_owner_job_action(
+                            context,
+                            "pause_job",
+                            "Pause requested. Saved work can be resumed later.",
+                        ),
+                    ).props("color=warning outline")
+                if "resume" in controls:
+                    ui.button(
+                        "Resume",
+                        icon="play_arrow",
+                        on_click=lambda: _run_owner_job_action(
+                            context,
+                            "resume_job",
+                            "Job resumed from its first unfinished iteration.",
+                        ),
+                    ).props("color=positive")
+                if "reduce_iterations" in controls:
+                    ui.button(
+                        "Reduce iterations",
+                        icon="tune",
+                        on_click=lambda: _show_iteration_limit_dialog(context),
+                    ).props("color=primary outline")
+                if "stop_and_report" in controls:
+                    ui.button(
+                        "Stop and report",
+                        icon="stop_circle",
+                        on_click=lambda: _confirm_stop_and_report(context),
+                    ).props("color=negative outline")
+
+
 def _render_timeline_content_for_context(context: _JobDetailContext) -> None:
     if not is_client_connected():
         return
@@ -1022,6 +1189,7 @@ def _reload_required_statuses() -> list[JobStatus]:
         JobStatus.COMPLETED,
         JobStatus.FAILED,
         JobStatus.CANCELLED,
+        JobStatus.PAUSED,
         JobStatus.AWAITING_FEEDBACK,
     ]
 
@@ -1102,6 +1270,7 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
 
     render_job_stats()
     _render_research_question_card(context)
+    _render_job_runtime_controls(context)
     ui.label("Investigation Timeline").classes("text-h6 font-bold mb-2")
     render_timeline()
 

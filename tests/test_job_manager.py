@@ -19,6 +19,7 @@ class TestJobStatus:
             "pending",
             "queued",
             "running",
+            "paused",
             "awaiting_feedback",
             "generating_report",
             "completed",
@@ -636,6 +637,192 @@ class TestJobManagerCancellationConcurrency:
             return_value={job_id: JobStatus.CANCELLED.value},
         ):
             assert manager._get_active_job_count() == 1
+
+
+class TestJobManagerRunControls:
+    """Pause, resume, shorten, and early-report controls."""
+
+    @staticmethod
+    def _job(job_id: str, status: JobStatus, *, max_iterations: int = 10) -> JobInfo:
+        return JobInfo(
+            job_id=job_id,
+            research_question="Q?",
+            status=status,
+            created_at="2026-02-01T00:00:00+00:00",
+            max_iterations=max_iterations,
+            iterations_completed=3,
+        )
+
+    def test_pause_persists_resume_checkpoint_and_stops_container(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        runner = MagicMock()
+        with (
+            patch.object(manager, "get_job", return_value=self._job(job_id, JobStatus.RUNNING)),
+            patch(
+                "openscientist.job_manager._db_apply_job_control",
+                new_callable=AsyncMock,
+                return_value=(4, 10),
+            ) as apply_control,
+            patch(
+                "openscientist.job_container.JobContainerRunner",
+                return_value=runner,
+            ),
+        ):
+            manager.pause_job(job_id)
+
+        assert apply_control.await_args.kwargs == {
+            "status": JobStatus.PAUSED,
+            "set_resume_from_current": True,
+        }
+        runner.stop.assert_called_once_with(job_id)
+
+    def test_resume_requires_worker_to_finish_pausing(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        with patch.object(
+            manager,
+            "get_job",
+            return_value=self._job(job_id, JobStatus.PAUSED),
+        ):
+            with pytest.raises(ValueError, match="still pausing"):
+                manager.resume_job(job_id)
+
+    def test_resume_marks_pending_then_starts(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        with (
+            patch.object(manager, "get_job", return_value=self._job(job_id, JobStatus.PAUSED)),
+            patch(
+                "openscientist.job_manager._db_apply_job_control",
+                new_callable=AsyncMock,
+                return_value=(4, 10),
+            ) as apply_control,
+            patch.object(manager, "start_job") as start,
+        ):
+            manager.resume_job(job_id)
+
+        assert apply_control.await_args.kwargs == {"status": JobStatus.PENDING}
+        start.assert_called_once_with(job_id)
+
+    def test_reduce_iteration_limit_returns_persisted_values(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        with (
+            patch.object(manager, "get_job", return_value=self._job(job_id, JobStatus.RUNNING)),
+            patch(
+                "openscientist.job_manager._db_apply_job_control",
+                new_callable=AsyncMock,
+                return_value=(4, 6),
+            ),
+        ):
+            assert manager.update_iteration_limit(job_id, 6) == (4, 6)
+
+    def test_stop_and_report_stops_active_discovery_container(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        runner = MagicMock()
+        with (
+            patch.object(manager, "get_job", return_value=self._job(job_id, JobStatus.RUNNING)),
+            patch(
+                "openscientist.job_manager._db_apply_job_control",
+                new_callable=AsyncMock,
+                return_value=(4, 10),
+            ) as apply_control,
+            patch(
+                "openscientist.job_container.JobContainerRunner",
+                return_value=runner,
+            ),
+        ):
+            manager.stop_and_generate_report(job_id)
+
+        assert apply_control.await_args.kwargs == {"status": JobStatus.GENERATING_REPORT}
+        runner.stop.assert_called_once_with(job_id)
+
+    def test_paused_report_rejects_full_queue_before_changing_status(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        other_job_id = str(uuid4())
+        manager._running_jobs[other_job_id] = MagicMock()
+
+        with (
+            patch.object(
+                manager,
+                "get_job",
+                return_value=self._job(job_id, JobStatus.PAUSED),
+            ),
+            patch(
+                "openscientist.job_manager._db_get_job_statuses",
+                new_callable=AsyncMock,
+                return_value={other_job_id: JobStatus.RUNNING.value},
+            ),
+            patch(
+                "openscientist.job_manager._db_apply_job_control",
+                new_callable=AsyncMock,
+            ) as apply_control,
+        ):
+            with pytest.raises(ValueError, match="maximum concurrent"):
+                manager.stop_and_generate_report(job_id)
+
+        apply_control.assert_not_awaited()
+
+    def test_container_monitor_switches_discovery_to_report_only(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        runner = MagicMock()
+        original_run = JobManager._run_job_in_container
+
+        with (
+            patch.object(
+                manager,
+                "get_job",
+                return_value=self._job(job_id, JobStatus.RUNNING),
+            ),
+            patch.object(
+                manager,
+                "_load_job_info",
+                return_value=self._job(job_id, JobStatus.GENERATING_REPORT),
+            ),
+            patch.object(manager, "_update_job_status"),
+            patch.object(manager, "_run_job_in_container") as recurse,
+            patch("openscientist.job_manager.time.sleep"),
+            patch("openscientist.job_container.JobContainerRunner", return_value=runner),
+        ):
+            original_run(manager, job_id)
+
+        recurse.assert_called_once_with(job_id, run_mode="report_only")
+        runner.cleanup.assert_called_once()
+
+    def test_container_monitor_releases_terminal_worker_slot(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        runner = MagicMock()
+
+        with (
+            patch.object(
+                manager,
+                "get_job",
+                return_value=self._job(job_id, JobStatus.RUNNING),
+            ),
+            patch.object(
+                manager,
+                "_load_job_info",
+                return_value=self._job(job_id, JobStatus.COMPLETED),
+            ),
+            patch.object(manager, "_update_job_status"),
+            patch.object(manager, "_start_next_queued_job") as start_next,
+            patch("openscientist.job_manager.time.sleep"),
+            patch("openscientist.job_container.JobContainerRunner", return_value=runner),
+        ):
+            manager._run_job_in_container(job_id)
+
+        assert job_id not in manager._running_jobs
+        runner.cleanup.assert_called_once()
+        start_next.assert_called_once()
 
 
 class TestJobManagerCleanup:

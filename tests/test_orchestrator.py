@@ -223,7 +223,10 @@ class TestDiscoveryCancellationAndFailure:
     @pytest.mark.asyncio
     async def test_run_discovery_stops_when_cancelled_before_next_iteration(self, tmp_path):
         from openscientist.agent.base import IterationResult, TokenUsage
-        from openscientist.orchestrator.discovery import run_discovery_async
+        from openscientist.orchestrator.discovery import (
+            _DiscoveryCancelledError,
+            run_discovery_async,
+        )
 
         job_id = str(uuid4())
         job_dir = tmp_path / job_id
@@ -290,10 +293,12 @@ class TestDiscoveryCancellationAndFailure:
             ),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration"),
             patch(
-                "openscientist.orchestrator.discovery._get_job_status",
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
                 new_callable=AsyncMock,
-                side_effect=["running", "cancelled"],
-                create=True,
+                side_effect=[
+                    3,
+                    _DiscoveryCancelledError("cancelled"),
+                ],
             ),
         ):
             result = await run_discovery_async(job_dir)
@@ -378,16 +383,129 @@ class TestDiscoveryCancellationAndFailure:
             ),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration"),
             patch(
-                "openscientist.orchestrator.discovery._get_job_status",
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
                 new_callable=AsyncMock,
-                return_value="running",
-                create=True,
+                return_value=3,
             ),
         ):
             result = await run_discovery_async(job_dir)
 
         assert result["status"] == "failed"
         mock_report_phase.assert_not_awaited()
+
+
+class TestDiscoveryResumeAndLimitControls:
+    """The loop resumes unfinished work and honors live limit reductions."""
+
+    @pytest.mark.asyncio
+    async def test_resume_starts_at_persisted_unfinished_iteration(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.discovery import _run_primary_discovery_loop
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        ks = KnowledgeState(job_id, "Question?", 5)
+        ks.data["iteration"] = 3
+        executor = MagicMock()
+        executor.run_iteration = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="resumed iteration complete",
+                tool_calls=0,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 5,
+            "resume_iteration": 3,
+            "investigation_mode": "autonomous",
+            "data_files": [],
+        }
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
+                new_callable=AsyncMock,
+                side_effect=[3, 3],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
+                return_value=ks,
+            ),
+            patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
+            patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+        ):
+            await _run_primary_discovery_loop(
+                executor=executor,
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        prompt = executor.run_iteration.await_args.args[0]
+        assert "# Iteration 3 of 3" in prompt
+        assert executor.run_iteration.await_args.kwargs["reset_session"] is True
+        increment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reduced_limit_after_first_turn_starts_report_phase(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.discovery import _run_primary_discovery_loop
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        ks = KnowledgeState(job_id, "Question?", 5)
+        executor = MagicMock()
+        executor.run_iteration = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="first iteration complete",
+                tool_calls=0,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 5,
+            "resume_iteration": 1,
+            "investigation_mode": "autonomous",
+            "data_files": [],
+        }
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
+                new_callable=AsyncMock,
+                side_effect=[5, 1],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
+                return_value=ks,
+            ),
+            patch("openscientist.orchestrator.discovery._sync_version_metadata_if_available"),
+            patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
+            patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+        ):
+            await _run_primary_discovery_loop(
+                executor=executor,
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        assert executor.run_iteration.await_count == 1
+        increment.assert_not_called()
 
 
 # ─── increment_ks_iteration ──────────────────────────────────────────
@@ -1344,7 +1462,7 @@ class TestRegenerateReportAsync:
             ),
             patch.object(
                 discovery, "_build_and_prepare_executor", new=AsyncMock(return_value=executor)
-            ),
+            ) as build_executor,
             patch.object(discovery, "_run_primary_discovery_loop", new=AsyncMock()) as loop,
             patch.object(discovery, "_run_report_generation_phase", new=report_phase),
             patch.object(
@@ -1357,6 +1475,11 @@ class TestRegenerateReportAsync:
 
         # The discovery iterations are never re-run, only the report phase runs.
         loop.assert_not_awaited()
+        build_executor.assert_awaited_once_with(
+            tmp_path,
+            self._runtime(),
+            operation_status="generating_report",
+        )
         report_phase.assert_awaited_once()
         # The executor is always finalized (cost record + shutdown).
         finalize.assert_awaited_once()

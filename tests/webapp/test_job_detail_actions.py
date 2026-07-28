@@ -62,6 +62,54 @@ def test_regenerate_action_calls_manager_for_admin() -> None:
     context.job_manager.regenerate_report.assert_called_once_with("job-1")
 
 
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (JobStatus.RUNNING, {"pause", "reduce_iterations", "stop_and_report"}),
+        (JobStatus.AWAITING_FEEDBACK, {"pause", "reduce_iterations", "stop_and_report"}),
+        (JobStatus.PAUSED, {"resume", "reduce_iterations", "stop_and_report"}),
+        (JobStatus.COMPLETED, set()),
+    ],
+)
+def test_owner_run_controls_follow_job_status(
+    status: JobStatus,
+    expected: set[str],
+) -> None:
+    context = SimpleNamespace(
+        is_owner=True,
+        job_info=SimpleNamespace(
+            status=status,
+            iterations_completed=2,
+            max_iterations=10,
+        ),
+    )
+    assert job_detail._available_run_controls(context) == expected  # type: ignore[arg-type]
+
+
+def test_shared_user_cannot_see_run_controls() -> None:
+    context = SimpleNamespace(
+        is_owner=False,
+        job_info=SimpleNamespace(
+            status=JobStatus.RUNNING,
+            iterations_completed=2,
+            max_iterations=10,
+        ),
+    )
+    assert job_detail._available_run_controls(context) == set()  # type: ignore[arg-type]
+
+
+def test_owner_action_calls_requested_manager_method() -> None:
+    manager = SimpleNamespace(pause_job=MagicMock())
+    context = SimpleNamespace(is_owner=True, job_id="job-1", job_manager=manager)
+    with patch.object(job_detail, "ui"):
+        job_detail._run_owner_job_action(  # type: ignore[arg-type]
+            context,
+            "pause_job",
+            "Paused",
+        )
+    manager.pause_job.assert_called_once_with("job-1")
+
+
 class TestTimelineHeaderText:
     """The per-iteration timeline header must not mislabel a summary-less
     iteration as 'Completed' (which reads as the whole job being done)."""

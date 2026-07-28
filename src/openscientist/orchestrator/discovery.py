@@ -30,7 +30,6 @@ from openscientist.exceptions import OpenScientistError
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import (
     FeedbackWaitResult,
-    _get_job_status,
     build_consensus_prompt,
     build_consensus_retry_prompt,
     build_initial_prompt,
@@ -52,6 +51,14 @@ logger = logging.getLogger(__name__)
 
 class _DiscoveryCancelledError(RuntimeError):
     """Raised when a job is cancelled during discovery execution."""
+
+
+class _DiscoveryPausedError(RuntimeError):
+    """Raised when a job is paused during discovery execution."""
+
+
+class _DiscoveryReportRequestedError(RuntimeError):
+    """Raised when the user requests an early report."""
 
 
 @dataclass(frozen=True)
@@ -166,16 +173,43 @@ async def _wait_for_coinvestigate_feedback(
         return None
     await update_job_status(job_dir, "awaiting_feedback")
     wait_result = await wait_for_feedback_or_timeout(job_dir)
-    if wait_result["outcome"] != "cancelled":
+    if wait_result["outcome"] in {"feedback", "timeout", "continued"}:
         await update_job_status(job_dir, "running")
     return wait_result
 
 
-async def _assert_job_not_cancelled(job_id: str) -> None:
-    """Raise if the job was cancelled by the user."""
-    status = await _get_job_status(job_id)
+async def _job_control_checkpoint(job_id: str) -> int:
+    """Apply cooperative job controls and return the latest iteration limit."""
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        result = await session.execute(
+            select(JobModel.status, JobModel.max_iterations).where(JobModel.id == UUID(job_id))
+        )
+        row = result.one_or_none()
+    if row is None:
+        raise RuntimeError(f"Job {job_id} disappeared during discovery")
+    status, max_iterations = row
     if status == "cancelled":
         raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
+    if status == "paused":
+        raise _DiscoveryPausedError(f"Job {job_id} was paused")
+    if status == "generating_report":
+        raise _DiscoveryReportRequestedError(f"Early report requested for job {job_id}")
+    return int(max_iterations)
+
+
+def _feedback_from_wait_result(
+    job_id: str,
+    wait_result: FeedbackWaitResult | None,
+) -> str | None:
+    if wait_result is None:
+        return None
+    if wait_result["outcome"] == "cancelled":
+        raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
+    if wait_result["outcome"] == "paused":
+        raise _DiscoveryPausedError(f"Job {job_id} was paused")
+    if wait_result["outcome"] == "report_requested":
+        raise _DiscoveryReportRequestedError(f"Early report requested for job {job_id}")
+    return wait_result["feedback_text"] if wait_result["outcome"] == "feedback" else None
 
 
 async def _run_primary_discovery_loop(
@@ -188,70 +222,84 @@ async def _run_primary_discovery_loop(
 ) -> None:
     """Run initial and iterative discovery phases before report generation."""
     job_id = runtime["job_id"]
-    max_iterations = runtime["max_iterations"]
+    max_iterations = int(runtime["max_iterations"])
     data_files = runtime["data_files"]
     investigation_mode = runtime["investigation_mode"]
-
-    ks = KnowledgeState.load_from_database_sync(job_id)
-    initial_prompt = build_initial_prompt(
-        runtime["research_question"],
-        max_iterations,
-        data_files,
-        ks,
-        description=runtime.get("description"),
-    )
-
-    logger.info("Iteration 1/%d: Starting session", max_iterations)
-    result = await executor.run_iteration(initial_prompt, reset_session=True)
-    _check_turn_outcome(result, 1)
-
-    _sync_version_metadata_if_available(job_id)
-    _append_iteration_artifacts(
-        provenance_dir=provenance_dir,
-        log_file=log_file,
-        iteration=1,
-        prompt=initial_prompt,
-        result=result,
-        overwrite_log=True,
-    )
-    if max_iterations > 1:
-        increment_ks_iteration(job_id)
-    await _assert_job_not_cancelled(job_id)
-
-    pending_feedback_result = await _wait_for_coinvestigate_feedback(
-        job_dir,
-        investigation_mode,
-        current_iteration=1,
-        max_iterations=max_iterations,
-    )
-    if pending_feedback_result and pending_feedback_result["outcome"] == "cancelled":
-        raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
-    pending_feedback = (
-        pending_feedback_result["feedback_text"]
-        if pending_feedback_result and pending_feedback_result["outcome"] == "feedback"
-        else None
-    )
+    start_iteration = max(int(runtime.get("resume_iteration") or 1), 1)
+    pending_feedback: str | None = None
     reset_interval = 5
 
-    for iteration in range(2, max_iterations + 1):
-        await _assert_job_not_cancelled(job_id)
+    if start_iteration <= 1:
+        current_limit = await _job_control_checkpoint(job_id)
+        ks = KnowledgeState.load_from_database_sync(job_id)
+        initial_prompt = build_initial_prompt(
+            runtime["research_question"],
+            current_limit,
+            data_files,
+            ks,
+            description=runtime.get("description"),
+        )
+
+        logger.info("Iteration 1/%d: Starting session", current_limit)
+        result = await executor.run_iteration(initial_prompt, reset_session=True)
+        _check_turn_outcome(result, 1)
+
+        _sync_version_metadata_if_available(job_id)
+        _append_iteration_artifacts(
+            provenance_dir=provenance_dir,
+            log_file=log_file,
+            iteration=1,
+            prompt=initial_prompt,
+            result=result,
+            overwrite_log=True,
+        )
+        current_limit = await _job_control_checkpoint(job_id)
+        if current_limit <= 1:
+            logger.info("Iteration limit reached after iteration 1")
+            return
+        increment_ks_iteration(job_id)
+
+        pending_feedback_result = await _wait_for_coinvestigate_feedback(
+            job_dir,
+            investigation_mode,
+            current_iteration=1,
+            max_iterations=current_limit,
+        )
+        pending_feedback = _feedback_from_wait_result(job_id, pending_feedback_result)
+        start_iteration = 2
+    else:
+        logger.info(
+            "Resuming discovery at iteration %d/%d",
+            start_iteration,
+            max_iterations,
+        )
+
+    for iteration in range(start_iteration, max_iterations + 1):
+        current_limit = await _job_control_checkpoint(job_id)
+        if iteration > current_limit:
+            logger.info(
+                "Reduced iteration limit %d reached before iteration %d",
+                current_limit,
+                iteration,
+            )
+            break
         ks = KnowledgeState.load_from_database_sync(job_id)
         if pending_feedback is None:
             pending_feedback = ks.get_feedback_for_iteration(iteration)
 
         iteration_prompt = build_iteration_prompt(
             iteration,
-            max_iterations,
+            current_limit,
             ks,
             pending_feedback,
             description=runtime.get("description"),
         )
         pending_feedback = None
-        should_reset = iteration % reset_interval == 1
+        should_reset = iteration == start_iteration or iteration % reset_interval == 1
         logger.info(
             "Iteration %d/%d (%s)",
             iteration,
-            max_iterations,
+            current_limit,
             "fresh session" if should_reset else "continuing",
         )
 
@@ -265,22 +313,18 @@ async def _run_primary_discovery_loop(
             result=result,
         )
 
-        if iteration < max_iterations:
-            increment_ks_iteration(job_id)
-        await _assert_job_not_cancelled(job_id)
+        current_limit = await _job_control_checkpoint(job_id)
+        if iteration >= current_limit:
+            logger.info("Reduced iteration limit %d reached", current_limit)
+            break
+        increment_ks_iteration(job_id)
         pending_feedback_result = await _wait_for_coinvestigate_feedback(
             job_dir,
             investigation_mode,
             current_iteration=iteration,
-            max_iterations=max_iterations,
+            max_iterations=current_limit,
         )
-        if pending_feedback_result and pending_feedback_result["outcome"] == "cancelled":
-            raise _DiscoveryCancelledError(f"Job {job_id} was cancelled")
-        pending_feedback = (
-            pending_feedback_result["feedback_text"]
-            if pending_feedback_result and pending_feedback_result["outcome"] == "feedback"
-            else None
-        )
+        pending_feedback = _feedback_from_wait_result(job_id, pending_feedback_result)
 
     logger.info("Discovery loop completed")
 
@@ -566,6 +610,10 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
         "research_question": job.research_question,
         "description": getattr(job, "description", None),
         "max_iterations": job.max_iterations,
+        "resume_iteration": max(
+            int(job.resume_iteration or 1),
+            int(job.current_iteration or 1),
+        ),
         "use_hypotheses": bool(job.use_hypotheses),
         "investigation_mode": job.investigation_mode,
         "data_files": resolved_files,
@@ -663,9 +711,12 @@ async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> 
 
 
 async def _build_and_prepare_executor(
-    job_dir: Path, runtime: dict[str, Any]
+    job_dir: Path,
+    runtime: dict[str, Any],
+    *,
+    operation_status: str = "running",
 ) -> AbstractAgent[Provider]:
-    """Build the agent executor and run backend setup, marking the job running.
+    """Build the agent executor and run backend setup.
 
     Shared by the full discovery run and the report-only regeneration path:
     both need a configured executor whose runtime env is applied and whose
@@ -683,7 +734,7 @@ async def _build_and_prepare_executor(
         data_files=all_data_files,
     )
     executor.apply_runtime_environment()
-    await update_job_status(job_dir, "running")
+    await update_job_status(job_dir, operation_status)
     await executor.prepare_job_workspace(use_hypotheses=use_hypotheses)
     # Resolve the model's context window once per job, off the event loop (the
     # Ollama probe is blocking I/O). Cached on the agent for the report budget.
@@ -706,7 +757,11 @@ async def regenerate_report_async(job_dir: Path) -> dict[str, Any]:
     job_id = runtime["job_id"]
     logger.info("Regenerating report for job %s", job_id)
 
-    executor = await _build_and_prepare_executor(job_dir, runtime)
+    executor = await _build_and_prepare_executor(
+        job_dir,
+        runtime,
+        operation_status="generating_report",
+    )
     try:
         report_outcome = await _run_report_generation_phase(
             executor=executor,
@@ -779,6 +834,33 @@ async def run_discovery_async(job_dir: Path) -> dict[str, Any]:
             provenance_dir=provenance_dir,
             log_file=log_file,
         )
+        report_outcome = await _run_report_generation_phase(
+            executor=executor,
+            job_dir=job_dir,
+            research_question=runtime["research_question"],
+            description=runtime.get("description"),
+        )
+        final_status = await _persist_final_status(job_dir, report_outcome)
+        ks = KnowledgeState.load_from_database_sync(job_id)
+        return {
+            "job_id": job_id,
+            "status": final_status,
+            "iterations": ks.data["iteration"],
+            "findings": len(ks.data["findings"]),
+        }
+
+    except _DiscoveryPausedError:
+        logger.info("Discovery paused for job %s", job_id)
+        ks = KnowledgeState.load_from_database_sync(job_id)
+        return {
+            "job_id": job_id,
+            "status": "paused",
+            "iterations": ks.data["iteration"],
+            "findings": len(ks.data["findings"]),
+        }
+
+    except _DiscoveryReportRequestedError:
+        logger.info("Early report requested for job %s", job_id)
         report_outcome = await _run_report_generation_phase(
             executor=executor,
             job_dir=job_dir,

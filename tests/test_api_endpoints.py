@@ -779,6 +779,85 @@ class TestJobEndpoints:
         mock_job_manager.cancel_job.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_runtime_control_endpoints_delegate_to_job_manager(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+    ):
+        """Owners can pause, resume, shorten, and stop/report their jobs."""
+        _, full_key = test_api_key_db
+        pause_target = Job(
+            owner_id=test_user_db.id,
+            research_question="Pause target",
+            status="running",
+            current_iteration=2,
+            max_iterations=5,
+        )
+        resume_target = Job(
+            owner_id=test_user_db.id,
+            research_question="Resume target",
+            status="paused",
+            current_iteration=2,
+            max_iterations=5,
+            resume_iteration=2,
+        )
+        report_target = Job(
+            owner_id=test_user_db.id,
+            research_question="Report target",
+            status="running",
+            current_iteration=2,
+            max_iterations=5,
+        )
+        limit_target = Job(
+            owner_id=test_user_db.id,
+            research_question="Limit target",
+            status="running",
+            current_iteration=2,
+            max_iterations=5,
+        )
+        db_session.add_all([pause_target, resume_target, report_target, limit_target])
+        await db_session.commit()
+
+        app = _build_authenticated_app(db_session, test_user_db)
+        manager = MagicMock()
+        manager.update_iteration_limit.return_value = (2, 3)
+
+        with patch("openscientist.api.endpoints.jobs._get_job_manager", return_value=manager):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                headers = {"Authorization": f"Bearer {full_key}"}
+                pause_response = await client.post(
+                    f"/api/v1/jobs/{pause_target.id}/pause",
+                    headers=headers,
+                )
+                resume_response = await client.post(
+                    f"/api/v1/jobs/{resume_target.id}/resume",
+                    headers=headers,
+                )
+                report_response = await client.post(
+                    f"/api/v1/jobs/{report_target.id}/stop-and-report",
+                    headers=headers,
+                )
+                limit_response = await client.patch(
+                    f"/api/v1/jobs/{limit_target.id}/iterations",
+                    headers=headers,
+                    json={"max_iterations": 3},
+                )
+
+        assert pause_response.status_code == 204
+        assert resume_response.status_code == 204
+        assert report_response.status_code == 204
+        assert limit_response.status_code == 200
+        assert limit_response.json() == {"current_iteration": 2, "max_iterations": 3}
+        manager.pause_job.assert_called_once_with(str(pause_target.id))
+        manager.resume_job.assert_called_once_with(str(resume_target.id))
+        manager.stop_and_generate_report.assert_called_once_with(str(report_target.id))
+        manager.update_iteration_limit.assert_called_once_with(str(limit_target.id), 3)
+
+    @pytest.mark.asyncio
     async def test_cancel_pending_job(
         self,
         db_session: AsyncSession,
