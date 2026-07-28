@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openscientist.integrations.udwa import inspect_udwa_compatibility
 from openscientist.preclinical_context.models import EvidenceStatus, PreclinicalStudyContext
@@ -31,6 +32,13 @@ class DVCAnalysisApproval(StrictModel):
     operation: str = Field(min_length=1, max_length=100)
     context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Literal["approved"] = "approved"
+
+    @field_validator("approved_at")
+    @classmethod
+    def timezone_required(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Approval timestamp must include a timezone.")
+        return value
 
 
 class DVCAnalysisRequest(StrictModel):
@@ -128,7 +136,11 @@ def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
     if contract is None:
         return [f"Operation '{request.operation}' is not approved for OpenScientist DVC execution."]
 
-    blockers = [f"Missing required context: {path}" for path in contract.required_context if not _known(request.context, path)]
+    blockers = [
+        f"Missing required context: {path}"
+        for path in contract.required_context
+        if not _known(request.context, path)
+    ]
     if request.context.design.mode not in contract.allowed_modes:
         blockers.append(
             f"Study mode '{request.context.design.mode}' is not allowed for {request.operation}."
@@ -140,7 +152,9 @@ def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
         else:
             expected_hash = canonical_context_sha256(request.context)
             if request.approval.context_sha256 != expected_hash:
-                blockers.append("Approval is stale: its context hash does not match the current study context.")
+                blockers.append(
+                    "Approval is stale: its context hash does not match the current study context."
+                )
             if request.approval.approved_at > datetime.now(timezone.utc):
                 blockers.append("Approval timestamp cannot be in the future.")
     return blockers
@@ -174,18 +188,23 @@ class DVCAnalysisService:
 
         compatibility = inspect_udwa_compatibility()
         if not compatibility.compatible:
-            raise DVCAnalysisError(
-                "Pinned UDWA dependency is incompatible: " + "; ".join(compatibility.errors)
-            )
+            details: list[str] = []
+            if compatibility.missing_imports:
+                details.append("missing imports: " + ", ".join(compatibility.missing_imports))
+            if compatibility.missing_operations:
+                details.append("missing operations: " + ", ".join(compatibility.missing_operations))
+            raise DVCAnalysisError("Pinned UDWA dependency is incompatible: " + "; ".join(details))
 
         dataset_dir = self._dataset_dir(request.dataset_id)
         measurements_path = dataset_dir / "measurements.csv"
         manifest_path = dataset_dir / "manifest.json"
         if not measurements_path.is_file() or not manifest_path.is_file():
-            raise DVCAnalysisError("Dataset is incomplete: measurements.csv or manifest.json is missing.")
+            raise DVCAnalysisError(
+                "Dataset is incomplete: measurements.csv or manifest.json is missing."
+            )
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self._verify_dataset_integrity(dataset_dir, measurements_path, manifest)
+        self._verify_dataset_integrity(measurements_path, manifest)
         dataframe = pd.read_csv(measurements_path)
 
         started_at = datetime.now(timezone.utc)
@@ -212,7 +231,9 @@ class DVCAnalysisService:
             "operation": request.operation,
             "output": output,
         }
-        result_path.write_text(json.dumps(result_payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        result_path.write_text(
+            json.dumps(result_payload, indent=2, sort_keys=True, default=str), encoding="utf-8"
+        )
 
         provenance = {
             "schema": "openscientist-dvc-analysis-provenance/0.1",
@@ -224,14 +245,16 @@ class DVCAnalysisService:
             "parameters": request.parameters,
             "context_sha256": canonical_context_sha256(request.context),
             "approval": request.approval.model_dump(mode="json") if request.approval else None,
-            "udwa_version": compatibility.version,
-            "udwa_revision": compatibility.revision,
-            "openscientist_commit": __import__("os").environ.get("OPENSCIENTIST_COMMIT", "unknown"),
+            "udwa_distribution_version": compatibility.distribution_version,
+            "udwa_pinned_commit": compatibility.pinned_commit,
+            "openscientist_commit": os.environ.get("OPENSCIENTIST_COMMIT", "unknown"),
             "started_at": started_at.isoformat(),
             "completed_at": completed_at.isoformat(),
             "warnings": [str(item) for item in output.get("warnings", [])],
         }
-        provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8")
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
+        )
 
         return DVCAnalysisResult(
             execution_id=execution_id,
@@ -262,7 +285,7 @@ class DVCAnalysisService:
 
     @staticmethod
     def _verify_dataset_integrity(
-        dataset_dir: Path, measurements_path: Path, manifest: dict[str, Any]
+        measurements_path: Path, manifest: dict[str, Any]
     ) -> None:
         assets = manifest.get("result", {}).get("assets", [])
         expected = next(
@@ -274,6 +297,10 @@ class DVCAnalysisService:
             None,
         )
         if not expected:
-            raise DVCAnalysisError("Dataset manifest does not identify normalized measurements.")
+            raise DVCAnalysisError(
+                "Dataset manifest does not identify normalized measurements."
+            )
         if _sha256(measurements_path) != expected:
-            raise DVCAnalysisError("Dataset integrity check failed for normalized measurements.")
+            raise DVCAnalysisError(
+                "Dataset integrity check failed for normalized measurements."
+            )
