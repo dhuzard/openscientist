@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -25,7 +26,6 @@ from openscientist.integrations.dvc.execution import (
 )
 from openscientist.preclinical_context.models import PreclinicalStudyContext
 
-
 router = APIRouter(prefix="/dvc", tags=["DVC Governance"])
 
 
@@ -34,17 +34,23 @@ class StrictModel(BaseModel):
 
 
 class ApprovalCreate(StrictModel):
+    dataset_id: str = Field(pattern=r"^dvc-[0-9a-fA-F-]{36}$")
     operation: str = Field(min_length=1, max_length=100)
     context: PreclinicalStudyContext
+    pre_analysis_checkpoint_id: str = Field(
+        pattern=r"^dvc-assess-[0-9a-fA-F-]{36}$"
+    )
 
 
 class ApprovalResponse(StrictModel):
     approval_id: str
     job_id: str
+    dataset_id: str
     operation: str
     approved_by: str
     approved_at: datetime
     context_sha256: str
+    pre_analysis_checkpoint_id: str
 
 
 def _job_dir(job_id: UUID) -> Path:
@@ -53,6 +59,24 @@ def _job_dir(job_id: UUID) -> Path:
     if root not in path.parents:
         raise HTTPException(400, "Invalid job path.")
     return path
+
+
+def _load_pre_analysis_checkpoint(job_dir: Path, checkpoint_id: str, dataset_id: str) -> dict:
+    if not re.fullmatch(r"dvc-assess-[0-9a-fA-F-]{36}", checkpoint_id):
+        raise HTTPException(400, "Invalid pre-analysis checkpoint id.")
+    path = (job_dir / "dvc_assessments" / f"{checkpoint_id}.json").resolve()
+    root = (job_dir / "dvc_assessments").resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(404, "Pre-analysis assessment checkpoint not found.")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, "Pre-analysis assessment checkpoint is invalid.") from exc
+    if payload.get("checkpoint") != "pre_analysis":
+        raise HTTPException(400, "The supplied checkpoint is not a pre-analysis assessment.")
+    if payload.get("dataset_id") != dataset_id:
+        raise HTTPException(400, "Assessment checkpoint does not belong to this dataset.")
+    return payload
 
 
 @router.post("/jobs/{job_id}/approvals", response_model=ApprovalResponse)
@@ -68,8 +92,12 @@ async def create_dvc_approval(
     if getattr(job, "user_id", None) != current_user.id:
         raise HTTPException(403, "Not authorized for this job.")
 
+    job_dir = _job_dir(job_id)
+    checkpoint = _load_pre_analysis_checkpoint(
+        job_dir, body.pre_analysis_checkpoint_id, body.dataset_id
+    )
     approval_id = f"approval-{uuid4()}"
-    identity = current_user.email or str(current_user.id)
+    identity = getattr(current_user, "email", None) or str(current_user.id)
     approval = DVCAnalysisApproval(
         approval_id=approval_id,
         approved_by=identity,
@@ -77,12 +105,36 @@ async def create_dvc_approval(
         operation=body.operation,
         context_sha256=canonical_context_sha256(body.context),
     )
-    target = _job_dir(job_id) / "dvc_approvals" / f"{approval_id}.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        **approval.model_dump(mode="json"),
-        "job_id": str(job_id),
-        "created_via": "authenticated_rest_api",
-    }
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return ApprovalResponse(job_id=str(job_id), **approval.model_dump())
+
+    approvals_dir = job_dir / "dvc_approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    approval_path = approvals_dir / f"{approval_id}.json"
+    approval_path.write_text(
+        json.dumps(approval.model_dump(mode="json"), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    audit_path = approvals_dir / f"{approval_id}.audit.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "schema": "openscientist-dvc-approval-audit/0.1",
+                "approval_id": approval_id,
+                "job_id": str(job_id),
+                "dataset_id": body.dataset_id,
+                "pre_analysis_checkpoint_id": body.pre_analysis_checkpoint_id,
+                "assessment_frameworks": [
+                    item.get("framework") for item in checkpoint.get("assessments", [])
+                ],
+                "created_via": "authenticated_rest_api",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return ApprovalResponse(
+        job_id=str(job_id),
+        dataset_id=body.dataset_id,
+        pre_analysis_checkpoint_id=body.pre_analysis_checkpoint_id,
+        **approval.model_dump(),
+    )
