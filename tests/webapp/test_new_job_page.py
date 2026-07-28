@@ -30,3 +30,10 @@ def test_submit_job_has_coinvestigate_mode_at_top_level():
     """coinvestigate_mode must be a top-level parameter of _submit_job."""
     sig = inspect.signature(_submit_job)
     assert "coinvestigate_mode" in sig.parameters
+
+
+def test_submit_job_accepts_reviewed_evidence_plan():
+    """The form must pass the approved preflight contract to job creation."""
+    sig = inspect.signature(_submit_job)
+    assert "evidence_librarian_enabled" in sig.parameters
+    assert "evidence_plan" in sig.parameters

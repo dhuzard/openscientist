@@ -22,14 +22,16 @@ DOCS_PAGE_CONTENT_MARKDOWN = dedent(
     ![OpenScientist workflow: scientist submits a task and optional data, the agent iterates through literature search, analysis, and knowledge accumulation with optional user feedback, then compiles a final report.](/assets/openscientist-schematic.png)
 
     1. **Submit a Job**: Provide a research question and optionally upload data files.
-    2. **Autonomous Discovery**: OpenScientist runs for N iterations, analyzing data and searching literature.
-    3. **View Results**: Track progress in the Timeline view, see key findings in Summary, and download the final report.
+    2. **Review the Evidence Plan**: The Evidence Librarian proposes a job-specific skill bundle and literature queries for your approval.
+    3. **Autonomous Discovery**: OpenScientist runs for N iterations, analyzing data and searching literature.
+    4. **View Results**: Track progress in the Timeline view, see key findings in Summary, and download the final report.
 
     ## Features
 
     - **Autonomous**: Runs without human intervention.
     - **Domain-Agnostic**: Works for metabolomics, genomics, structural biology, and more.
     - **Literature-Grounded**: Searches PubMed for mechanistic insights.
+    - **Human-Approved Planning**: Compose and approve skills and bibliographic searches before execution.
     - **Progressive Disclosure**: See high-level summaries first, drill into details on demand.
     - **Downloadable Visualizations**: Export plots and the final report as PDF.
 

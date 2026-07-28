@@ -26,6 +26,7 @@ from openscientist.agent.factory import agent_class_for_provider_id, get_agent
 from openscientist.database.models import JobDataFile
 from openscientist.database.models.job import Job as JobModel
 from openscientist.database.session import AsyncSessionLocal
+from openscientist.evidence_librarian import initialise_evidence_trace
 from openscientist.exceptions import OpenScientistError
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import (
@@ -685,6 +686,7 @@ async def _build_and_prepare_executor(
     executor.apply_runtime_environment()
     await update_job_status(job_dir, "running")
     await executor.prepare_job_workspace(use_hypotheses=use_hypotheses)
+    initialise_evidence_trace(job_dir)
     # Resolve the model's context window once per job, off the event loop (the
     # Ollama probe is blocking I/O). Cached on the agent for the report budget.
     await executor.warm_model_profile()

@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from docker import errors as docker_errors
+from openscientist.exec_broker_client import EXEC_BROKER_URL_ENV, EXEC_TOKEN_ENV
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
 from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
 from openscientist.settings import Settings
@@ -625,3 +627,111 @@ class TestAirgapFirewallLaunch:
         environment = cast(dict[str, str], run_kwargs["environment"])
         entries = set(environment["OPENSCIENTIST_FIREWALL_ALLOW"].split(","))
         assert "bedrock-runtime.us-east-1.amazonaws.com:443" in entries
+
+
+class TestSkillAuthoringTurnLaunch:
+    """Skill authoring runs one turn in an isolated container."""
+
+    @staticmethod
+    def _settings() -> SimpleNamespace:
+        provider = MagicMock()
+        provider.get_container_env_vars.return_value = {}
+        provider.codex_auth_host_path = None
+        provider.google_application_credentials = None
+        provider.provider_id = "anthropic"
+        return SimpleNamespace(
+            container=SimpleNamespace(
+                host_project_dir=None,
+                container_app_dir="/app",
+                agent_network=None,
+                agent_memory="8g",
+                agent_cpu=2.0,
+                agent_platform=None,
+                agent_image="openscientist-agent:latest",
+            ),
+            provider=provider,
+            database=SimpleNamespace(
+                effective_database_url="postgresql+asyncpg://u:p@postgres:5432/db"
+            ),
+            phenix=SimpleNamespace(phenix_host_path=None),
+            secret_key="master-key",
+            airgap=SimpleNamespace(enabled=False),
+        )
+
+    def test_skill_authoring_uses_distinct_ephemeral_mode(self) -> None:
+        runner = object.__new__(JobContainerRunner)
+        container = MagicMock()
+        container.wait.return_value = {"StatusCode": 0}
+        with patch.object(runner, "launch", return_value=container) as launch:
+            runner.run_skill_authoring_turn("draft-123", Path("/app/drafts/draft-123"), timeout=42)
+
+            launch.assert_called_once_with(
+                "draft-123", Path("/app/drafts/draft-123"), run_mode="skill_authoring"
+            )
+            container.wait.assert_called_once_with(timeout=42)
+            container.remove.assert_called_once_with(force=True)
+
+    def test_skill_authoring_raises_on_nonzero_exit(self) -> None:
+        runner = object.__new__(JobContainerRunner)
+        container = MagicMock()
+        container.wait.return_value = {"StatusCode": 1}
+        container.logs.return_value = b"authoring failed"
+        with (
+            patch.object(runner, "launch", return_value=container),
+            pytest.raises(RuntimeError, match="exited with code 1"),
+        ):
+            runner.run_skill_authoring_turn("draft-123", Path("/app/drafts/draft-123"))
+        container.remove.assert_called_once_with(force=True)
+
+    def test_skill_authoring_environment_omits_job_credentials(self) -> None:
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, self._settings()),
+            job_id="draft-123",
+            job_mount="/agent/jobs/draft-123",
+            provider_env={
+                "OPENSCIENTIST_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "proxy-placeholder",
+                "AWS_SECRET_ACCESS_KEY": "unrelated-real-secret",
+            },
+            run_mode="skill_authoring",
+        )
+
+        assert env["ANTHROPIC_API_KEY"] == "proxy-placeholder"
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert env["DATABASE_URL"].endswith("@127.0.0.1:1/disabled")
+        assert env["DATABASE_URL"] != self._settings().database.effective_database_url
+        assert env["OPENSCIENTIST_SECRET_KEY"] == (
+            "skill-authoring-sentinel-not-a-runtime-credential"
+        )
+        assert EXEC_TOKEN_ENV not in env
+        assert EXEC_BROKER_URL_ENV not in env
+
+    def test_skill_authoring_environment_can_construct_real_provider_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sentinel fields satisfy Settings without making a database credential usable."""
+
+        from openscientist.providers import get_provider
+        from openscientist.settings import get_settings
+
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, self._settings()),
+            job_id="draft-123",
+            job_mount="/agent/jobs/draft-123",
+            provider_env={
+                "OPENSCIENTIST_PROVIDER": "ollama",
+                "OLLAMA_BASE_URL": "http://127.0.0.1:11434/v1",
+                "OLLAMA_MODEL": "test-model",
+            },
+            run_mode="skill_authoring",
+        )
+
+        get_settings.cache_clear()
+        try:
+            monkeypatch.chdir(tmp_path)
+            with patch.dict(os.environ, env, clear=True):
+                provider = get_provider()
+                assert provider.id == "ollama"
+                assert get_settings().database.database_url == env["DATABASE_URL"]
+        finally:
+            get_settings.cache_clear()
