@@ -22,6 +22,7 @@ from openscientist.database.models import Job, User
 from openscientist.database.session import get_session
 from openscientist.integrations.dvc.execution import (
     DVCAnalysisApproval,
+    OPERATION_CONTRACTS,
     canonical_context_sha256,
 )
 from openscientist.preclinical_context.models import PreclinicalStudyContext
@@ -91,6 +92,8 @@ async def create_dvc_approval(
         raise HTTPException(404, "Job not found.")
     if getattr(job, "user_id", None) != current_user.id:
         raise HTTPException(403, "Not authorized for this job.")
+    if body.operation not in OPERATION_CONTRACTS:
+        raise HTTPException(400, "Operation is not governed for DVC execution.")
 
     job_dir = _job_dir(job_id)
     checkpoint = _load_pre_analysis_checkpoint(
