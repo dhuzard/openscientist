@@ -44,6 +44,60 @@ from openscientist.version import SHORT_COMMIT_LENGTH
 logger = logging.getLogger(__name__)
 
 AGENT_APP_DIR = "/agent"
+_AUTHORING_DATABASE_URL = "postgresql+asyncpg://disabled:disabled@127.0.0.1:1/disabled"
+_AUTHORING_SECRET_KEY = "skill-authoring-sentinel-not-a-runtime-credential"
+_AUTHORING_COMMON_ENV = {
+    "OPENSCIENTIST_PROVIDER",
+    "OPENSCIENTIST_MODEL",
+    "OPENSCIENTIST_MODEL_CONTEXT_TOKENS",
+    "OPENSCIENTIST_LLM_PROXY_URL",
+}
+_AUTHORING_PROVIDER_ENV: dict[str, set[str]] = {
+    "anthropic": {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+    },
+    "cborg": {
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+    },
+    "vertex": {
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "CLOUD_ML_REGION",
+        "VERTEX_REGION_CLAUDE_4_5_SONNET",
+        "VERTEX_REGION_CLAUDE_4_5_HAIKU",
+    },
+    "bedrock": {
+        "CLAUDE_CODE_USE_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_PROFILE",
+        "AWS_BEARER_TOKEN_BEDROCK",
+    },
+    "foundry": {
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_API_KEY",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    },
+    "openai": {"OPENAI_API_KEY"},
+    "azure-openai": {
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_RESOURCE",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "AZURE_OPENAI_API_VERSION",
+    },
+    "ollama": {
+        "OPENAI_API_KEY",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_MODEL",
+    },
+}
 
 
 class JobContainerRunner:
@@ -62,6 +116,14 @@ class JobContainerRunner:
         return resolve_docker_network(self._docker, configured_network)
 
     @staticmethod
+    def _authoring_provider_environment(provider_env: dict[str, str]) -> dict[str, str]:
+        """Keep only the active provider's minimum direct-completion settings."""
+
+        provider_id = provider_env.get("OPENSCIENTIST_PROVIDER", "").lower()
+        allowed = _AUTHORING_COMMON_ENV | _AUTHORING_PROVIDER_ENV.get(provider_id, set())
+        return {key: value for key, value in provider_env.items() if key in allowed}
+
+    @staticmethod
     def _build_container_environment(
         settings: Settings,
         *,
@@ -72,17 +134,43 @@ class JobContainerRunner:
     ) -> dict[str, str]:
         """Build the environment variables for the agent container."""
         cs = settings.container
-        # Inject a per-job derived secret, never the master key (untrusted container).
+        # Build the minimum environment for the selected run mode.
+        if run_mode == "skill_authoring":
+            provider_env = {
+                **provider_env,
+                "OPENSCIENTIST_PROVIDER": provider_env.get(
+                    "OPENSCIENTIST_PROVIDER",
+                    settings.provider.provider_id,
+                ),
+            }
+            provider_env = JobContainerRunner._authoring_provider_environment(provider_env)
+
         env: dict[str, str] = {
             "JOB_ID": job_id,
             "JOB_DIR": job_mount,
-            "DATABASE_URL": settings.database.effective_database_url,
-            "OPENSCIENTIST_SECRET_KEY": derive_job_secret(settings.secret_key, job_id),
-            # Per-job execution credential the broker verifies, plus the broker URL.
-            EXEC_TOKEN_ENV: make_exec_placeholder(settings.secret_key, job_id),
-            EXEC_BROKER_URL_ENV: container_broker_base_url(),
             **provider_env,
         }
+        if run_mode == "skill_authoring":
+            # Settings/provider construction requires these two fields, but an
+            # authoring turn never accesses application data or derives auth
+            # credentials. Use deliberately unusable sentinels instead of the
+            # real database URL or per-job secret.
+            env.update(
+                {
+                    "DATABASE_URL": _AUTHORING_DATABASE_URL,
+                    "OPENSCIENTIST_SECRET_KEY": _AUTHORING_SECRET_KEY,
+                }
+            )
+        else:
+            env.update(
+                {
+                    "DATABASE_URL": settings.database.effective_database_url,
+                    "OPENSCIENTIST_SECRET_KEY": derive_job_secret(settings.secret_key, job_id),
+                    # Per-job execution credential the broker verifies, plus the broker URL.
+                    EXEC_TOKEN_ENV: make_exec_placeholder(settings.secret_key, job_id),
+                    EXEC_BROKER_URL_ENV: container_broker_base_url(),
+                }
+            )
         # Only set the run-mode override when it diverges from the default so
         # ordinary discovery launches keep a clean env. The entrypoint reads
         # OPENSCIENTIST_RUN_MODE. "report_only" re-runs just the report phase.
@@ -112,19 +200,23 @@ class JobContainerRunner:
         *,
         job_dir_host: Path,
         job_mount: str,
+        include_phenix: bool = True,
+        include_gcp_credentials: bool = True,
     ) -> dict[str, dict[str, str]]:
         """Build the bind mounts for the agent container."""
         volumes: dict[str, dict[str, str]] = {
             str(job_dir_host): {"bind": job_mount, "mode": "rw"},
         }
-        gcp_path = settings.provider.google_application_credentials
+        gcp_path = (
+            settings.provider.google_application_credentials if include_gcp_credentials else None
+        )
         if gcp_path:
             gcp_host_path = settings.provider.gcp_credentials_host_path or gcp_path
             volumes[str(gcp_host_path)] = {
                 "bind": "/agent/gcp-credentials.json",
                 "mode": "ro",
             }
-        phenix_host = settings.phenix.phenix_host_path
+        phenix_host = settings.phenix.phenix_host_path if include_phenix else None
         if phenix_host:
             volumes[str(Path(phenix_host).expanduser().resolve())] = {
                 "bind": "/opt/phenix",
@@ -181,7 +273,13 @@ class JobContainerRunner:
             run_mode=run_mode,
         )
         volumes = JobContainerRunner._build_container_volumes(
-            settings, job_dir_host=job_dir_host, job_mount=job_mount
+            settings,
+            job_dir_host=job_dir_host,
+            job_mount=job_mount,
+            include_phenix=run_mode != "skill_authoring",
+            include_gcp_credentials=(
+                run_mode != "skill_authoring" or settings.provider.provider_id == "vertex"
+            ),
         )
         return env, volumes, agent_network, agent_memory, agent_cpu, agent_platform
 
@@ -235,13 +333,15 @@ class JobContainerRunner:
         # path.  Docker requires absolute paths for bind mounts; relative paths
         # are misinterpreted as named volumes.
         job_dir_resolved = job_dir.resolve()
-        # Host-side, pre-launch prep is the agent backend's own concern. Ask the
-        # backend class for the configured provider (no agent instance here).
-        from openscientist.agent.factory import agent_class_for_provider_id
+        # Host-side agent prep may copy backend credentials into the mounted
+        # directory. Authoring uses a direct, no-tools completion path and must
+        # never receive those files.
+        if run_mode != "skill_authoring":
+            from openscientist.agent.factory import agent_class_for_provider_id
 
-        agent_class_for_provider_id(settings.provider.provider_id).provision_host_prelaunch(
-            settings, job_dir_resolved
-        )
+            agent_class_for_provider_id(settings.provider.provider_id).provision_host_prelaunch(
+                settings, job_dir_resolved
+            )
         job_dir_host = to_host_path(job_dir_resolved, cs)
         env, volumes, agent_network, agent_memory, agent_cpu, agent_platform = (
             self._build_launch_configuration(
@@ -283,6 +383,40 @@ class JobContainerRunner:
 
         logger.info("Launched agent container %s for job %s", container.short_id, job_id)
         return container
+
+    def run_skill_authoring_turn(
+        self,
+        job_id: str,
+        job_dir: Path,
+        *,
+        timeout: int = 300,
+    ) -> None:
+        """Run one LLM-assisted skill authoring turn in an isolated container."""
+
+        container = self.launch(job_id, job_dir, run_mode="skill_authoring")
+        try:
+            try:
+                outcome = container.wait(timeout=timeout)
+            except Exception as error:
+                raise RuntimeError(
+                    f"Skill authoring turn did not finish within {timeout}s"
+                ) from error
+            exit_code = int(outcome.get("StatusCode", 1)) if isinstance(outcome, dict) else 1
+            if exit_code != 0:
+                logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Skill authoring container exited with code {exit_code}: {logs[-2000:]}"
+                )
+        finally:
+            try:
+                container.remove(force=True)
+            except docker_errors.APIError as error:
+                if not self._is_not_found_error(error):
+                    logger.warning(
+                        "Failed to remove skill authoring container for %s: %s",
+                        job_id,
+                        error,
+                    )
 
     def stop(self, job_id: str, timeout: int = 10) -> None:
         """Stop the container for a job (graceful → SIGKILL)."""

@@ -164,6 +164,18 @@ async def skills_page() -> None:
     state: dict[str, Any] = {"search": "", "category": None, "categories": []}
 
     with ui.column().classes("w-full"):
+        with ui.row().classes("w-full items-center justify-between gap-4 mb-2 flex-wrap"):
+            with ui.column().classes("gap-0"):
+                ui.label("Skills").classes("text-h4 font-bold")
+                ui.label(
+                    "Browse enabled skills or create a reviewed, portable SKILL.md draft."
+                ).classes("text-gray-600")
+            ui.button(
+                "Create skill",
+                icon="add",
+                on_click=lambda: ui.navigate.to("/skills/create"),
+            )
+
         with ui.row().classes("w-full gap-4 mb-4 items-end flex-wrap"):
             search_input = ui.input(
                 label="Search skills",

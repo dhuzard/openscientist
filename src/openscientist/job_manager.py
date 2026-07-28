@@ -25,6 +25,7 @@ from openscientist.database.models.job import Job as JobModel
 from openscientist.database.models.job_share import JobShare
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import AsyncSessionLocal
+from openscientist.evidence_librarian import persist_evidence_plan
 from openscientist.exceptions import ProviderError
 from openscientist.job.types import JobInfo, JobStatus, JobStatusUpdateResult
 from openscientist.knowledge_state import KnowledgeState
@@ -451,6 +452,7 @@ class JobManager:
         max_iterations: int,
         owner_id: str | None,
         owner_uuid: UUID | None,
+        evidence_plan: dict[str, Any] | None = None,
     ) -> None:
         try:
             create_job(
@@ -461,6 +463,8 @@ class JobManager:
                 jobs_dir=self.jobs_dir,
                 owner_id=owner_id,
             )
+            if evidence_plan is not None:
+                persist_evidence_plan(self.jobs_dir / job_id, evidence_plan)
         except Exception as e:
             logger.error("Failed to initialize filesystem for job %s: %s", job_id, e)
             # Compensating action: remove partially-created DB row/files to avoid split-brain.
@@ -481,6 +485,7 @@ class JobManager:
         description: str | None = None,
         pdb_code: str | None = None,
         space_group: str | None = None,
+        evidence_plan: dict[str, Any] | None = None,
     ) -> JobInfo:
         """
         Create a new discovery job.
@@ -498,6 +503,7 @@ class JobManager:
             description: Optional job description
             pdb_code: Optional PDB code metadata
             space_group: Optional crystal space group metadata
+            evidence_plan: Optional human-approved evidence and skill-composition plan
 
         Returns:
             JobInfo object
@@ -543,6 +549,7 @@ class JobManager:
             max_iterations=max_iterations,
             owner_id=owner_id,
             owner_uuid=owner_uuid,
+            evidence_plan=evidence_plan,
         )
 
         # Load job info

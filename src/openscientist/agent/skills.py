@@ -14,6 +14,7 @@ from pathlib import Path
 
 from openscientist.database.models import Skill
 from openscientist.database.session import AsyncSessionLocal
+from openscientist.evidence_librarian import filter_skills_for_plan
 from openscientist.prompts import generate_job_claude_md, get_enabled_skills
 from openscientist.settings import get_settings
 
@@ -47,6 +48,7 @@ async def write_skills_to_claude_dir(job_dir: Path, *, use_hypotheses: bool = Fa
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
             skills = await get_enabled_skills(session)
+        skills = filter_skills_for_plan(job_dir, skills)
         if not skills:
             logger.info("No enabled skills to write")
             return
@@ -99,6 +101,7 @@ async def write_skills_to_codex_dir(job_dir: Path) -> None:
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
             skills = await get_enabled_skills(session)
+        skills = filter_skills_for_plan(job_dir, skills)
         if not skills:
             logger.info("No enabled skills to write")
             return
