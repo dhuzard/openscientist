@@ -60,12 +60,17 @@ def request(operation: str, *, study_context: PreclinicalStudyContext, approved:
 
 
 def test_sanity_check_does_not_require_approval():
-    assert evaluate_prerequisites(request("check_data_sanity", study_context=context(False))) == []
+    assert (
+        evaluate_prerequisites(
+            request("check_data_sanity", study_context=context(complete=False))
+        )
+        == []
+    )
 
 
 def test_light_dark_reports_all_missing_context_and_approval():
     blockers = evaluate_prerequisites(
-        request("summarize_light_dark", study_context=context(False))
+        request("summarize_light_dark", study_context=context(complete=False))
     )
     assert "Missing required context: design.experimental_unit" in blockers
     assert "Missing required context: environment.timezone" in blockers
@@ -85,6 +90,7 @@ def test_stale_approval_is_rejected():
     analysis_request = request(
         "summarize_light_dark", study_context=study_context, approved=True
     )
+    assert analysis_request.approval is not None
     analysis_request.approval.context_sha256 = "0" * 64
     assert any("Approval is stale" in item for item in evaluate_prerequisites(analysis_request))
 
@@ -94,6 +100,7 @@ def test_future_approval_is_rejected():
     analysis_request = request(
         "summarize_light_dark", study_context=study_context, approved=True
     )
+    assert analysis_request.approval is not None
     analysis_request.approval.approved_at = datetime.now(timezone.utc) + timedelta(days=1)
     assert any("future" in item for item in evaluate_prerequisites(analysis_request))
 
