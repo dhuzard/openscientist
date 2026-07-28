@@ -10,13 +10,19 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
-from openscientist.preclinical_context.models import AssessmentResult, PreclinicalStudyContext
+from openscientist.preclinical_context.models import (
+    AssessmentResult,
+    EvidenceStatus,
+    PreclinicalStudyContext,
+)
 
 DEFAULT_FAIR_PREPARE_URL = "http://fair-vcg-mentor:8000"
 FAIR_VCG_API_VERSION = "1.0.0"
@@ -85,6 +91,95 @@ def bundle_manifest_to_csv(bundle_dir: Path) -> bytes:
     return output.getvalue().encode("utf-8")
 
 
+def _known(value: Any) -> Any | None:
+    if getattr(value, "status", EvidenceStatus.UNKNOWN) == EvidenceStatus.UNKNOWN:
+        return None
+    return getattr(value, "value", None)
+
+
+def context_to_metadata(context: PreclinicalStudyContext) -> dict[str, Any]:
+    """Crosswalk neutral study context to FAIR-VCG ARRIVE/PREPARE metadata IDs."""
+    metadata: dict[str, Any] = {
+        "title": f"Pre-analysis context for {context.study_id}",
+        "description": _known(context.objective) or "Preclinical study planning context",
+        "base_uri": f"urn:openscientist:study:{context.study_id}",
+        "date_created": datetime.now(timezone.utc).date().isoformat(),
+        "version": context.schema_version,
+    }
+    mappings = {
+        "experimental_unit": _known(context.design.experimental_unit),
+        "prepare_experimental_unit": _known(context.design.experimental_unit),
+        "randomisation_method": _known(context.design.randomization),
+        "blinding_strategy": _known(context.design.blinding),
+        "exclusion_criteria": _known(context.design.exclusion_policy),
+        "species": _known(context.animals.species),
+        "strain": _known(context.animals.strain),
+        "sex": _known(context.animals.sex),
+        "age": _known(context.animals.age),
+        "housing_density": _known(context.animals.occupancy),
+        "housing_conditions": _known(context.environment.housing),
+        "husbandry": _known(context.environment.husbandry),
+        "light_dark_cycle": _known(context.environment.light_schedule),
+        "timezone": _known(context.environment.timezone),
+        "data_acquisition_system": _known(context.acquisition.system),
+        "software_version": _known(context.acquisition.software_version),
+        "temporal_resolution": _known(context.acquisition.temporal_resolution),
+        "prepare_clear_hypothesis": _known(context.objective),
+        "prepare_animal_characteristics": {
+            "species": _known(context.animals.species),
+            "strain": _known(context.animals.strain),
+            "sex": _known(context.animals.sex),
+            "age": _known(context.animals.age),
+        },
+        "prepare_acclimatisation_housing": {
+            "housing": _known(context.environment.housing),
+            "husbandry": _known(context.environment.husbandry),
+            "light_schedule": _known(context.environment.light_schedule),
+        },
+    }
+    for key, value in mappings.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if v is not None}
+            if not value:
+                continue
+        metadata[key] = value
+    if metadata.get("randomisation_method") or metadata.get("blinding_strategy"):
+        metadata["prepare_randomisation_blinding_criteria"] = {
+            "randomisation": metadata.get("randomisation_method"),
+            "blinding": metadata.get("blinding_strategy"),
+            "exclusion_criteria": metadata.get("exclusion_criteria"),
+        }
+    return metadata
+
+
+def bundle_to_metadata(bundle_dir: Path) -> dict[str, Any]:
+    files = [path for path in sorted(bundle_dir.rglob("*")) if path.is_file()]
+    operations: list[str] = []
+    index_path = bundle_dir / "analysis-index.json"
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            operations = sorted(
+                {str(item.get("operation")) for item in index if item.get("operation")}
+            )
+        except Exception:  # noqa: BLE001
+            operations = []
+    return {
+        "title": "OpenScientist DVC analysis bundle",
+        "description": "Traceable DVC acquisition and deterministic analysis artifact bundle.",
+        "base_uri": f"urn:openscientist:dvc-bundle:{bundle_dir.name}",
+        "creator": "OpenScientist",
+        "date_created": datetime.now(timezone.utc).date().isoformat(),
+        "version": "openscientist-dvc-bundle/0.1",
+        "access_conditions": "Job-authorized access",
+        "protocol_reference": ", ".join(operations) if operations else "No analysis recorded",
+        "keywords": ["DVC", "preclinical", "FAIR", "provenance"],
+        "bundle_file_count": len(files),
+    }
+
+
 class HttpFairPrepareProvider:
     """FAIR-VCG Mentor REST provider using upload, FAIR score and templates."""
 
@@ -110,6 +205,7 @@ class HttpFairPrepareProvider:
         return self._assess_bytes(
             context_to_csv(context),
             filename="preclinical-context.csv",
+            metadata=context_to_metadata(context),
             frameworks=frameworks,
         )
 
@@ -119,9 +215,11 @@ class HttpFairPrepareProvider:
         *,
         frameworks: tuple[str, ...] = ("arrive-v2", "mnms-v1"),
     ) -> list[AssessmentResult]:
+        bundle_dir = Path(bundle_dir)
         return self._assess_bytes(
-            bundle_manifest_to_csv(Path(bundle_dir)),
+            bundle_manifest_to_csv(bundle_dir),
             filename="bundle-manifest.csv",
+            metadata=bundle_to_metadata(bundle_dir),
             frameworks=frameworks,
         )
 
@@ -145,6 +243,7 @@ class HttpFairPrepareProvider:
         content: bytes,
         *,
         filename: str,
+        metadata: dict[str, Any],
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]:
         source_hash = hashlib.sha256(content).hexdigest()
@@ -154,6 +253,7 @@ class HttpFairPrepareProvider:
             files={"file": (filename, content, "text/csv")},
         )
         dataset_id = str(uploaded["dataset_id"])
+        self._request("PUT", f"/api/metadata/{dataset_id}", json=metadata)
         fair_score = self._request("GET", f"/api/fair-score/{dataset_id}")
         results = [self._fair_result(dataset_id, source_hash, fair_score)]
         for framework in frameworks:
