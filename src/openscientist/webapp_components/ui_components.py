@@ -134,6 +134,7 @@ STATUS_COLORS = {
     JobStatus.PENDING: "gray",
     JobStatus.QUEUED: "blue",
     JobStatus.RUNNING: "teal",
+    JobStatus.PAUSED: "grey",
     JobStatus.GENERATING_REPORT: "teal",
     JobStatus.COMPLETED: "green",
     JobStatus.FAILED: "red",
@@ -146,6 +147,7 @@ STATUS_ICONS = {
     JobStatus.PENDING: "○",
     JobStatus.QUEUED: "⟳",
     JobStatus.RUNNING: "▶",
+    JobStatus.PAUSED: "⏸",
     JobStatus.GENERATING_REPORT: "⟳",
     JobStatus.COMPLETED: "✓",
     JobStatus.FAILED: "✗",
@@ -883,6 +885,15 @@ def render_status_cell_slot() -> str:
                 <q-badge
                     v-else-if="props.row.status === 'awaiting_feedback'"
                     color="orange"
+                    class="px-2 py-1"
+                >
+                    <span class="row items-center" style="white-space:nowrap;">⏸&nbsp;{{ props.row.status }}</span>
+                </q-badge>
+
+                <!-- Paused status: Gray badge -->
+                <q-badge
+                    v-else-if="props.row.status === 'paused'"
+                    color="grey"
                     class="px-2 py-1"
                 >
                     <span class="row items-center" style="white-space:nowrap;">⏸&nbsp;{{ props.row.status }}</span>

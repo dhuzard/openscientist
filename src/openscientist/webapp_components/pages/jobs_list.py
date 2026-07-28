@@ -67,7 +67,7 @@ def _truncate_question(question: str, limit: int = 50) -> str:
 
 def _derive_progress_from_db(status: str, current_iteration: int) -> int:
     """Derive iterations_completed from Job model columns (no KS load needed)."""
-    if status in ("running", "awaiting_feedback"):
+    if status in ("running", "paused", "awaiting_feedback", "generating_report"):
         return current_iteration - 1 if current_iteration > 1 else 0
     return current_iteration
 
