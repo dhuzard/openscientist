@@ -26,9 +26,7 @@ class _FamilylessProvider(Provider):
     def id(self) -> str:
         return "familyless"
 
-    @property
-    def display_name(self) -> str:
-        return "Familyless"
+    display_name = "Familyless"
 
     def validate_required_config(self) -> list[str]:
         return []

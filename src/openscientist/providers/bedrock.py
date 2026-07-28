@@ -15,8 +15,9 @@ from openscientist.providers.base import (
     ClaudeCompatible,
     CostInfo,
     LlmUpstream,
+    env_from_pairs,
 )
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 from ._anthropic_common import (
     send_anthropic_message,
@@ -39,51 +40,54 @@ class BedrockProvider(ClaudeCompatible):
     def id(self) -> str:
         return "bedrock"
 
-    @property
-    def display_name(self) -> str:
-        return "AWS Bedrock"
+    display_name = "AWS Bedrock"
+
+    @classmethod
+    def validate_model_format(cls, model: str | None) -> str | None:
+        return cls.model_format_error(
+            model,
+            r"^([a-z]+\.anthropic\.claude-.+-v\d+:\d+|arn:aws:bedrock:)",
+            "a Bedrock model id ('<region>.anthropic.claude-<name>-v<n>:<n>' or an "
+            "inference-profile ARN)",
+        )
 
     def validate_required_config(self) -> list[str]:
-        """Check required Bedrock configuration."""
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         errors = []
-        settings = get_settings()
-
-        if not settings.provider.aws_region:
+        if not provider.aws_region:
             errors.append("AWS_REGION not set (e.g., us-east-1)")
-
-        # Check for at least one auth method
-        has_access_key = (
-            settings.provider.aws_access_key_id and settings.provider.aws_secret_access_key
-        )
-        has_profile = settings.provider.aws_profile
-        has_bearer_token = settings.provider.aws_bearer_token_bedrock
-
-        if not (has_access_key or has_profile or has_bearer_token):
+        has_access_key = provider.aws_access_key_id and provider.aws_secret_access_key
+        if not (has_access_key or provider.aws_profile or provider.aws_bearer_token_bedrock):
             errors.append(
                 "AWS credentials not configured. Set one of: "
                 "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, or AWS_BEARER_TOKEN_BEDROCK"
             )
-
         return errors
 
-    def claude_sdk_env(self) -> dict[str, str]:
-        """Bedrock routing/auth env vars the claude-agent-sdk CLI must see.
-
-        Mirrors `ProviderSettings._apply_bedrock_env_vars` so the explicit
-        per-provider env stays consistent with the container-env builder.
-        """
-        p = get_settings().provider
-        env: dict[str, str] = {"CLAUDE_CODE_USE_BEDROCK": "1"}
-        for key, value in (
-            ("AWS_REGION", p.aws_region),
-            ("AWS_ACCESS_KEY_ID", p.aws_access_key_id),
-            ("AWS_SECRET_ACCESS_KEY", p.aws_secret_access_key),
-            ("AWS_PROFILE", p.aws_profile),
-            ("AWS_BEARER_TOKEN_BEDROCK", p.aws_bearer_token_bedrock),
-        ):
-            if value:
-                env[key] = value
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        env = {"CLAUDE_CODE_USE_BEDROCK": "1"}
+        env.update(
+            env_from_pairs(
+                [
+                    ("AWS_REGION", provider.aws_region),
+                    ("AWS_ACCESS_KEY_ID", provider.aws_access_key_id),
+                    ("AWS_SECRET_ACCESS_KEY", provider.aws_secret_access_key),
+                    ("AWS_PROFILE", provider.aws_profile),
+                    ("AWS_BEARER_TOKEN_BEDROCK", provider.aws_bearer_token_bedrock),
+                ]
+            )
+        )
         return env
+
+    def claude_sdk_env(self) -> dict[str, str]:
+        """Bedrock routing/auth env for the claude-agent-sdk CLI (its container env)."""
+        return type(self).container_env(get_settings().provider)
 
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""

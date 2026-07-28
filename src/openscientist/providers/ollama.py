@@ -22,7 +22,7 @@ import requests
 
 from openscientist.models import _DEFAULT_CONTEXT_TOKENS, ModelProfile
 from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +76,20 @@ class OllamaProvider(CodexCompatible):
     def id(self) -> str:
         return "ollama"
 
-    @property
-    def display_name(self) -> str:
-        return "Ollama (local)"
+    display_name = "Ollama (local)"
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return {"OLLAMA_BASE_URL": provider.ollama_base_url, "OLLAMA_MODEL": provider.ollama_model}
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        if proxy:
+            return super().harness_env(proxy=proxy)
+        # Local, keyless: point an OpenAI-family harness straight at Ollama.
+        s = get_settings().provider
+        return {"OPENAI_BASE_URL": s.ollama_base_url, "OPENAI_API_KEY": "ollama"}
 
     def validate_required_config(self) -> list[str]:
         # Local and keyless: the base URL and model both have defaults, so

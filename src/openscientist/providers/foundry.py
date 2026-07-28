@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openscientist.providers.base import ClaudeCompatible, CostInfo, LlmUpstream
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 from ._anthropic_common import (
     send_anthropic_message,
@@ -68,29 +68,21 @@ class FoundryProvider(ClaudeCompatible):
     def id(self) -> str:
         return "foundry"
 
-    @property
-    def display_name(self) -> str:
-        return "Azure AI Foundry"
+    display_name = "Azure AI Foundry"
 
     def validate_required_config(self) -> list[str]:
-        """Check required Foundry configuration."""
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         errors = []
-        settings = get_settings()
-
-        # Resource name or base URL is required
-        has_resource = settings.provider.anthropic_foundry_resource
-        has_base_url = settings.provider.anthropic_foundry_base_url
-
-        if not (has_resource or has_base_url):
+        if not (provider.anthropic_foundry_resource or provider.anthropic_foundry_base_url):
             errors.append(
                 "Azure Foundry resource not configured. Set either "
                 "ANTHROPIC_FOUNDRY_RESOURCE (resource name) or "
                 "ANTHROPIC_FOUNDRY_BASE_URL (full endpoint URL)"
             )
-
-        # Check authentication - either API key or Azure credentials
-        has_api_key = settings.provider.anthropic_foundry_api_key
-        if not has_api_key:
+        if not provider.anthropic_foundry_api_key:
             try:
                 import azure.identity  # noqa: F401, PLC0415
             except ImportError:
@@ -103,24 +95,25 @@ class FoundryProvider(ClaudeCompatible):
                     "ANTHROPIC_FOUNDRY_API_KEY not set. "
                     "Will use Azure default credential chain (Entra ID authentication)"
                 )
-
         return errors
 
-    def claude_sdk_env(self) -> dict[str, str]:
-        """Foundry routing/auth env vars the claude-agent-sdk CLI must see.
-
-        Mirrors `ProviderSettings._apply_foundry_env_vars`, including the
-        resource/base-url mutual exclusion (Claude Code rejects both).
-        """
-        p = get_settings().provider
-        env: dict[str, str] = {"CLAUDE_CODE_USE_FOUNDRY": "1"}
-        if p.anthropic_foundry_resource:
-            env["ANTHROPIC_FOUNDRY_RESOURCE"] = p.anthropic_foundry_resource
-        elif p.anthropic_foundry_base_url:
-            env["ANTHROPIC_FOUNDRY_BASE_URL"] = p.anthropic_foundry_base_url
-        if p.anthropic_foundry_api_key:
-            env["ANTHROPIC_FOUNDRY_API_KEY"] = p.anthropic_foundry_api_key
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        env = {"CLAUDE_CODE_USE_FOUNDRY": "1"}
+        # Claude Code treats resource and base_url as mutually exclusive.
+        if provider.anthropic_foundry_resource:
+            env["ANTHROPIC_FOUNDRY_RESOURCE"] = provider.anthropic_foundry_resource
+        elif provider.anthropic_foundry_base_url:
+            env["ANTHROPIC_FOUNDRY_BASE_URL"] = provider.anthropic_foundry_base_url
+        if provider.anthropic_foundry_api_key:
+            env["ANTHROPIC_FOUNDRY_API_KEY"] = provider.anthropic_foundry_api_key
         return env
+
+    def claude_sdk_env(self) -> dict[str, str]:
+        """Foundry routing/auth env for the claude-agent-sdk CLI (its container env)."""
+        return type(self).container_env(get_settings().provider)
 
     def llm_upstream(self) -> LlmUpstream | None:
         # Foundry authenticates with x-api-key (API key or minted Entra ID token).

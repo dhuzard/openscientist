@@ -26,9 +26,7 @@ class _StubClaude(ClaudeCompatible):
     def id(self) -> str:
         return "stub-claude"
 
-    @property
-    def display_name(self) -> str:
-        return "Stub Claude"
+    display_name = "Stub Claude"
 
     def validate_required_config(self) -> list[str]:
         return []
@@ -51,9 +49,7 @@ class _StubCodex(CodexCompatible):
     def id(self) -> str:
         return "stub-codex"
 
-    @property
-    def display_name(self) -> str:
-        return "Stub Codex"
+    display_name = "Stub Codex"
 
     def validate_required_config(self) -> list[str]:
         return []
@@ -79,9 +75,7 @@ class _StubHybrid(ClaudeCompatible, CodexCompatible):
     def id(self) -> str:
         return "stub-hybrid"
 
-    @property
-    def display_name(self) -> str:
-        return "Stub Hybrid"
+    display_name = "Stub Hybrid"
 
     def validate_required_config(self) -> list[str]:
         return []
@@ -132,9 +126,7 @@ def test_incomplete_claude_subclass_cannot_instantiate() -> None:
         def id(self) -> str:
             return "incomplete"
 
-        @property
-        def display_name(self) -> str:
-            return "Incomplete"
+        display_name = "Incomplete"
 
         def validate_required_config(self) -> list[str]:
             return []

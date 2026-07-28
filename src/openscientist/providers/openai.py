@@ -18,8 +18,9 @@ from openscientist.providers.base import (
     CodexCompatible,
     CostInfo,
     LlmUpstream,
+    env_from_pairs,
 )
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
 
@@ -36,17 +37,30 @@ class OpenAIDirectProvider(CodexCompatible):
     def id(self) -> str:
         return "openai"
 
-    @property
-    def display_name(self) -> str:
-        return "OpenAI API"
+    display_name = "OpenAI API"
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return env_from_pairs(
+            [
+                ("OPENAI_API_KEY", provider.openai_api_key),
+                ("CODEX_AUTH_HOST_PATH", provider.codex_auth_host_path),
+            ]
+        )
 
     def validate_required_config(self) -> list[str]:
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         # Auth is satisfied by an API key, a configured codex auth file (which
         # the container runner provisions into the per-job CODEX_HOME), or a
         # local codex CLI login.
         if (
             os.environ.get("OPENAI_API_KEY")
-            or get_settings().provider.codex_auth_host_path
+            or provider.codex_auth_host_path
             or _codex_auth_json().exists()
         ):
             return []

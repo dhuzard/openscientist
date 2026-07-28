@@ -179,11 +179,38 @@ class TestProviderSettings:
         assert "Unknown provider" in caplog.text
 
     def test_foundry_accepted_as_valid_provider(self, caplog):
-        """Foundry is a recognized provider with no warnings."""
+        """Foundry with a resource and API key is recognized and warns nothing."""
         with caplog.at_level(logging.WARNING, logger="openscientist.settings"):
-            settings = ProviderSettings(OPENSCIENTIST_PROVIDER="foundry")
+            settings = ProviderSettings(
+                OPENSCIENTIST_PROVIDER="foundry",
+                ANTHROPIC_FOUNDRY_RESOURCE="my-resource",
+                ANTHROPIC_FOUNDRY_API_KEY="key",
+            )
         assert settings.provider_id == "foundry"
         assert caplog.text == ""
+
+
+class TestHarnessSelection:
+    """Tests for the OPENSCIENTIST_HARNESS selector and its validation."""
+
+    def test_defaults_to_auto(self):
+        settings = ProviderSettings(OPENSCIENTIST_PROVIDER="anthropic")
+        assert settings.harness == "auto"
+
+    def test_accepts_and_normalizes_known_values(self):
+        for raw, expected in [("omp", "omp"), ("CODEX", "codex"), (" Claude_Code ", "claude_code")]:
+            settings = ProviderSettings(
+                OPENSCIENTIST_PROVIDER="anthropic", OPENSCIENTIST_HARNESS=raw
+            )
+            assert settings.harness == expected
+
+    def test_rejects_unknown_harness(self):
+        with pytest.raises(ValidationError, match="OPENSCIENTIST_HARNESS"):
+            ProviderSettings(OPENSCIENTIST_PROVIDER="anthropic", OPENSCIENTIST_HARNESS="bogus")
+
+    def test_container_env_forwards_harness(self):
+        settings = ProviderSettings(OPENSCIENTIST_PROVIDER="anthropic", OPENSCIENTIST_HARNESS="omp")
+        assert settings.get_container_env_vars()["OPENSCIENTIST_HARNESS"] == "omp"
 
 
 class TestProviderIdEnvVar:

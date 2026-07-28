@@ -24,9 +24,7 @@ class StubClaudeProvider(ClaudeCompatible):
     def id(self) -> str:
         return "stub"
 
-    @property
-    def display_name(self) -> str:
-        return "Stub"
+    display_name = "Stub"
 
     def validate_required_config(self) -> list[str]:
         return []
@@ -58,9 +56,7 @@ class StubCodexProvider(CodexCompatible):
     def id(self) -> str:
         return "stub-codex"
 
-    @property
-    def display_name(self) -> str:
-        return "Stub Codex"
+    display_name = "Stub Codex"
 
     def validate_required_config(self) -> list[str]:
         return []

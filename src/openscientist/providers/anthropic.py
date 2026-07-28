@@ -8,9 +8,10 @@ import logging
 import os
 from typing import Any
 
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 from ._anthropic_common import (
+    anthropic_container_env,
     send_anthropic_message,
     send_anthropic_message_with_tools,
 )
@@ -32,26 +33,26 @@ class AnthropicProvider(ClaudeCompatible):
     def id(self) -> str:
         return "anthropic"
 
-    @property
-    def display_name(self) -> str:
-        return "Anthropic"
+    display_name = "Anthropic"
+
+    @classmethod
+    def validate_model_format(cls, model: str | None) -> str | None:
+        return cls.model_format_error(
+            model, r"^claude-", "an Anthropic model name (expected to start with 'claude-')"
+        )
 
     def validate_required_config(self) -> list[str]:
-        """Check required Anthropic configuration."""
-        errors = []
-        settings = get_settings()
+        return self.required_config_errors(get_settings().provider)
 
-        if (
-            not settings.provider.anthropic_api_key
-            and not settings.provider.claude_code_oauth_token
-        ):
-            errors.append(
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
+        if not provider.anthropic_api_key and not provider.claude_code_oauth_token:
+            return [
                 "ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN not set. "
                 "Get your API key from https://console.anthropic.com "
                 "or run 'claude login' for OAuth."
-            )
-
-        return errors
+            ]
+        return []
 
     def claude_sdk_env(self) -> dict[str, str]:
         """Auth env vars the claude-agent-sdk CLI must see."""
@@ -61,6 +62,12 @@ class AnthropicProvider(ClaudeCompatible):
         if settings.provider.anthropic_api_key:
             return {"ANTHROPIC_API_KEY": settings.provider.anthropic_api_key}
         return {}
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return anthropic_container_env(provider)
 
     def llm_upstream(self) -> LlmUpstream | None:
         p = get_settings().provider

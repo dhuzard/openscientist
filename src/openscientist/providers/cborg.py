@@ -12,9 +12,10 @@ import requests
 
 from openscientist.exceptions import ProviderError
 from openscientist.providers.base import ClaudeCompatible, CostInfo, LlmUpstream
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 from ._anthropic_common import (
+    anthropic_container_env,
     send_anthropic_message,
     send_anthropic_message_with_tools,
 )
@@ -37,21 +38,26 @@ class CborgProvider(ClaudeCompatible):
     def id(self) -> str:
         return "cborg"
 
-    @property
-    def display_name(self) -> str:
-        return "CBORG"
+    display_name = "CBORG"
+
+    @classmethod
+    def validate_model_format(cls, model: str | None) -> str | None:
+        return cls.model_format_error(
+            model,
+            r"^claude-",
+            "an Anthropic model name on CBORG (expected to start with 'claude-')",
+        )
 
     def validate_required_config(self) -> list[str]:
-        """Check required CBORG configuration."""
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         errors = []
-        settings = get_settings()
-
-        if not settings.provider.anthropic_auth_token:
+        if not provider.anthropic_auth_token:
             errors.append("ANTHROPIC_AUTH_TOKEN not set (required for CBORG)")
-
-        if not settings.provider.anthropic_base_url:
+        if not provider.anthropic_base_url:
             errors.append("ANTHROPIC_BASE_URL not set (should be https://api.cborg.lbl.gov)")
-
         return errors
 
     def claude_sdk_env(self) -> dict[str, str]:
@@ -63,6 +69,12 @@ class CborgProvider(ClaudeCompatible):
         if settings.provider.anthropic_base_url:
             env["ANTHROPIC_BASE_URL"] = settings.provider.anthropic_base_url
         return env
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return anthropic_container_env(provider)
 
     def llm_upstream(self) -> LlmUpstream | None:
         s = get_settings().provider

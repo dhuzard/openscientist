@@ -11,16 +11,23 @@ from __future__ import annotations
 
 import abc
 import enum
+import inspect
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from openscientist.exceptions import ProviderError
 from openscientist.models import ModelProfile, default_model_profile
-from openscientist.settings import get_settings
+from openscientist.settings import ProviderSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def env_from_pairs(pairs: list[tuple[str, str | None]]) -> dict[str, str]:
+    """Build an env dict from (name, value) pairs, dropping empty values."""
+    return {key: value for key, value in pairs if value}
 
 
 @dataclass
@@ -87,7 +94,6 @@ class Provider(abc.ABC):
     tracking are shared here."""
 
     def __init__(self) -> None:
-        """Validate configuration on construction."""
         errors = self.validate_required_config()
         if errors:
             raise ValueError(
@@ -108,14 +114,29 @@ class Provider(abc.ABC):
     def id(self) -> str:
         """Stable identifier used by the factory selector."""
 
-    @property
-    @abc.abstractmethod
-    def display_name(self) -> str: ...
+    #: Human-facing provider name for the UI and logs. Concrete providers set
+    #: it as a class attribute, so it is readable without instantiating (which
+    #: would validate credentials). Enforced in ``__init_subclass__``.
+    display_name: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if inspect.isabstract(cls):
+            return
+        if not getattr(cls, "display_name", None) or not isinstance(cls.display_name, str):
+            raise TypeError(
+                f"{cls.__name__} must set `display_name: ClassVar[str]` "
+                "to the provider's human-facing name."
+            )
 
     @abc.abstractmethod
     def validate_required_config(self) -> list[str]:
-        """Return a list of error strings if the provider is
-        misconfigured; empty list otherwise."""
+        """Config errors raised at construction. Forwards to ``required_config_errors``."""
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
+        """Config errors for a settings snapshot, without instantiating. Base: none."""
+        return []
 
     def _validate_optional_config(self) -> list[str]:
         """Return warning messages for optional misconfiguration (empty by
@@ -124,26 +145,14 @@ class Provider(abc.ABC):
 
     @abc.abstractmethod
     def get_cost_info(self, lookback_hours: int = 24) -> CostInfo:
-        """Return project spending information.
-
-        Args:
-            lookback_hours: Time window for recent_spend_usd
-
-        Returns:
-            CostInfo with total and recent spend
-        """
+        """Project spending information."""
 
     def check_budget_limits(self, lookback_hours: int = 24) -> dict[str, Any]:
-        """Check if budget limits are exceeded.
-
-        Returns:
-            {"can_proceed": bool, "warnings": List[str], "errors": List[str]}
-        """
+        """Whether the project is within budget, with warnings and errors."""
         try:
             cost_info = self.get_cost_info(lookback_hours=lookback_hours)
         except (ProviderError, ValueError, OSError) as e:
             logger.error("Could not fetch cost info for budget check: %s", e)
-            # If we can't check costs, allow job to proceed but warn
             return {
                 "can_proceed": True,
                 "warnings": [f"Could not check budget limits: {e}"],
@@ -153,18 +162,10 @@ class Provider(abc.ABC):
         return self.evaluate_budget(cost_info)
 
     def evaluate_budget(self, cost_info: CostInfo) -> dict[str, Any]:
-        """Evaluate budget limits against pre-fetched cost info.
-
-        Use this instead of check_budget_limits() when you already have a
-        CostInfo object to avoid duplicate API calls.
-
-        Returns:
-            {"can_proceed": bool, "warnings": List[str], "errors": List[str]}
-        """
+        """Evaluate budget against a pre-fetched CostInfo (avoids a duplicate API call)."""
         warnings = []
         errors = []
 
-        # If cost data is unavailable, warn but allow job to proceed
         if cost_info.total_spend_usd is None or cost_info.recent_spend_usd is None:
             warnings.append(
                 f"Cost data unavailable for budget check. "
@@ -172,14 +173,12 @@ class Provider(abc.ABC):
             )
         else:
             settings = get_settings()
-            # Check total spend limit
             max_total = settings.budget.max_project_spend_total_usd
             if cost_info.total_spend_usd >= max_total:
                 errors.append(
                     f"Total spend ${cost_info.total_spend_usd:.2f} exceeds limit ${max_total:.2f}"
                 )
 
-            # Check 24h spend limit (use settings for default, assumes 24h lookback)
             max_recent = settings.budget.max_project_spend_24h_usd
             if cost_info.recent_spend_usd >= max_recent:
                 errors.append(
@@ -188,7 +187,6 @@ class Provider(abc.ABC):
                     f"exceeds limit ${max_recent:.2f}"
                 )
 
-            # Check warning threshold
             warn_recent = settings.budget.warn_project_spend_24h_usd
             if (
                 cost_info.recent_spend_usd >= warn_recent
@@ -216,22 +214,12 @@ class Provider(abc.ABC):
         return {"can_proceed": len(errors) == 0, "warnings": warnings, "errors": errors}
 
     def effective_model_name(self) -> str | None:
-        """The model id this provider will actually drive, or None when it
-        defers to an account/config default.
-
-        Used for the job's model badge. Each compatibility family overrides
-        this; the base returns None for a provider that has no family.
-        """
+        """Model id this provider drives, or None when it defers to an account default."""
         return None
 
     def model_profile(self) -> ModelProfile:
-        """The active model's profile, chiefly its usable context window.
-
-        The default covers hosted models (explicit override, known-model table,
-        conservative default). A provider that serves a self-hosted model
-        overrides this to probe the live deployment, whose num_ctx can be below
-        the model's trained maximum.
-        """
+        """The active model's profile (mainly its context window). Self-hosted
+        providers override to probe the live deployment."""
         return default_model_profile(
             self.effective_model_name(), get_settings().provider.model_context_tokens
         )
@@ -245,10 +233,8 @@ class Provider(abc.ABC):
         return {}
 
     def airgap_egress(self) -> AirgapPosture:
-        """Air-gapped egress posture for the active config, read as the single
-        source of truth by the firewall and proxy-start. Pure, no network.
-        Defaults to PROXY when the provider proxies its LLM, and providers
-        override to DIRECT or UNSUPPORTED."""
+        """Air-gapped egress posture for the active config, read by the firewall
+        and proxy-start. Pure, no network. Defaults to PROXY, providers override."""
         if self.proxy_env_overrides(proxy_base_url="", placeholder=""):
             return AirgapPosture(AirgapEgress.PROXY)
         return AirgapPosture(
@@ -261,6 +247,40 @@ class Provider(abc.ABC):
         env = get_settings().provider.get_container_env_vars()
         env.update(self.proxy_env_overrides(proxy_base_url=proxy_base_url, placeholder=placeholder))
         return env
+
+    @classmethod
+    def container_env(
+        cls,
+        provider: ProviderSettings,
+        *,
+        gcp_credentials_container_path: str | None = None,
+    ) -> dict[str, str]:
+        """Agent-container env (auth + routing). Takes ``ProviderSettings`` so it
+        composes without instantiating the provider. Base: none."""
+        return {}
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Extra env a provider-agnostic harness (omp) needs to reach this
+        provider's endpoint. ``proxy`` is the in-container LLM proxy URL when
+        active. Base: none (the harness reads the provider's own base-URL env)."""
+        return {}
+
+    @classmethod
+    def validate_model_format(cls, model: str | None) -> str | None:
+        """Error message if ``model`` does not match this provider's naming
+        convention, else None. Base enforces no pattern."""
+        return None
+
+    @staticmethod
+    def model_format_error(model: str | None, pattern: str, description: str) -> str | None:
+        """Shared helper: None if ``model`` is unset or matches ``pattern``,
+        else a uniform mismatch message naming ``description``."""
+        if not model or re.match(pattern, model):
+            return None
+        return (
+            f"OPENSCIENTIST_MODEL={model!r} does not look like {description}. "
+            "Either change the model id or change OPENSCIENTIST_PROVIDER."
+        )
 
 
 class ClaudeCompatible(Provider, abc.ABC):
@@ -292,17 +312,13 @@ class CodexCompatible(Provider, abc.ABC):
 
     @abc.abstractmethod
     def codex_config_overrides(self) -> list[str]:
-        """TOML lines written into the per-job ``$CODEX_HOME/config.toml``
-        for this provider — typically a ``[model_providers.<id>]`` table
-        (``base_url``, ``env_key``, ``wire_api``, ``query_params``, ...).
-        The codex CLI loads them from config.toml; the SDK exposes no
-        programmatic config override."""
+        """TOML lines for the per-job ``$CODEX_HOME/config.toml``, typically a
+        ``[model_providers.<id>]`` table. The SDK has no programmatic override."""
 
     @abc.abstractmethod
     def codex_model_name(self) -> str | None:
-        """Model name passed to the codex thread (``thread_start(model=...)``). Return None to
-        let codex use its account/config default (some accounts reject an
-        explicit model id, e.g. ChatGPT-auth rejects ``gpt-5-codex``)."""
+        """Model for ``thread_start(model=...)``, or None to use codex's account
+        default (some accounts reject an explicit id, e.g. ChatGPT-auth)."""
 
     @abc.abstractmethod
     def codex_model_provider_id(self) -> str:
@@ -312,10 +328,13 @@ class CodexCompatible(Provider, abc.ABC):
 
     @abc.abstractmethod
     def codex_sdk_env(self) -> dict[str, str]:
-        """Auth env vars the codex child must see — at minimum the secret
-        named by this provider's ``model_providers.<id>.env_key``. The
-        codex analog of ``claude_sdk_env()``; merged into the codex child
-        environment."""
+        """Auth env for the codex child, at minimum the secret named by this
+        provider's ``model_providers.<id>.env_key``. Codex analog of ``claude_sdk_env``."""
 
     def effective_model_name(self) -> str | None:
         return self.codex_model_name()
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        # OpenAI-family harnesses read OPENAI_BASE_URL; point it at the proxy
+        # when active (codex uses config.toml instead, so this is omp's path).
+        return {"OPENAI_BASE_URL": proxy} if proxy else {}

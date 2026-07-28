@@ -73,9 +73,7 @@ def test_base_provider_model_profile_delegates_to_default():
         def id(self) -> str:
             return "fake"
 
-        @property
-        def display_name(self) -> str:
-            return "Fake"
+        display_name = "Fake"
 
         def validate_required_config(self) -> list[str]:
             return []

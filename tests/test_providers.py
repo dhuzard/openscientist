@@ -37,9 +37,7 @@ class StubProvider(Provider):
     def id(self) -> str:
         return "stub"
 
-    @property
-    def display_name(self) -> str:
-        return "StubProvider"
+    display_name = "StubProvider"
 
     def validate_required_config(self) -> list[str]:
         return self._required_errors
@@ -209,6 +207,7 @@ class TestCheckBudgetLimits:
                 "MAX_PROJECT_SPEND_24H_USD": "100",
             },
         ):
+            clear_settings_cache()
             result = provider.check_budget_limits()
         assert result["can_proceed"] is True
         assert result["errors"] == []
@@ -216,6 +215,7 @@ class TestCheckBudgetLimits:
     def test_total_spend_exceeded_blocks(self):
         provider = self._make_provider(total_spend_usd=1001.0, recent_spend_usd=5.0)
         with patch.dict(os.environ, {"MAX_PROJECT_SPEND_TOTAL_USD": "1000"}):
+            clear_settings_cache()
             result = provider.check_budget_limits()
         assert result["can_proceed"] is False
         assert any("Total spend" in e for e in result["errors"])
@@ -223,6 +223,7 @@ class TestCheckBudgetLimits:
     def test_recent_spend_exceeded_blocks(self):
         provider = self._make_provider(total_spend_usd=10.0, recent_spend_usd=200.0)
         with patch.dict(os.environ, {"MAX_PROJECT_SPEND_24H_USD": "100"}):
+            clear_settings_cache()
             result = provider.check_budget_limits()
         assert result["can_proceed"] is False
         assert any("Last 24h" in e for e in result["errors"])
