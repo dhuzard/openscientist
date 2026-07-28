@@ -1,48 +1,83 @@
-# Create a professional OpenScientist skill
+# Create a reliable OpenScientist skill
 
-OpenScientist skills are Markdown instructions that give the discovery agent
-specialized scientific knowledge or a repeatable research workflow. This
-tutorial explains the format OpenScientist currently ingests, how to test a
-skill, and what reviewers should look for.
+An OpenScientist skill is a compact operating procedure for the discovery
+agent. A useful skill improves a repeated scientific decision: it tells the
+agent when the procedure applies, what evidence it needs, what to do, when to
+stop, and what to report.
 
-This is an initial community authoring guide. The
-[maintainer input requested](#maintainer-input-requested) section lists
-conventions that the project has not yet formalized.
+This guide separates three different kinds of statement:
 
-## Understand the skill lifecycle
+- **Runtime requirement** — enforced by the current OpenScientist code.
+- **Repository convention** — needed for predictable behavior in this project.
+- **Authoring recommendation** — a quality practice supported by the corpus
+  review or an external skill-authoring standard.
 
-OpenScientist does not read files directly from `skills/` during an
-investigation. The application:
+The evidence behind these statements, including the complete corpus inventory
+and known limitations, is recorded in the
+[Skill Authoring Knowledge Base](SKILL_AUTHORING_KNOWLEDGE_BASE.md).
 
-1. discovers `SKILL.md` files in an enabled local or GitHub skill source;
-2. parses their YAML frontmatter and Markdown body;
-3. stores enabled skills in the database; and
-4. materializes them in the format required by the selected agent backend.
+## Use the interactive Skill Creator
 
-All enabled skills are made available to every job. The discovery instructions
-tell the agent to read every `workflow` skill and the `domain` skills that match
-the submitted data. Choose one of those established categories unless the
-agent-selection behavior is also being changed.
+Authenticated users can open **Skills → Create skill** (`/skills/create`) to
+work through the same standard:
 
-## Start from concrete use cases
+1. define the task contract;
+2. generate or refine an editable draft with the configured model;
+3. run deterministic syntax, portability, and safety checks;
+4. review the scientific claims and any model questions;
+5. explicitly accept the exact current draft; and
+6. download `SKILL.md`.
 
-Before writing instructions, define:
+The page never installs or publishes the draft. Editing invalidates acceptance,
+and blocking syntax or secret checks prevent export. Repository review or an
+administrator-managed source remains a separate publication decision.
 
-- two or three requests or datasets that should cause an agent to use the
-  skill;
-- the decisions the skill should improve;
-- the expected outputs or recorded evidence;
-- relevant tool, data, and environment prerequisites; and
-- cases where the skill should not be applied.
+Generation uses the configured provider's direct text-completion API and does
+not expose agent tools. Direct Claude-compatible API configurations and
+OpenAI-compatible API-key/proxy configurations are supported. Anthropic
+Claude-Code OAuth-only and OpenAI Codex OAuth-only authentication are
+intentionally not copied into the authoring container; configure the
+corresponding API key (and `OPENSCIENTIST_MODEL` for direct OpenAI), or edit and
+validate the starter draft manually. Provider-specific errors are shown without
+discarding the current draft.
 
-A skill is most valuable when it captures non-obvious scientific or procedural
-knowledge. Avoid repeating general advice that the agent can infer reliably.
+## Start with a task contract
 
-## Choose how to distribute the skill
+Before drafting Markdown, write down:
 
-### Built-in skill
+1. **Purpose** — the decision or result this skill improves.
+2. **Triggers** — two or three concrete requests or data situations where it
+   should be used.
+3. **Non-triggers** — nearby cases where it should not be used.
+4. **Inputs and prerequisites** — required data, metadata, tools, and
+   assumptions.
+5. **Output contract** — the evidence, decision, or report the agent must
+   produce.
+6. **Failure behavior** — what to preserve and report when data or tools are
+   missing.
+7. **Human checkpoints** — actions that are destructive, costly, sensitive, or
+   irreversible.
 
-Contribute a broadly useful skill to this repository:
+This task contract is more valuable than a long background essay. It creates
+observable criteria for both reviewers and tests.
+
+## Choose the category
+
+OpenScientist currently gives special discovery semantics to two categories:
+
+- `workflow`: methodology that applies across investigations. The discovery
+  prompt tells the agent to read every enabled workflow skill.
+- `domain`: expertise relevant to a particular scientific data type or
+  question.
+
+Use another category only if the corresponding selection behavior is also
+implemented. All enabled skills are currently materialized for every job, so
+keep each skill narrow and avoid conflicting global rules.
+
+## Create `SKILL.md`
+
+Only files named `SKILL.md` are ingested. Put each skill in a lowercase,
+hyphenated directory:
 
 ```text
 skills/
@@ -54,53 +89,12 @@ skills/
         └── SKILL.md
 ```
 
-Use `workflow` for domain-independent research methods and `domain` for
-scientific expertise that applies only to matching data or questions.
-Review the existing
-[`hypothesis-generation`](../skills/workflow/hypothesis-generation/SKILL.md)
-workflow skill and
-[`metabolomics`](../skills/domain/metabolomics/SKILL.md) domain skill for
-repository examples. They predate this guide, so treat the requirements below
-as the proposed standard for new contributions.
-
-### External skill source
-
-Maintain organization-specific or independently versioned skills in a local
-directory or GitHub repository. Each skill must still be stored in its own
-directory as `<skill-slug>/SKILL.md`.
-
-An OpenScientist administrator can register the source through
-`POST /api/v1/skills/sources` and trigger an immediate import through
-`POST /api/v1/skills/sources/{source_id}/sync`. GitHub sources may set
-`skills_path` to the subdirectory containing the skill directories.
-
-For example:
-
-```json
-{
-  "name": "Community scientific skills",
-  "source_type": "github",
-  "url": "https://github.com/example/scientific-skills",
-  "branch": "main",
-  "skills_path": "skills"
-}
-```
-
-Source management requires administrator access. Enabled sources are also
-synchronized by the background scheduler.
-
-## Create `SKILL.md`
-
-Use a lowercase, hyphenated directory name that communicates the capability.
-Keep the combined `<category>--<slug>` identifier at or below 64 characters so
-it remains portable to the Codex backend.
-
-Start with this template:
+Use this self-contained starting point:
 
 ```markdown
 ---
 name: Example Quality Control
-description: Evaluate example assay quality, identify invalid measurements, and record exclusions. Use for example assay tables before statistical analysis.
+description: Evaluate example assay quality and record justified exclusions. Use before statistical analysis of example assay tables.
 category: domain
 slug: example-quality-control
 tags:
@@ -110,159 +104,191 @@ tags:
 
 # Example Quality Control
 
+## Use when
+
+- The input is an example assay table with ...
+
+## Do not use when
+
+- The measurements have already been ...
+
 ## Preconditions
 
-- Confirm that the input contains ...
-- Stop and report the missing prerequisite when ...
+- Require ...
+- If ... is missing, stop and report ...
 
 ## Workflow
 
-1. Inspect ...
-2. Calculate ...
-3. Compare ...
-4. Record ...
+1. Inspect ... and record ...
+2. Calculate ... using ...
+3. Compare ... while accounting for ...
+4. Ask the user to confirm before ...
+5. Record the result and the evidence that supports it.
 
 ## Interpretation
 
-- Treat ... as evidence of ...
-- Do not conclude ... unless ...
+- Treat ... as an observation, not proof of ...
+- Do not infer ... unless ...
 
 ## Report
 
-- Report the method, thresholds, exclusions, and limitations.
+- Report inputs, versions, parameters, exclusions, uncertainty, limitations,
+  and unresolved questions.
 ```
 
-### Frontmatter fields
+### Frontmatter contract
 
-| Field | Requirement | Guidance |
+| Field | Current behavior | Authoring guidance |
 | --- | --- | --- |
-| `name` | Required | Use a concise human-readable name. |
-| `description` | Recommended | State both the capability and the situations that should trigger it. Keep it on one logical line and at most 1,024 characters for backend portability. |
-| `category` | Recommended | Use `workflow` or `domain` for the current discovery behavior. If omitted, OpenScientist derives it from the immediate parent directory. |
-| `slug` | Optional | Use a stable lowercase, hyphenated identifier. If omitted for `SKILL.md`, OpenScientist derives it from the parent directory. |
-| `tags` | Optional | Provide a YAML list of precise search terms. |
+| `name` | Required, non-empty | Use a concise human-readable name. |
+| `description` | Optional to the parser | State both capability and concrete trigger situations. Keep it within 1,024 characters for Codex portability. |
+| `category` | Derived from the parent directory if omitted | Write `workflow` or `domain` explicitly. |
+| `slug` | Derived and sanitized if omitted | Write a stable lowercase-hyphenated value explicitly. |
+| `tags` | Optional list or scalar | Use precise retrieval terms, not broad labels. |
 
-The Markdown after the closing `---` is the instruction body stored in the
-database and delivered to the agent.
+Keep `<category>--<slug>` at most 64 characters. The Codex adapter truncates
+longer identities. Do not use slashes, `..`, drive prefixes, or other path
+characters in explicit category or slug values.
 
-## Write reliable instructions
+## Write the procedure
 
-### Keep the scope explicit
+### Optimize the description for selection
 
-State required inputs, supported data types, assumptions, and stopping
-conditions. Explain how to respond when prerequisites are missing instead of
-letting the agent improvise silently.
+The description is the routing surface. Say what the skill does and when it
+should activate:
+
+> Evaluate replicate-aware differential expression and preserve sample-level
+> evidence. Use for bulk or single-cell RNA-seq comparisons with biological
+> replicates.
+
+Avoid descriptions that only repeat the title. Include distinctive data types,
+tasks, and trigger phrases. The
+[Agent Skills guidance on descriptions][agent-skills-descriptions] likewise
+recommends evaluating descriptions against queries that should and should not
+trigger the skill.
+
+### Use progressive disclosure
+
+Keep the main procedure concise. Put high-value instructions before explanatory
+background. Although the broader
+[Agent Skills specification][agent-skills-spec] supports `references/`,
+`scripts/`, and `assets/`, current OpenScientist ingestion transports only
+`SKILL.md`. Until bundle support exists, an OpenScientist skill must remain
+self-contained.
 
 ### Match precision to risk
 
-- Use principles and heuristics where several scientifically valid approaches
-  exist.
-- Give ordered steps where sequence matters.
-- Specify exact checks, formulas, thresholds, or tool calls where deviation
-  could invalidate a result.
+- Use principles where several methods can be scientifically valid.
+- Use ordered steps where sequence matters.
+- Specify exact formulas, thresholds, and tool calls where deviation can
+  invalidate the result.
+- Label fixed project policy separately from literature-supported scientific
+  claims.
 
-Explain the scientific justification for consequential thresholds. Separate
-project policy from claims supported by literature.
+A good instruction constrains fragile choices without removing appropriate
+scientific judgment.
 
-### Make results reproducible
+### Preserve epistemic status
 
-Tell the agent to preserve:
+Require the agent to distinguish:
 
-- input identifiers and versions;
-- parameters, units, filters, and transformations;
-- software or database versions when they affect interpretation;
+- measured observations;
+- statistical associations;
+- mechanistic hypotheses;
+- heuristics or proxies; and
+- causal conclusions.
+
+Non-significance is not proof that a hypothesis is false. A metabolite ratio is
+not direct flux without an appropriate tracer or kinetic design. Encode these
+boundaries directly when they matter to the skill.
+
+### Make the work reproducible
+
+Tell the agent to record:
+
+- input identifiers, versions, units, and biological replicate structure;
+- filters, transformations, parameters, and software or database versions;
 - intermediate quality-control evidence;
-- negative and inconclusive results; and
-- uncertainty, limitations, and alternative explanations.
+- negative, inconclusive, and conflicting results;
+- uncertainty, limitations, and alternative explanations; and
+- citations for consequential thresholds or methodological claims.
 
-Prefer primary sources for scientific claims. Include stable citations in the
-skill when a method depends on a particular standard or publication, and say
-when the agent should search for newer evidence.
+Prefer primary literature and authoritative technical documentation. Never
+invent citations. Say when claims require a fresh literature search.
 
-### Design for safe failure
+### Fail safely
 
-Do not include credentials, private data, or instructions that weaken the
-execution sandbox. Identify destructive or irreversible operations and require
-appropriate confirmation. Require the agent to report tool failures and data
-quality problems rather than fabricate or infer missing results.
+Require an explicit response to missing prerequisites, tool failures,
+unsupported formats, and out-of-scope requests. Do not embed credentials,
+private data, contributor-specific absolute paths, or instructions that weaken
+the sandbox. Require human confirmation before consequential external actions.
 
-### Keep the context efficient
+## Evaluate behavior, not prose
 
-Include only information needed to perform the workflow. Prefer compact
-examples over long background sections, and avoid duplicating the same
-instructions in several places.
+Create a small evaluation set before submitting the skill:
 
-At present, OpenScientist source ingestion imports only files named
-`SKILL.md`. It does not deliver sibling reference files, scripts, or assets to
-the job. Keep a distributed skill self-contained until resource-bundle support
-is defined.
+| Case | What it checks |
+| --- | --- |
+| Two normal trigger cases | The skill is selected and completes its output contract. |
+| Two near-miss cases | The skill is not selected unnecessarily. |
+| One incomplete-input case | Missing prerequisites produce a useful stop or clarification. |
+| One adversarial or ambiguous case | Guardrails hold and uncertainty remains visible. |
+| One regression case | The scientific error most likely to recur stays fixed. |
 
-## Validate the skill
+Review two layers separately:
 
-### Parse the new file
+1. **Selection:** Did the agent choose the skill at the right time?
+2. **Execution:** Did it follow the procedure and produce the required evidence?
 
-From the repository root, replace the example path and run:
+The repository currently has parser and ingestion tests, but no behavioral skill
+evaluation harness. Record the cases and observed results in the pull request
+until that harness exists.
+
+## Validate locally
+
+Parse the file:
 
 ```bash
 uv run python -c "from pathlib import Path; from openscientist.skill_ingestion import SkillParser; p = Path('skills/domain/example-quality-control/SKILL.md'); print(SkillParser().parse_file(p))"
 ```
 
-This catches missing frontmatter, invalid YAML, and missing required metadata.
-
-### Run the ingestion tests
-
-With the development database configured as described in
-[`CONTRIBUTING.md`](../CONTRIBUTING.md), run:
+Run ingestion tests:
 
 ```bash
 uv run pytest tests/test_skill_ingestion.py
 ```
 
-The built-in integration test parses and imports every repository skill.
+Then run the behavioral cases with the providers the skill is expected to
+support. Parser success only proves that the file can be ingested.
 
-### Exercise realistic cases
+## Review checklist
 
-Test the skill on at least:
+- [ ] The task contract names triggers, non-triggers, inputs, outputs, and
+      failure behavior.
+- [ ] `SKILL.md` has valid frontmatter and safe explicit identifiers.
+- [ ] The description says what the skill does and when it applies.
+- [ ] The category matches current discovery behavior.
+- [ ] The procedure is ordered, testable, and self-contained.
+- [ ] Consequential scientific claims and thresholds have sources.
+- [ ] Observations, associations, hypotheses, proxies, and causal claims remain
+      distinct.
+- [ ] Provenance, uncertainty, negative results, and limitations are preserved.
+- [ ] Human confirmation protects consequential actions.
+- [ ] No secrets, sensitive data, unsafe paths, or unavailable bundled
+      resources are present.
+- [ ] Selection and execution cases were tested, including a near miss and a
+      failure case.
 
-1. a typical case it should handle;
-2. an edge case with incomplete or poor-quality data; and
-3. an out-of-scope case it should decline or redirect.
+## Further standards
 
-Review whether the agent followed the method, preserved evidence, expressed
-uncertainty, and avoided unsupported conclusions. Revise the instructions when
-success depends on context that exists only in the author's head.
+- [Agent Skills specification][agent-skills-spec]
+- [Agent Skills authoring best practices][agent-skills-practices]
+- [Agent Skills description optimization][agent-skills-descriptions]
+- [OpenAI Academy: Skills][openai-skills]
+- [Anthropic: Equipping agents for the real world with Agent Skills][anthropic-skills]
 
-## Submission checklist
-
-Before opening a pull request, confirm that:
-
-- [ ] the skill has concrete motivating use cases;
-- [ ] its directory and slug use lowercase hyphenated names;
-- [ ] its category matches the current agent-selection behavior;
-- [ ] its description states what it does and when it applies;
-- [ ] prerequisites, workflow, interpretation, and reporting are actionable;
-- [ ] scientific claims and consequential thresholds are justified;
-- [ ] failure modes, uncertainty, and out-of-scope cases are covered;
-- [ ] no secrets, sensitive data, or unsafe operational instructions are
-      included;
-- [ ] the parser and ingestion tests pass; and
-- [ ] the pull request describes the realistic cases used to evaluate it.
-
-## Maintainer input requested
-
-Community authors would benefit from project decisions and examples for:
-
-- the long-term category taxonomy and how non-`workflow`/`domain` categories
-  should be selected by agents;
-- a supported scaffolding and standalone validation command;
-- whether and how references, scripts, assets, and other bundled resources
-  should be synchronized;
-- scientific review expectations, citation policy, and recommended evaluators;
-- security review for skills that invoke tools or process sensitive data;
-- versioning, deprecation, provenance, and conflict handling across sources;
-- ownership and trust requirements for external community sources; and
-- a canonical example of a production-quality workflow skill and domain skill.
-
-Maintainers are invited to amend this guide with those policies. Until then,
-contributors should describe any necessary assumptions and evaluation evidence
-in their pull requests.
+[agent-skills-spec]: https://agentskills.io/specification
+[agent-skills-practices]: https://agentskills.io/skill-creation/best-practices
+[agent-skills-descriptions]: https://agentskills.io/skill-creation/optimizing-descriptions
+[openai-skills]: https://openai.com/academy/skills/
+[anthropic-skills]: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills

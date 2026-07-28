@@ -38,7 +38,7 @@ OpenScientist is a domain-agnostic autonomous discovery agent that:
   - `update_knowledge_state`: Record findings
   - `run_phenix_tool`, `compare_structures`, `parse_alphafold_confidence` (optional, requires Phenix)
 - **Knowledge State**: PostgreSQL-backed tracking for findings, hypotheses, literature, analysis logs, and iteration summaries
-- **Job Manager**: Multi-job support with queueing and lifecycle management
+- **Job Manager**: Multi-job queueing with pause/resume, live iteration limits, and early reports
 - **Web and REST Interfaces**: NiceGUI UI plus an authenticated FastAPI API
 
 Each job runs in a dedicated agent container. The agent calls the standalone
@@ -197,6 +197,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and deplo
 
 - [Design Document](docs/DESIGN.md)
 - [Deployment Guide](docs/DEPLOYMENT.md)
+- [Job Run Controls](docs/JOB_RUN_CONTROLS.md)
 - [Security Review](docs/SECURITY_REVIEW.md)
 - [Environment Configuration](.env.example)
 

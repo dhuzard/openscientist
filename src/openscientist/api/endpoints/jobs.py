@@ -139,6 +139,23 @@ class JobStatusResponse(BaseModel):
     error_message: str | None = Field(None, description="Error message if failed")
 
 
+class IterationLimitUpdate(BaseModel):
+    """Request to reduce the remaining discovery work."""
+
+    max_iterations: int = Field(
+        ...,
+        ge=1,
+        description="New maximum iteration count; must be below the current limit.",
+    )
+
+
+class IterationLimitResponse(BaseModel):
+    """Persisted iteration limit after an update."""
+
+    current_iteration: int
+    max_iterations: int
+
+
 class JobDetailResponse(JobResponse):
     """Detailed response for a single job."""
 
@@ -570,9 +587,9 @@ async def cancel_job(
     session: AsyncSession = SESSION_DEP,
 ) -> None:
     """
-    Cancel a pending, running, or queued job.
+    Cancel a pending, queued, running, paused, or feedback-waiting job.
 
-    The job will stop at the next iteration checkpoint.
+    Active agent containers are stopped immediately.
     """
     job = await get_job_by_id(job_id, user, session)
 
@@ -589,7 +606,7 @@ async def cancel_job(
             detail="Only the job owner can cancel a job",
         )
 
-    if job.status not in ["pending", "running", "queued"]:
+    if job.status not in ["pending", "running", "queued", "paused", "awaiting_feedback"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot cancel job with status '{job.status}'",
@@ -606,6 +623,136 @@ async def cancel_job(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to cancel job",
         ) from e
+
+
+@router.post("/{job_id}/pause", status_code=status.HTTP_204_NO_CONTENT)
+async def pause_job(
+    job_id: str,
+    user: User = CURRENT_USER_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> None:
+    """Pause an active job at its first unfinished iteration."""
+    job = await get_job_by_id(job_id, user, session)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the job owner can pause a job",
+        )
+    if job.status not in ["running", "awaiting_feedback"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot pause job with status '{job.status}'",
+        )
+    try:
+        _get_job_manager().pause_job(str(job.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to pause job %s", job.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to pause job",
+        ) from exc
+
+
+@router.post("/{job_id}/resume", status_code=status.HTTP_204_NO_CONTENT)
+async def resume_job(
+    job_id: str,
+    user: User = CURRENT_USER_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> None:
+    """Resume a paused job in a fresh agent container."""
+    job = await get_job_by_id(job_id, user, session)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the job owner can resume a job",
+        )
+    if job.status != "paused":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot resume job with status '{job.status}'",
+        )
+    try:
+        _get_job_manager().resume_job(str(job.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to resume job %s", job.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resume job",
+        ) from exc
+
+
+@router.patch("/{job_id}/iterations", response_model=IterationLimitResponse)
+async def update_iteration_limit(
+    job_id: str,
+    update: IterationLimitUpdate,
+    user: User = CURRENT_USER_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> IterationLimitResponse:
+    """Reduce an active job's maximum iteration count."""
+    job = await get_job_by_id(job_id, user, session)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the job owner can change its iteration limit",
+        )
+    try:
+        current_iteration, max_iterations = _get_job_manager().update_iteration_limit(
+            str(job.id), update.max_iterations
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to update iteration limit for job %s", job.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update iteration limit",
+        ) from exc
+    return IterationLimitResponse(
+        current_iteration=current_iteration,
+        max_iterations=max_iterations,
+    )
+
+
+@router.post("/{job_id}/stop-and-report", status_code=status.HTTP_204_NO_CONTENT)
+async def stop_and_generate_report(
+    job_id: str,
+    user: User = CURRENT_USER_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> None:
+    """Stop discovery and generate a report from persisted work."""
+    job = await get_job_by_id(job_id, user, session)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the job owner can stop it and generate a report",
+        )
+    if job.status not in ["running", "awaiting_feedback", "paused"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot generate an early report from status '{job.status}'",
+        )
+    try:
+        _get_job_manager().stop_and_generate_report(str(job.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to stop and report job %s", job.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to stop discovery and generate report",
+        ) from exc
 
 
 @router.get("/{job_id}/report")

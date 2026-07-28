@@ -29,10 +29,10 @@ from openscientist.dvc.metadata import (
 )
 from openscientist.dvc.models import EvidenceLedger
 from openscientist.dvc.workflow import (
+    adapt_plan_for_event_qc,
     add_claim,
     add_decision,
     add_evidence,
-    adapt_plan_for_event_qc,
     propose_plan,
     validate_plan,
 )

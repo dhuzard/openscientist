@@ -25,6 +25,7 @@ from openscientist.database.models.job import Job as JobModel
 from openscientist.database.models.job_share import JobShare
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import AsyncSessionLocal
+from openscientist.evidence_librarian import persist_evidence_plan
 from openscientist.exceptions import ProviderError
 from openscientist.job.types import JobInfo, JobStatus, JobStatusUpdateResult
 from openscientist.knowledge_state import KnowledgeState
@@ -34,6 +35,14 @@ from openscientist.providers import get_provider
 from openscientist.version import get_version_string
 
 logger = logging.getLogger(__name__)
+
+
+class _EarlyReportTransitionError(RuntimeError):
+    """Internal signal to replace discovery with report-only execution."""
+
+
+class _ControlledJobStopError(RuntimeError):
+    """Internal signal for a pause or cancellation before container launch."""
 
 
 def _effective_model(settings: Any) -> str | None:
@@ -69,7 +78,7 @@ async def _apply_rls_context(session: AsyncSession, user_id: UUID | None) -> Non
 
 def _derive_progress_from_db(status: str, current_iteration: int) -> int:
     """Derive iterations_completed from Job model columns (no KS load needed)."""
-    if status in ("running", "awaiting_feedback"):
+    if status in ("running", "paused", "awaiting_feedback", "generating_report"):
         return current_iteration - 1 if current_iteration > 1 else 0
     return current_iteration
 
@@ -86,7 +95,7 @@ def _load_progress_from_knowledge_state(
         findings_count = len(ks.get("findings", []))
         ks_iteration = int(ks.get("iteration", 1))
 
-        if status in ("running", "awaiting_feedback"):
+        if status in ("running", "paused", "awaiting_feedback", "generating_report"):
             iterations_completed = ks_iteration - 1 if ks_iteration > 1 else 0
         else:
             iterations_completed = ks_iteration
@@ -236,6 +245,8 @@ async def _db_update_job_status(
 
         if job:
             job.status = status.value
+            if status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
+                job.resume_iteration = None
             if error_message:
                 job.error_message = error_message
             if cancellation_reason:
@@ -289,6 +300,46 @@ async def _db_prepare_job_restart(
         job.cancellation_reason = None
         await session.commit()
         return resume_iteration
+
+
+async def _db_apply_job_control(
+    job_id: str,
+    *,
+    status: JobStatus | None = None,
+    max_iterations: int | None = None,
+    set_resume_from_current: bool = False,
+) -> tuple[int, int]:
+    """Atomically apply a user-requested runtime control.
+
+    Returns the persisted ``(current_iteration, max_iterations)`` values.
+    """
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        stmt = select(JobModel).where(JobModel.id == UUID(job_id))
+        result = await session.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+
+        current_iteration = max(int(job.current_iteration or 0), 1)
+        if max_iterations is not None:
+            if max_iterations < current_iteration:
+                raise ValueError(
+                    f"Iteration limit cannot be lower than the current iteration "
+                    f"({current_iteration})"
+                )
+            if max_iterations >= job.max_iterations:
+                raise ValueError(
+                    f"New iteration limit must be lower than the current limit "
+                    f"({job.max_iterations})"
+                )
+            job.max_iterations = max_iterations
+
+        if set_resume_from_current:
+            job.resume_iteration = current_iteration
+        if status is not None:
+            job.status = status.value
+        await session.commit()
+        return current_iteration, int(job.max_iterations)
 
 
 async def _db_get_job_statuses(job_ids: list[str]) -> dict[str, str]:
@@ -513,6 +564,7 @@ class JobManager:
         max_iterations: int,
         owner_id: str | None,
         owner_uuid: UUID | None,
+        evidence_plan: dict[str, Any] | None = None,
     ) -> None:
         try:
             create_job(
@@ -523,6 +575,8 @@ class JobManager:
                 jobs_dir=self.jobs_dir,
                 owner_id=owner_id,
             )
+            if evidence_plan is not None:
+                persist_evidence_plan(self.jobs_dir / job_id, evidence_plan)
         except Exception as e:
             logger.error("Failed to initialize filesystem for job %s: %s", job_id, e)
             # Compensating action: remove partially-created DB row/files to avoid split-brain.
@@ -544,6 +598,7 @@ class JobManager:
         pdb_code: str | None = None,
         space_group: str | None = None,
         skill_ids: list[str] | None = None,
+        evidence_plan: dict[str, Any] | None = None,
     ) -> JobInfo:
         """
         Create a new discovery job.
@@ -564,6 +619,7 @@ class JobManager:
             skill_ids: Explicit enabled skill UUIDs to assign. ``None`` keeps
                 the legacy/default behavior (all enabled skills); ``[]``
                 intentionally assigns no skills.
+            evidence_plan: Optional human-approved evidence and skill-composition plan
 
         Returns:
             JobInfo object
@@ -613,6 +669,7 @@ class JobManager:
             max_iterations=max_iterations,
             owner_id=owner_id,
             owner_uuid=owner_uuid,
+            evidence_plan=evidence_plan,
         )
 
         # Load job info
@@ -737,6 +794,111 @@ class JobManager:
             self._running_jobs[job_id] = thread
             thread.start()
 
+    def pause_job(self, job_id: str) -> None:
+        """Pause an active job and preserve its first unfinished iteration."""
+        with self._lock:
+            job_info = self.get_job(job_id)
+            if job_info is None:
+                raise ValueError(f"Job {job_id} not found")
+            if job_info.status not in {JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK}:
+                raise ValueError(
+                    f"Job {job_id} cannot be paused from status {job_info.status.value}"
+                )
+
+            _run_async(
+                _db_apply_job_control(
+                    job_id,
+                    status=JobStatus.PAUSED,
+                    set_resume_from_current=True,
+                )
+            )
+            try:
+                from openscientist.job_container import JobContainerRunner
+
+                JobContainerRunner().stop(job_id)
+            except Exception as exc:
+                logger.warning("Failed to stop container while pausing job %s: %s", job_id, exc)
+        logger.info("Job %s paused", job_id)
+
+    def resume_job(self, job_id: str) -> None:
+        """Resume a paused job in a fresh container from its unfinished iteration."""
+        job_info = self.get_job(job_id)
+        if job_info is None:
+            raise ValueError(f"Job {job_id} not found")
+        if job_info.status != JobStatus.PAUSED:
+            raise ValueError(f"Job {job_id} is not paused")
+        with self._lock:
+            if job_id in self._running_jobs:
+                raise ValueError(f"Job {job_id} is still pausing; try again shortly")
+
+        _run_async(_db_apply_job_control(job_id, status=JobStatus.PENDING))
+        self.start_job(job_id)
+        logger.info("Job %s resumed", job_id)
+
+    def update_iteration_limit(self, job_id: str, max_iterations: int) -> tuple[int, int]:
+        """Reduce the maximum number of discovery iterations for an active job."""
+        job_info = self.get_job(job_id)
+        if job_info is None:
+            raise ValueError(f"Job {job_id} not found")
+        if job_info.status not in {
+            JobStatus.PENDING,
+            JobStatus.QUEUED,
+            JobStatus.RUNNING,
+            JobStatus.PAUSED,
+            JobStatus.AWAITING_FEEDBACK,
+        }:
+            raise ValueError(
+                f"Iteration limit cannot be changed from status {job_info.status.value}"
+            )
+        values = _run_async(_db_apply_job_control(job_id, max_iterations=int(max_iterations)))
+        if job_info.status == JobStatus.AWAITING_FEEDBACK and values[1] <= values[0]:
+            self._update_job_status(job_id, JobStatus.RUNNING)
+        logger.info("Reduced job %s iteration limit to %d", job_id, values[1])
+        return values
+
+    def stop_and_generate_report(self, job_id: str) -> None:
+        """Stop discovery and generate a report from the evidence already persisted."""
+        with self._lock:
+            job_info = self.get_job(job_id)
+            if job_info is None:
+                raise ValueError(f"Job {job_id} not found")
+            if job_info.status not in {
+                JobStatus.RUNNING,
+                JobStatus.AWAITING_FEEDBACK,
+                JobStatus.PAUSED,
+            }:
+                raise ValueError(
+                    f"Job {job_id} cannot generate an early report from status "
+                    f"{job_info.status.value}"
+                )
+
+            worker_active = job_id in self._running_jobs
+            if not worker_active and self._get_active_job_count() >= self.max_concurrent:
+                raise ValueError("Cannot generate report: maximum concurrent jobs reached")
+
+            _run_async(_db_apply_job_control(job_id, status=JobStatus.GENERATING_REPORT))
+            if worker_active:
+                try:
+                    from openscientist.job_container import JobContainerRunner
+
+                    JobContainerRunner().stop(job_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stop discovery container before reporting for job %s: %s",
+                        job_id,
+                        exc,
+                    )
+                return
+
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(job_id,),
+                kwargs={"run_mode": "report_only"},
+                daemon=True,
+            )
+            self._running_jobs[job_id] = thread
+            thread.start()
+
     def _run_job(self, job_id: str, run_mode: str = "discovery") -> None:
         """Run a job (internal, called by thread)."""
         self._run_job_in_container(job_id, run_mode=run_mode)
@@ -750,14 +912,28 @@ class JobManager:
         from openscientist.job_container import JobContainerRunner
 
         poll_interval = 5
-        terminal_statuses = {"completed", "failed", "cancelled"}
+        terminal_statuses = {"completed", "failed", "cancelled", "paused"}
+        transition_to_report = False
 
         job_dir = self.jobs_dir / job_id
         runner = JobContainerRunner()
 
         try:
-            self._update_job_status(job_id, JobStatus.RUNNING)
-            runner.launch(job_id, job_dir, run_mode=run_mode)
+            # Serialize container launch with immediate controls. If pause/stop
+            # wins first, discovery is not launched; if launch wins, the
+            # control waits and then stops that exact container.
+            with self._lock:
+                current = self.get_job(job_id)
+                if run_mode == "discovery" and current is not None:
+                    if current.status in {JobStatus.PAUSED, JobStatus.CANCELLED}:
+                        raise _ControlledJobStopError
+                    if current.status == JobStatus.GENERATING_REPORT:
+                        raise _EarlyReportTransitionError
+                initial_status = (
+                    JobStatus.GENERATING_REPORT if run_mode == "report_only" else JobStatus.RUNNING
+                )
+                self._update_job_status(job_id, initial_status)
+                runner.launch(job_id, job_dir, run_mode=run_mode)
             logger.info("Agent container launched for job %s (mode=%s)", job_id, run_mode)
 
             # Poll the database until the container's agent writes a terminal status.
@@ -772,13 +948,21 @@ class JobManager:
                 elapsed += poll_interval
                 try:
                     job_info = self._load_job_info(job_id)
+                    if (
+                        run_mode == "discovery"
+                        and job_info
+                        and job_info.status == JobStatus.GENERATING_REPORT
+                    ):
+                        raise _EarlyReportTransitionError
                     if job_info and job_info.status.value in terminal_statuses:
                         logger.info(
                             "Container job %s reached terminal status: %s",
                             job_id,
                             job_info.status.value,
                         )
-                        return
+                        raise _ControlledJobStopError
+                except (_EarlyReportTransitionError, _ControlledJobStopError):
+                    raise
                 except Exception as poll_err:
                     logger.warning("DB poll failed for job %s: %s", job_id, poll_err)
 
@@ -799,7 +983,7 @@ class JobManager:
                         JobStatus.FAILED,
                         error_message=f"Agent container exited with code {exit_code}",
                     )
-                    return
+                    raise _ControlledJobStopError
 
             # Hard timeout reached.
             logger.error("Container job %s timed out after %.1f hours", job_id, timeout_hours)
@@ -809,6 +993,10 @@ class JobManager:
                 error_message=f"Job timed out after {timeout_hours:.1f} hours",
             )
 
+        except _EarlyReportTransitionError:
+            transition_to_report = True
+        except _ControlledJobStopError:
+            pass
         except Exception as e:
             logger.error(
                 "Container job %s failed [%s]: %s", job_id, get_version_string(), e, exc_info=True
@@ -817,9 +1005,14 @@ class JobManager:
 
         finally:
             runner.cleanup(job_id, log_dir=job_dir)
-            with self._lock:
-                self._running_jobs.pop(job_id, None)
-            self._start_next_queued_job()
+
+        if transition_to_report:
+            logger.info("Discovery stopped; starting early report for job %s", job_id)
+            self._run_job_in_container(job_id, run_mode="report_only")
+            return
+        with self._lock:
+            self._running_jobs.pop(job_id, None)
+        self._start_next_queued_job()
 
     def _start_next_queued_job(self) -> None:
         """Start the next queued job if slots available."""
@@ -851,8 +1044,16 @@ class JobManager:
         if job_info is None:
             raise ValueError(f"Job {job_id} not found")
 
-        if job_info.status not in [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.QUEUED]:
-            raise ValueError(f"Job {job_id} is not pending, running, or queued")
+        if job_info.status not in [
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+            JobStatus.QUEUED,
+            JobStatus.PAUSED,
+            JobStatus.AWAITING_FEEDBACK,
+        ]:
+            raise ValueError(
+                f"Job {job_id} is not pending, running, queued, paused, or awaiting feedback"
+            )
 
         # Update status with reason
         self._update_job_status(
@@ -862,12 +1063,12 @@ class JobManager:
         # For running jobs, keep the thread tracked until it exits so
         # active-slot accounting stays accurate.
         with self._lock:
-            if job_info.status in [JobStatus.PENDING, JobStatus.QUEUED]:
+            if job_info.status in [JobStatus.PENDING, JobStatus.QUEUED, JobStatus.PAUSED]:
                 self._running_jobs.pop(job_id, None)
 
         # Send SIGTERM to the agent container immediately so it doesn't
         # keep burning resources until the polling loop notices the DB change.
-        if job_info.status == JobStatus.RUNNING:
+        if job_info.status in [JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK]:
             try:
                 from openscientist.job_container import JobContainerRunner
 

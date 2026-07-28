@@ -20,6 +20,7 @@ class JobStatus(StrEnum):
     PENDING = "pending"
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     AWAITING_FEEDBACK = "awaiting_feedback"
     GENERATING_REPORT = "generating_report"
     COMPLETED = "completed"
@@ -89,7 +90,9 @@ class JobInfo:
                 if job.status
                 in {
                     JobStatus.RUNNING,
+                    JobStatus.PAUSED,
                     JobStatus.AWAITING_FEEDBACK,
+                    JobStatus.GENERATING_REPORT,
                     JobStatus.COMPLETED,
                     JobStatus.FAILED,
                 }

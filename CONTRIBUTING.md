@@ -51,9 +51,9 @@ uv run ruff format src/ tests/
 
 ## Contributing Skills
 
-See [Create a professional OpenScientist skill](docs/CREATING_SKILLS.md) for
-the supported `SKILL.md` format, authoring guidance, validation steps, and the
-open conventions where maintainer input is requested.
+See [Create a reliable OpenScientist skill](docs/CREATING_SKILLS.md) for the
+current `SKILL.md` contract, evidence-backed authoring guidance, evaluation
+steps, and the limitations of the present runtime.
 
 ## Legacy Job Migration (Filesystem -> DB)
 

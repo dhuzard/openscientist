@@ -23,9 +23,9 @@ from openscientist.dvc.metadata import (
 from openscientist.dvc.models import ContextValue, EvidenceLedger, ExportType, ValueStatus
 from openscientist.dvc.workflow import (
     MANDATORY_GATES,
+    adapt_plan_for_event_qc,
     add_claim,
     add_evidence,
-    adapt_plan_for_event_qc,
     metadata_agent_uplifts,
     propose_plan,
     score_poc,

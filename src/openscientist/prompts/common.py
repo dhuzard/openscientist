@@ -426,6 +426,15 @@ Use the correct tool for each file type:
 Your `.claude/skills/` directory contains **workflow** and **domain** skills.
 These are not optional references — they encode the project's methodology.
 
+If `EVIDENCE_PLAN.md` exists, read it before selecting an analysis. It is the
+researcher-approved evidence and skill-composition contract for this job:
+
+- use its approved domain-skill bundle and literature queries;
+- keep mandatory workflow skills in their required phase order;
+- follow its conflict policy and trace contract;
+- record and justify any scientifically necessary deviation;
+- never install, publish, or silently add a global skill.
+
 **Workflow skills** (category `workflow`) govern how you work at each phase:
 
 | Skill | When to apply |

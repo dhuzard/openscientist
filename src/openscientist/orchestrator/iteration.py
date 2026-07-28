@@ -62,7 +62,14 @@ def _format_job_description_section(description: str | None) -> str:
 class FeedbackWaitResult(TypedDict):
     """Outcome for co-investigate feedback waiting."""
 
-    outcome: Literal["feedback", "timeout", "continued", "cancelled"]
+    outcome: Literal[
+        "feedback",
+        "timeout",
+        "continued",
+        "cancelled",
+        "paused",
+        "report_requested",
+    ]
     feedback_text: str | None
 
 
@@ -396,6 +403,8 @@ async def _persist_job_status(
             if old_status != status:
                 job.status = status
                 await session.flush()
+            if status in {"completed", "failed", "cancelled"}:
+                job.resume_iteration = None
             if error_message:
                 job.error_message = error_message
 
@@ -491,6 +500,8 @@ async def wait_for_feedback_or_timeout(
             - outcome="feedback" with feedback_text when scientist submits feedback
             - outcome="timeout" when timeout elapsed
             - outcome="cancelled" when job is cancelled
+            - outcome="paused" when the job is paused
+            - outcome="report_requested" when discovery should stop and report
             - outcome="continued" when user resumes without feedback
     """
     job_id = job_dir.name
@@ -514,6 +525,12 @@ async def wait_for_feedback_or_timeout(
         if status == "cancelled":
             logger.info("Job cancelled while waiting for feedback")
             return {"outcome": "cancelled", "feedback_text": None}
+        if status == "paused":
+            logger.info("Job paused while waiting for feedback")
+            return {"outcome": "paused", "feedback_text": None}
+        if status == "generating_report":
+            logger.info("Early report requested while waiting for feedback")
+            return {"outcome": "report_requested", "feedback_text": None}
         if status == "running":
             logger.info("Continue signal received (no feedback)")
             return {"outcome": "continued", "feedback_text": None}
