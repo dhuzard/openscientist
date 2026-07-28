@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from openscientist.integrations.dvc import (
     DVCAcquisitionService,
-    DVCAnalysisApproval,
     DVCAnalysisBlocked,
     DVCAnalysisError,
     DVCAnalysisRequest,
     DVCAnalysisService,
     DVCImportRequest,
 )
+from openscientist.integrations.dvc.approvals import DVCApprovalNotFound, FileDVCApprovalStore
 from openscientist.integrations.dvc.credentials import DVCConnectionNotFound
 from openscientist.integrations.dvc.service import DVCAcquisitionError
 from openscientist.preclinical_context.models import PreclinicalStudyContext
@@ -105,35 +104,20 @@ def dvc_run_analysis(
     context: dict[str, Any],
     parameters: dict[str, Any] | None = None,
     approval_id: str | None = None,
-    approved_by: str | None = None,
-    approved_at: str | None = None,
-    approval_context_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Run one allowlisted UDWA operation after scientific and approval gates.
 
     Context must use the versioned OpenScientist preclinical-context schema.
-    For operations requiring approval, all four approval fields are mandatory and
-    the context hash must match the exact submitted context.
+    Approval metadata are never accepted from the agent. When required, the tool
+    resolves `approval_id` from a trusted record under the current job directory.
     """
     try:
         study_context = PreclinicalStudyContext.model_validate(context)
-        approval = None
-        approval_values = (
-            approval_id,
-            approved_by,
-            approved_at,
-            approval_context_sha256,
+        approval = (
+            FileDVCApprovalStore(STATE.job_dir).resolve(approval_id)
+            if approval_id is not None
+            else None
         )
-        if any(value is not None for value in approval_values):
-            if not all(value is not None for value in approval_values):
-                raise ValueError("All approval fields must be supplied together.")
-            approval = DVCAnalysisApproval(
-                approval_id=approval_id,
-                approved_by=approved_by,
-                approved_at=datetime.fromisoformat(approved_at.replace("Z", "+00:00")),
-                operation=operation,
-                context_sha256=approval_context_sha256,
-            )
         request = DVCAnalysisRequest(
             dataset_id=dataset_id,
             operation=operation,
@@ -143,5 +127,5 @@ def dvc_run_analysis(
         )
         result = _analysis_service().execute(request)
         return {"ok": True, **result.model_dump(mode="json")}
-    except (DVCAnalysisBlocked, DVCAnalysisError, ValueError) as exc:
+    except (DVCApprovalNotFound, DVCAnalysisBlocked, DVCAnalysisError, ValueError) as exc:
         return _error(exc)
