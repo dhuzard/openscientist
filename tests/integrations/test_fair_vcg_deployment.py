@@ -42,3 +42,12 @@ def test_spawned_agents_use_the_attachable_runtime_bridge():
         "${OPENSCIENTIST_AGENT_NETWORK:-"
     )
     assert compose["networks"]["agent-runtime"]["attachable"] is True
+
+
+def test_trusted_gateway_build_receives_private_udwa_as_a_secret():
+    compose = _compose()
+    build = compose["services"]["openscientist"]["build"]
+
+    assert build["args"]["INSTALL_UDWA"] == "true"
+    assert build["secrets"] == ["github_token"]
+    assert compose["secrets"]["github_token"]["environment"] == "GITHUB_TOKEN"

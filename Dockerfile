@@ -81,13 +81,45 @@ RUN chmod +x /usr/local/bin/codex
 
 # Copy project files — deps already installed in base
 COPY pyproject.toml README.md alembic.ini uv.lock ./
+COPY requirements/udwa-poc.txt ./requirements/udwa-poc.txt
 COPY src/ src/
 
-# Reinstall the project so the web image has dependencies added since the base
-# image was built, notably the openai-codex SDK used by the codex agent path
-# (in-page chat + discovery). The pyproject override drops the musl-only
-# openai-codex-cli-bin. The codex binary itself is provisioned above.
-RUN uv pip install --system -e .
+# Reinstall the locked dependency graph and project so the web runtime cannot
+# silently drift from the versions exercised by CI and the agent image.
+RUN uv export --locked --no-dev --no-emit-project --no-hashes \
+        --output-file /tmp/openscientist-requirements.txt \
+    && uv pip install --system -r /tmp/openscientist-requirements.txt \
+    && uv pip install --system --no-deps -e . \
+    && rm -f /tmp/openscientist-requirements.txt
+
+# The trusted DVC gateway runs in this web process, so it needs the same pinned
+# UDWA acquisition boundary as the agent image. Non-DVC builds may leave
+# INSTALL_UDWA=false; the FAIR/DVC deployment overlay sets it to true and
+# supplies the private-repository credential as a transient BuildKit secret.
+ARG INSTALL_UDWA=false
+RUN --mount=type=secret,id=github_token \
+    set -eu; \
+    if [ "${INSTALL_UDWA}" != "true" ]; then \
+        echo "Skipping optional UDWA install"; \
+        exit 0; \
+    fi; \
+    if [ ! -s /run/secrets/github_token ]; then \
+        echo "INSTALL_UDWA=true requires the github_token BuildKit secret" >&2; \
+        exit 1; \
+    fi; \
+    askpass="$(mktemp)"; \
+    trap 'rm -f "${askpass}"' EXIT; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'case "$1" in' \
+        '  *Username*) printf "%s\n" "x-access-token" ;;' \
+        '  *Password*) cat /run/secrets/github_token ;;' \
+        '  *) exit 1 ;;' \
+        'esac' \
+        > "${askpass}"; \
+    chmod 700 "${askpass}"; \
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+        uv pip install --system -r requirements/udwa-poc.txt
 
 # Create jobs directory
 RUN mkdir -p jobs

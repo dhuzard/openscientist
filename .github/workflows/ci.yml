@@ -165,19 +165,36 @@ jobs:
           -t openscientist-agent:dvc-ci
           .
 
+      - name: Build trusted gateway image with transient private-UDWA secret
+        run: >-
+          docker build
+          --build-arg INSTALL_UDWA=true
+          --secret id=github_token,env=UDWA_REPOSITORY_TOKEN
+          -t openscientist:dvc-ci
+          .
+
       - name: Inspect image config and history for the build secret
         shell: bash
         run: |
-          docker image inspect openscientist-agent:dvc-ci > image-inspect.json
-          docker history --no-trunc openscientist-agent:dvc-ci > image-history.txt
-          if grep -Fq "${UDWA_REPOSITORY_TOKEN}" image-inspect.json image-history.txt; then
+          docker image inspect \
+            openscientist-agent:dvc-ci \
+            openscientist:dvc-ci > image-inspect.json
+          {
+            docker history --no-trunc openscientist-agent:dvc-ci
+            docker history --no-trunc openscientist:dvc-ci
+          } > image-history.txt
+          if grep -Fq "${UDWA_REPOSITORY_TOKEN}" \
+            image-inspect.json image-history.txt; then
             echo "::error::Private-UDWA token found in image metadata or history."
             exit 1
           fi
 
-      - name: Verify UDWA, MCP tools, and FastAPI router in built image
-        run: >-
-          docker run --rm
-          --entrypoint python
-          openscientist-agent:dvc-ci
-          -m openscientist.dvc_runtime_smoke
+      - name: Verify UDWA, MCP tools, and FastAPI router in built images
+        shell: bash
+        run: |
+          docker run --rm --entrypoint python \
+            openscientist-agent:dvc-ci \
+            -m openscientist.dvc_runtime_smoke
+          docker run --rm --entrypoint python \
+            openscientist:dvc-ci \
+            -m openscientist.dvc_runtime_smoke

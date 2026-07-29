@@ -52,3 +52,16 @@ def test_agent_image_installs_locked_application_dependencies() -> None:
 
     assert "uv export --locked --no-dev --no-emit-project" in dockerfile
     assert "uv pip install --system --no-deps -e ." in dockerfile
+
+
+def test_trusted_web_image_installs_udwa_only_with_buildkit_secret() -> None:
+    dockerfile = (Path(__file__).parents[2] / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "uv export --locked --no-dev --no-emit-project" in dockerfile
+    assert "uv pip install --system --no-deps -e ." in dockerfile
+    assert "ARG INSTALL_UDWA=false" in dockerfile
+    assert "--mount=type=secret,id=github_token" in dockerfile
+    assert "requirements/udwa-poc.txt" in dockerfile
+    assert "GIT_ASKPASS" in dockerfile
+    assert "ARG GITHUB_TOKEN" not in dockerfile
+    assert "ENV GITHUB_TOKEN" not in dockerfile

@@ -69,6 +69,12 @@ services:
       - agent-runtime
 
   openscientist:
+    build:
+      context: .
+      args:
+        INSTALL_UDWA: "true"
+      secrets:
+        - github_token
     depends_on:
       fair-vcg-canary:
         condition: service_completed_successfully
@@ -83,6 +89,10 @@ services:
 
 volumes:
   fair_vcg_sessions:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
 
 networks:
   agent-runtime:
