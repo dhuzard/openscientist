@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openscientist.api.auth import get_current_user_from_api_key
 from openscientist.database.models import Job, User
+from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session
 from openscientist.integrations.dvc.execution import (
     OPERATION_CONTRACTS,
@@ -103,10 +104,11 @@ async def create_dvc_approval(
     current_user: Annotated[User, Depends(get_current_user_from_api_key)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApprovalResponse:
+    await set_current_user(session, current_user.id)
     job = await session.get(Job, job_id)
     if job is None:
         raise HTTPException(404, "Job not found.")
-    if getattr(job, "user_id", None) != current_user.id:
+    if job.owner_id != current_user.id:
         raise HTTPException(403, "Not authorized for this job.")
     if body.operation not in OPERATION_CONTRACTS:
         raise HTTPException(400, "Operation is not governed for DVC execution.")

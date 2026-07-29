@@ -20,6 +20,9 @@ class FakeSession:
     def __init__(self, job):
         self.job = job
 
+    async def execute(self, _statement, _parameters=None):
+        return None
+
     async def get(self, _model, _job_id):
         return self.job
 
@@ -63,7 +66,7 @@ async def test_api_created_approval_is_resolvable(tmp_path, monkeypatch):
         job_id,
         body,
         current_user=SimpleNamespace(id=user_id, email="scientist@example.org"),
-        session=FakeSession(SimpleNamespace(user_id=user_id)),
+        session=FakeSession(SimpleNamespace(owner_id=user_id)),
     )
 
     approval = FileDVCApprovalStore(job_dir).resolve(response.approval_id)
@@ -92,7 +95,7 @@ async def test_approval_rejects_other_users(tmp_path, monkeypatch):
                 pre_analysis_checkpoint_id=f"dvc-assess-{uuid4()}",
             ),
             current_user=SimpleNamespace(id=uuid4(), email="other@example.org"),
-            session=FakeSession(SimpleNamespace(user_id=uuid4())),
+            session=FakeSession(SimpleNamespace(owner_id=uuid4())),
         )
     assert exc.value.status_code == 403
 
@@ -131,7 +134,7 @@ async def test_approval_requires_matching_pre_analysis_checkpoint(tmp_path, monk
                 pre_analysis_checkpoint_id=checkpoint_id,
             ),
             current_user=SimpleNamespace(id=user_id, email="scientist@example.org"),
-            session=FakeSession(SimpleNamespace(user_id=user_id)),
+            session=FakeSession(SimpleNamespace(owner_id=user_id)),
         )
     assert exc.value.status_code == 400
     assert "not a pre-analysis" in exc.value.detail
