@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NotRequired, TypedDict
 
 from openscientist.exceptions import ProviderError
 from openscientist.models import ModelProfile, default_model_profile
@@ -28,6 +28,98 @@ logger = logging.getLogger(__name__)
 def env_from_pairs(pairs: list[tuple[str, str | None]]) -> dict[str, str]:
     """Build an env dict from (name, value) pairs, dropping empty values."""
     return {key: value for key, value in pairs if value}
+
+
+def self_hosted_codex_provider_table(
+    *, provider_id: str, name: str, base_url: str, keyed: bool
+) -> list[str]:
+    """The ``[model_providers.<id>]`` TOML lines for a self-hosted server.
+
+    Callers pass their own ``codex_model_provider_id()`` and ``display_name``
+    so the table can never drift from the identity codex is told to select.
+    ``keyed`` is true when a credential is in play, either the provider's own
+    API key or the proxy placeholder, and drives ``requires_openai_auth``.
+    """
+    lines = [
+        f"[model_providers.{provider_id}]",
+        f'name = "{name}"',
+        f'base_url = "{base_url}"',
+        # The shipped codex fork accepts no other wire_api: its WireApi enum
+        # has a single Responses variant and rejects "chat" outright.
+        'wire_api = "responses"',
+        f"requires_openai_auth = {'true' if keyed else 'false'}",
+    ]
+    if keyed:
+        lines.append('env_key = "OPENAI_API_KEY"')
+    # A self-hosted model can stay silent for minutes during prefill before the
+    # first SSE token, tripping codex's default 5-minute idle timeout. Raise it
+    # to 1 hour, with a few reconnects as insurance.
+    lines += ["stream_idle_timeout_ms = 3600000", "stream_max_retries = 5"]
+    return lines
+
+
+class OmpModelEntry(TypedDict):
+    """One model row in an omp ``models.yml`` provider block."""
+
+    id: str
+    name: str
+    contextWindow: int
+    maxTokens: int
+    reasoning: bool
+    input: list[str]
+
+
+class OmpProviderEntry(TypedDict):
+    """One provider block in an omp ``models.yml``."""
+
+    baseUrl: str
+    auth: str
+    api: str
+    models: list[OmpModelEntry]
+    apiKey: NotRequired[str]
+
+
+class OmpModelCatalog(TypedDict):
+    """The whole ``models.yml`` document."""
+
+    providers: dict[str, OmpProviderEntry]
+
+
+def self_hosted_omp_model_catalog(
+    *,
+    provider_id: str,
+    name: str,
+    base_url: str,
+    model_id: str,
+    context_window: int,
+    api_key: str | None,
+    max_output_tokens: int = 32768,
+) -> OmpModelCatalog:
+    """An omp ``models.yml`` declaring a self-hosted model.
+
+    omp resolves ``--model`` against its own catalog, which ships hosted APIs
+    only, so a self-hosted server's model cannot be selected until it is
+    declared. This is the omp analog of ``self_hosted_codex_provider_table``.
+    ``auth`` accepts only apiKey, none or oauth.
+    """
+    entry: OmpProviderEntry = {
+        "baseUrl": base_url,
+        "auth": "apiKey" if api_key else "none",
+        "api": "openai-completions",
+        "models": [
+            {
+                "id": model_id,
+                "name": name,
+                "contextWindow": context_window,
+                "maxTokens": max_output_tokens,
+                "reasoning": True,
+                "input": ["text"],
+            }
+        ],
+    }
+    if api_key:
+        entry["apiKey"] = api_key
+    return {"providers": {provider_id: entry}}
 
 
 @dataclass
@@ -264,6 +356,13 @@ class Provider(abc.ABC):
         provider's endpoint. ``proxy`` is the in-container LLM proxy URL when
         active. Base: none (the harness reads the provider's own base-URL env)."""
         return {}
+
+    def omp_model_catalog(self) -> OmpModelCatalog | None:
+        """``models.yml`` declaring this provider's model to the omp harness, or
+        None when omp's built-in catalog already knows it. Self-hosted providers
+        override: omp cannot resolve ``--model`` for a server it has never heard
+        of. The codex analog is ``codex_config_overrides``."""
+        return None
 
     @classmethod
     def validate_model_format(cls, model: str | None) -> str | None:
