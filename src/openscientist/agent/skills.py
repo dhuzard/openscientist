@@ -91,10 +91,7 @@ async def write_skills_to_claude_dir(
         for skill in skills:
             filename = f"{skill.category}--{skill.slug}.md"
             path = skills_dir / filename
-            header = f"# {skill.name}\n*Category: {skill.category}*\n"
-            if skill.description:
-                header += f"\n{skill.description}\n"
-            path.write_text(header + "\n" + skill.content, encoding="utf-8")
+            path.write_text(claude_skill_markdown(skill), encoding="utf-8")
         logger.info("Wrote %d skill files to %s", len(skills), skills_dir)
     except Exception as e:
         logger.warning("Failed to write skills to .claude dir: %s", e)
@@ -104,6 +101,14 @@ def _yaml_quote(value: str) -> str:
     """Render a YAML double-quoted scalar so colons and other special
     characters cannot break SKILL.md frontmatter parsing."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def claude_skill_markdown(skill: Skill) -> str:
+    """Render one enabled skill in Claude's flat Markdown skill layout."""
+    header = f"# {skill.name}\n*Category: {skill.category}*\n"
+    if skill.description:
+        header += f"\n{skill.description}\n"
+    return header + "\n" + skill.content
 
 
 def codex_skill_markdown(skill: Skill) -> str:

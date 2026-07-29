@@ -17,7 +17,9 @@ from openscientist.integrations.dvc.execution import (
     DVCAnalysisRequest,
     DVCAnalysisResult,
     DVCAnalysisService,
+    canonical_checkpoint_sha256,
     canonical_context_sha256,
+    canonical_parameters_sha256,
     evaluate_prerequisites,
 )
 from openscientist.integrations.dvc.models import (
@@ -44,6 +46,8 @@ __all__ = [
     "DVCDatasetResult",
     "EnvironmentDVCConnectionProvider",
     "OPERATION_CONTRACTS",
+    "canonical_checkpoint_sha256",
     "canonical_context_sha256",
+    "canonical_parameters_sha256",
     "evaluate_prerequisites",
 ]

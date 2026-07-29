@@ -31,13 +31,17 @@ class StrictModel(BaseModel):
 
 
 class DVCAnalysisApproval(StrictModel):
-    """Human approval bound to one operation and one exact study context."""
+    """Human approval bound to one exact governed analysis request."""
 
     approval_id: str = Field(min_length=1, max_length=200)
     approved_by: str = Field(min_length=1, max_length=200)
     approved_at: datetime
+    dataset_id: str = Field(pattern=r"^dvc-[0-9a-fA-F-]{36}$")
+    pre_analysis_checkpoint_id: str = Field(pattern=r"^dvc-assess-[0-9a-fA-F-]{36}$")
+    pre_analysis_checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     operation: str = Field(min_length=1, max_length=100)
     context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parameters_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Literal["approved"] = "approved"
 
     @field_validator("approved_at")
@@ -50,6 +54,7 @@ class DVCAnalysisApproval(StrictModel):
 
 class DVCAnalysisRequest(StrictModel):
     dataset_id: str = Field(pattern=r"^dvc-[0-9a-fA-F-]{36}$")
+    pre_analysis_checkpoint_id: str = Field(pattern=r"^dvc-assess-[0-9a-fA-F-]{36}$")
     operation: str = Field(min_length=1, max_length=100)
     context: PreclinicalStudyContext
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -60,6 +65,7 @@ class DVCAnalysisRequest(StrictModel):
     def reject_credential_parameters(cls, value: dict[str, Any]) -> dict[str, Any]:
         if contains_sensitive_key(value):
             raise ValueError("Analysis parameters must not contain credentials.")
+        canonical_parameters_sha256(value)
         return value
 
     @model_validator(mode="after")
@@ -138,6 +144,36 @@ def canonical_context_sha256(context: PreclinicalStudyContext) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def canonical_parameters_sha256(parameters: dict[str, Any]) -> str:
+    """Hash JSON analysis parameters with stable key ordering and no NaN values."""
+    try:
+        payload = json.dumps(
+            parameters,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Analysis parameters must be canonical JSON values.") from exc
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def canonical_checkpoint_sha256(checkpoint: dict[str, Any]) -> str:
+    """Hash a checkpoint payload independently of JSON whitespace."""
+    try:
+        payload = json.dumps(
+            checkpoint,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Assessment checkpoint must be canonical JSON.") from exc
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _known(context: PreclinicalStudyContext, path: str) -> bool:
     current: Any = context
     for part in path.split("."):
@@ -165,9 +201,20 @@ def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
             blockers.append(f"Human approval is required for {request.operation}.")
         else:
             expected_hash = canonical_context_sha256(request.context)
+            expected_parameters_hash = canonical_parameters_sha256(request.parameters)
+            if request.approval.dataset_id != request.dataset_id:
+                blockers.append("Approval dataset does not match the requested dataset.")
+            if request.approval.pre_analysis_checkpoint_id != request.pre_analysis_checkpoint_id:
+                blockers.append(
+                    "Approval checkpoint does not match the requested pre-analysis checkpoint."
+                )
             if request.approval.context_sha256 != expected_hash:
                 blockers.append(
                     "Approval is stale: its context hash does not match the current study context."
+                )
+            if request.approval.parameters_sha256 != expected_parameters_hash:
+                blockers.append(
+                    "Approval parameters do not match the canonical requested parameters."
                 )
             if request.approval.approved_at > datetime.now(timezone.utc):
                 blockers.append("Approval timestamp cannot be in the future.")
@@ -196,6 +243,7 @@ class DVCAnalysisService:
         self.job_dir = Path(job_dir)
 
     def execute(self, request: DVCAnalysisRequest) -> DVCAnalysisResult:
+        self._validate_pre_analysis_checkpoint(request)
         blockers = evaluate_prerequisites(request)
         if blockers:
             raise DVCAnalysisBlockedError("DVC analysis is blocked.", blockers=blockers)
@@ -248,6 +296,7 @@ class DVCAnalysisService:
             "execution_id": execution_id,
             "dataset_id": request.dataset_id,
             "operation": request.operation,
+            "status": "completed",
             "output": output,
         }
         result_path.write_text(
@@ -263,6 +312,7 @@ class DVCAnalysisService:
             "operation": request.operation,
             "parameters": request.parameters,
             "context_sha256": canonical_context_sha256(request.context),
+            "pre_analysis_checkpoint_id": request.pre_analysis_checkpoint_id,
             "approval": request.approval.model_dump(mode="json") if request.approval else None,
             "udwa_distribution_version": compatibility.distribution_version,
             "udwa_pinned_commit": compatibility.pinned_commit,
@@ -290,6 +340,47 @@ class DVCAnalysisService:
             ],
             provenance=provenance,
         )
+
+    def _validate_pre_analysis_checkpoint(self, request: DVCAnalysisRequest) -> None:
+        checkpoint_id = request.pre_analysis_checkpoint_id
+        root = (self.job_dir / "dvc_assessments").resolve()
+        path = (root / f"{checkpoint_id}.json").resolve()
+        blocker = "A matching pre-analysis assessment checkpoint is required."
+        if root not in path.parents or not path.is_file():
+            raise DVCAnalysisBlockedError("DVC analysis is blocked.", blockers=[blocker])
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DVCAnalysisBlockedError(
+                "DVC analysis is blocked.", blockers=["Pre-analysis checkpoint is invalid."]
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DVCAnalysisBlockedError(
+                "DVC analysis is blocked.", blockers=["Pre-analysis checkpoint is invalid."]
+            )
+        expected_context_hash = canonical_context_sha256(request.context)
+        mismatches = []
+        if payload.get("checkpoint_id") != checkpoint_id:
+            mismatches.append("checkpoint identity")
+        if payload.get("checkpoint") != "pre_analysis":
+            mismatches.append("checkpoint phase")
+        if payload.get("dataset_id") != request.dataset_id:
+            mismatches.append("dataset")
+        if payload.get("context_sha256") != expected_context_hash:
+            mismatches.append("study context")
+        if request.approval and (
+            request.approval.pre_analysis_checkpoint_sha256 != canonical_checkpoint_sha256(payload)
+        ):
+            mismatches.append("approved checkpoint content")
+        if mismatches:
+            raise DVCAnalysisBlockedError(
+                "DVC analysis is blocked.",
+                blockers=[
+                    "Pre-analysis checkpoint does not match the requested "
+                    + ", ".join(mismatches)
+                    + "."
+                ],
+            )
 
     def _dataset_dir(self, dataset_id: str) -> Path:
         if not re.fullmatch(r"dvc-[0-9a-fA-F-]{36}", dataset_id):

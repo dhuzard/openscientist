@@ -128,13 +128,14 @@ def dvc_assess_post_analysis(dataset_id: str) -> dict[str, Any]:
     try:
         result = _assessment_service().post_analysis(dataset_id)
         return {"ok": True, **result.model_dump(mode="json")}
-    except (FairPrepareError, FileNotFoundError, ValueError) as exc:
+    except (DVCAnalysisBlockedError, FairPrepareError, FileNotFoundError, ValueError) as exc:
         return _error(exc)
 
 
 @mcp.tool()
 def dvc_run_analysis(
     dataset_id: str,
+    pre_analysis_checkpoint_id: str,
     operation: str,
     context: dict[str, Any],
     parameters: dict[str, Any] | None = None,
@@ -150,6 +151,7 @@ def dvc_run_analysis(
         )
         request = DVCAnalysisRequest(
             dataset_id=dataset_id,
+            pre_analysis_checkpoint_id=pre_analysis_checkpoint_id,
             operation=operation,
             context=study_context,
             parameters=parameters or {},

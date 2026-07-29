@@ -9,6 +9,10 @@ from fastapi import HTTPException
 
 from openscientist.api.endpoints.dvc import ApprovalCreate, create_dvc_approval
 from openscientist.integrations.dvc.approvals import FileDVCApprovalStore
+from openscientist.integrations.dvc.execution import (
+    canonical_context_sha256,
+    canonical_parameters_sha256,
+)
 from openscientist.preclinical_context.models import PreclinicalStudyContext
 
 
@@ -28,6 +32,7 @@ async def test_api_created_approval_is_resolvable(tmp_path, monkeypatch):
     user_id = uuid4()
     dataset_id = f"dvc-{uuid4()}"
     checkpoint_id = f"dvc-assess-{uuid4()}"
+    context = PreclinicalStudyContext(study_id="study-1")
     job_dir = jobs_root / str(job_id)
     assessment_dir = job_dir / "dvc_assessments"
     assessment_dir.mkdir(parents=True)
@@ -37,6 +42,7 @@ async def test_api_created_approval_is_resolvable(tmp_path, monkeypatch):
                 "checkpoint_id": checkpoint_id,
                 "checkpoint": "pre_analysis",
                 "dataset_id": dataset_id,
+                "context_sha256": canonical_context_sha256(context),
                 "assessments": [
                     {"framework": "prepare-v1"},
                     {"framework": "arrive-v2"},
@@ -49,7 +55,8 @@ async def test_api_created_approval_is_resolvable(tmp_path, monkeypatch):
     body = ApprovalCreate(
         dataset_id=dataset_id,
         operation="summarize_light_dark",
-        context=PreclinicalStudyContext(study_id="study-1"),
+        context=context,
+        parameters={"bin_minutes": 60},
         pre_analysis_checkpoint_id=checkpoint_id,
     )
     response = await create_dvc_approval(
@@ -62,6 +69,9 @@ async def test_api_created_approval_is_resolvable(tmp_path, monkeypatch):
     approval = FileDVCApprovalStore(job_dir).resolve(response.approval_id)
     assert approval.operation == "summarize_light_dark"
     assert approval.approved_by == "scientist@example.org"
+    assert approval.dataset_id == dataset_id
+    assert approval.pre_analysis_checkpoint_id == checkpoint_id
+    assert approval.parameters_sha256 == canonical_parameters_sha256({"bin_minutes": 60})
     audit = json.loads(
         (job_dir / "dvc_approvals" / f"{response.approval_id}.audit.json").read_text()
     )
@@ -95,6 +105,7 @@ async def test_approval_requires_matching_pre_analysis_checkpoint(tmp_path, monk
     user_id = uuid4()
     dataset_id = f"dvc-{uuid4()}"
     checkpoint_id = f"dvc-assess-{uuid4()}"
+    context = PreclinicalStudyContext(study_id="study-1")
     assessment_dir = jobs_root / str(job_id) / "dvc_assessments"
     assessment_dir.mkdir(parents=True)
     (assessment_dir / f"{checkpoint_id}.json").write_text(
@@ -103,6 +114,7 @@ async def test_approval_requires_matching_pre_analysis_checkpoint(tmp_path, monk
                 "checkpoint_id": checkpoint_id,
                 "checkpoint": "post_analysis",
                 "dataset_id": dataset_id,
+                "context_sha256": canonical_context_sha256(context),
                 "assessments": [],
             }
         ),
@@ -115,7 +127,7 @@ async def test_approval_requires_matching_pre_analysis_checkpoint(tmp_path, monk
             ApprovalCreate(
                 dataset_id=dataset_id,
                 operation="summarize_time_bins",
-                context=PreclinicalStudyContext(study_id="study-1"),
+                context=context,
                 pre_analysis_checkpoint_id=checkpoint_id,
             ),
             current_user=SimpleNamespace(id=user_id, email="scientist@example.org"),

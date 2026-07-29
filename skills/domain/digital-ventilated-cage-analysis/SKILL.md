@@ -83,6 +83,25 @@ review before it controls an analysis.
 
 ## Workflow
 
+Follow this governed MCP sequence exactly:
+
+1. Call `dvc_import_dataset`.
+2. Call `dvc_assess_pre_analysis` with the imported `dataset_id` and exact study
+   context.
+3. For an operation that requires approval, request authenticated approval
+   bound to the `dataset_id`, returned `pre_analysis_checkpoint_id`, exact
+   context, operation, and canonical parameters. Wait for its `approval_id`.
+4. Call `dvc_run_analysis` with that same dataset, checkpoint, context,
+   operation, parameters, and approval when required.
+5. After at least one analysis returns `ok: true` and `status: completed`, call
+   `dvc_assess_post_analysis`.
+6. Assemble the evidence-linked report.
+
+Stop on every failed call. Do not skip or reorder checkpoints, reuse an
+approval for changed inputs, or create a post-analysis assessment before a
+completed analysis. Treat a server rejection as a blocked workflow state; fix
+the named prerequisite instead of bypassing it.
+
 1. Inspect each file and identify Type 1, Type 1-bis, Type 2, Type 3, event,
    metadata, or REM content from structure rather than filename alone.
 2. Preserve the original timestamp text, parse a derived UTC timestamp, and

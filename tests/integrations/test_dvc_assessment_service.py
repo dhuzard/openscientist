@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from openscientist.integrations.dvc.assessment import DVCAssessmentService
+from openscientist.integrations.dvc.execution import DVCAnalysisBlockedError
 from openscientist.preclinical_context.models import (
     AssessmentFinding,
     AssessmentResult,
@@ -79,7 +82,23 @@ def test_post_analysis_builds_bundle_and_index(tmp_path: Path):
     analysis_dir = tmp_path / "dvc_analyses" / "dvc-exec-1"
     analysis_dir.mkdir(parents=True)
     (analysis_dir / "provenance.json").write_text(
-        json.dumps({"dataset_id": dataset_id, "operation": "check_data_sanity"}),
+        json.dumps(
+            {
+                "execution_id": "dvc-exec-1",
+                "dataset_id": dataset_id,
+                "operation": "check_data_sanity",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (analysis_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "execution_id": "dvc-exec-1",
+                "dataset_id": dataset_id,
+                "status": "completed",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -92,3 +111,15 @@ def test_post_analysis_builds_bundle_and_index(tmp_path: Path):
     index = json.loads((provider.bundle_dir / "analysis-index.json").read_text())
     assert index[0]["operation"] == "check_data_sanity"
     assert (tmp_path / result.relative_path).is_file()
+
+
+def test_post_analysis_before_completed_analysis_fails_closed(tmp_path: Path):
+    dataset_id = "dvc-00000000-0000-0000-0000-000000000000"
+    (tmp_path / "dvc_datasets" / dataset_id).mkdir(parents=True)
+
+    with pytest.raises(DVCAnalysisBlockedError) as exc:
+        DVCAssessmentService(tmp_path, provider=FakeProvider()).post_analysis(dataset_id)
+
+    assert exc.value.blockers == [
+        "At least one completed analysis is required before post-analysis."
+    ]

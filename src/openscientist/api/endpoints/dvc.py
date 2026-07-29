@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,7 +24,9 @@ from openscientist.database.session import get_session
 from openscientist.integrations.dvc.execution import (
     OPERATION_CONTRACTS,
     DVCAnalysisApproval,
+    canonical_checkpoint_sha256,
     canonical_context_sha256,
+    canonical_parameters_sha256,
 )
 from openscientist.preclinical_context.models import PreclinicalStudyContext
 
@@ -39,6 +41,7 @@ class ApprovalCreate(StrictModel):
     dataset_id: str = Field(pattern=r"^dvc-[0-9a-fA-F-]{36}$")
     operation: str = Field(min_length=1, max_length=100)
     context: PreclinicalStudyContext
+    parameters: dict[str, Any] = Field(default_factory=dict)
     pre_analysis_checkpoint_id: str = Field(pattern=r"^dvc-assess-[0-9a-fA-F-]{36}$")
 
 
@@ -50,8 +53,10 @@ class ApprovalResponse(StrictModel):
     approved_by: str
     approved_at: datetime
     context_sha256: str
+    parameters_sha256: str
     decision: Literal["approved"]
     pre_analysis_checkpoint_id: str
+    pre_analysis_checkpoint_sha256: str
 
 
 def _job_dir(job_id: UUID) -> Path:
@@ -62,7 +67,12 @@ def _job_dir(job_id: UUID) -> Path:
     return path
 
 
-def _load_pre_analysis_checkpoint(job_dir: Path, checkpoint_id: str, dataset_id: str) -> dict:
+def _load_pre_analysis_checkpoint(
+    job_dir: Path,
+    checkpoint_id: str,
+    dataset_id: str,
+    context_sha256: str,
+) -> dict:
     if not re.fullmatch(r"dvc-assess-[0-9a-fA-F-]{36}", checkpoint_id):
         raise HTTPException(400, "Invalid pre-analysis checkpoint id.")
     path = (job_dir / "dvc_assessments" / f"{checkpoint_id}.json").resolve()
@@ -75,10 +85,14 @@ def _load_pre_analysis_checkpoint(job_dir: Path, checkpoint_id: str, dataset_id:
         raise HTTPException(400, "Pre-analysis assessment checkpoint is invalid.") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "Pre-analysis assessment checkpoint is invalid.")
+    if payload.get("checkpoint_id") != checkpoint_id:
+        raise HTTPException(400, "Pre-analysis assessment checkpoint identity is invalid.")
     if payload.get("checkpoint") != "pre_analysis":
         raise HTTPException(400, "The supplied checkpoint is not a pre-analysis assessment.")
     if payload.get("dataset_id") != dataset_id:
         raise HTTPException(400, "Assessment checkpoint does not belong to this dataset.")
+    if payload.get("context_sha256") != context_sha256:
+        raise HTTPException(400, "Assessment checkpoint does not match this study context.")
     return dict(payload)
 
 
@@ -98,8 +112,12 @@ async def create_dvc_approval(
         raise HTTPException(400, "Operation is not governed for DVC execution.")
 
     job_dir = _job_dir(job_id)
+    context_sha256 = canonical_context_sha256(body.context)
     checkpoint = _load_pre_analysis_checkpoint(
-        job_dir, body.pre_analysis_checkpoint_id, body.dataset_id
+        job_dir,
+        body.pre_analysis_checkpoint_id,
+        body.dataset_id,
+        context_sha256,
     )
     approval_id = f"approval-{uuid4()}"
     identity = getattr(current_user, "email", None) or str(current_user.id)
@@ -107,8 +125,12 @@ async def create_dvc_approval(
         approval_id=approval_id,
         approved_by=identity,
         approved_at=datetime.now(timezone.utc),
+        dataset_id=body.dataset_id,
+        pre_analysis_checkpoint_id=body.pre_analysis_checkpoint_id,
+        pre_analysis_checkpoint_sha256=canonical_checkpoint_sha256(checkpoint),
         operation=body.operation,
-        context_sha256=canonical_context_sha256(body.context),
+        context_sha256=context_sha256,
+        parameters_sha256=canonical_parameters_sha256(body.parameters),
     )
 
     approvals_dir = job_dir / "dvc_approvals"
@@ -139,7 +161,5 @@ async def create_dvc_approval(
     )
     return ApprovalResponse(
         job_id=str(job_id),
-        dataset_id=body.dataset_id,
-        pre_analysis_checkpoint_id=body.pre_analysis_checkpoint_id,
         **approval.model_dump(),
     )

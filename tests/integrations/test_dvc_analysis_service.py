@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,9 +13,14 @@ import pytest
 
 from openscientist.integrations.dvc import execution
 from openscientist.integrations.dvc.execution import (
+    DVCAnalysisApproval,
+    DVCAnalysisBlockedError,
     DVCAnalysisError,
     DVCAnalysisRequest,
     DVCAnalysisService,
+    canonical_checkpoint_sha256,
+    canonical_context_sha256,
+    canonical_parameters_sha256,
 )
 from openscientist.integrations.udwa import UdwaCompatibilityReport
 from openscientist.preclinical_context.models import PreclinicalStudyContext
@@ -84,16 +90,38 @@ def install_fake_udwa(monkeypatch):
     )
 
 
+def make_pre_checkpoint(job_dir: Path, dataset_id: str, context: PreclinicalStudyContext) -> str:
+    checkpoint_id = f"dvc-assess-{uuid4()}"
+    assessment_dir = job_dir / "dvc_assessments"
+    assessment_dir.mkdir()
+    (assessment_dir / f"{checkpoint_id}.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_id": checkpoint_id,
+                "checkpoint": "pre_analysis",
+                "dataset_id": dataset_id,
+                "context_sha256": canonical_context_sha256(context),
+                "assessments": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return checkpoint_id
+
+
 def test_execution_writes_result_and_complete_provenance(tmp_path, monkeypatch):
     dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
     install_fake_udwa(monkeypatch)
     monkeypatch.setenv("OPENSCIENTIST_COMMIT", "open-commit")
 
     result = DVCAnalysisService(tmp_path).execute(
         DVCAnalysisRequest(
             dataset_id=dataset_id,
+            pre_analysis_checkpoint_id=checkpoint_id,
             operation="check_data_sanity",
-            context=PreclinicalStudyContext(study_id="study-1"),
+            context=context,
         )
     )
 
@@ -119,6 +147,8 @@ def test_execution_writes_result_and_complete_provenance(tmp_path, monkeypatch):
 
 def test_modified_measurements_are_rejected(tmp_path, monkeypatch):
     dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
     install_fake_udwa(monkeypatch)
     measurements = tmp_path / "dvc_datasets" / dataset_id / "measurements.csv"
     measurements.write_text(measurements.read_text() + "tampered", encoding="utf-8")
@@ -127,14 +157,17 @@ def test_modified_measurements_are_rejected(tmp_path, monkeypatch):
         DVCAnalysisService(tmp_path).execute(
             DVCAnalysisRequest(
                 dataset_id=dataset_id,
+                pre_analysis_checkpoint_id=checkpoint_id,
                 operation="check_data_sanity",
-                context=PreclinicalStudyContext(study_id="study-1"),
+                context=context,
             )
         )
 
 
 def test_incompatible_udwa_fails_before_execution(tmp_path, monkeypatch):
     dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
     monkeypatch.setattr(
         execution,
         "inspect_udwa_compatibility",
@@ -150,7 +183,76 @@ def test_incompatible_udwa_fails_before_execution(tmp_path, monkeypatch):
         DVCAnalysisService(tmp_path).execute(
             DVCAnalysisRequest(
                 dataset_id=dataset_id,
+                pre_analysis_checkpoint_id=checkpoint_id,
+                operation="check_data_sanity",
+                context=context,
+            )
+        )
+
+
+def test_analysis_without_pre_checkpoint_fails_closed(tmp_path):
+    dataset_id = make_dataset(tmp_path)
+
+    with pytest.raises(DVCAnalysisBlockedError, match="blocked") as exc:
+        DVCAnalysisService(tmp_path).execute(
+            DVCAnalysisRequest(
+                dataset_id=dataset_id,
+                pre_analysis_checkpoint_id=f"dvc-assess-{uuid4()}",
                 operation="check_data_sanity",
                 context=PreclinicalStudyContext(study_id="study-1"),
             )
         )
+
+    assert exc.value.blockers == ["A matching pre-analysis assessment checkpoint is required."]
+
+
+def test_analysis_rejects_checkpoint_for_different_context(tmp_path):
+    dataset_id = make_dataset(tmp_path)
+    assessed_context = PreclinicalStudyContext(study_id="study-assessed")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, assessed_context)
+
+    with pytest.raises(DVCAnalysisBlockedError) as exc:
+        DVCAnalysisService(tmp_path).execute(
+            DVCAnalysisRequest(
+                dataset_id=dataset_id,
+                pre_analysis_checkpoint_id=checkpoint_id,
+                operation="check_data_sanity",
+                context=PreclinicalStudyContext(study_id="study-changed"),
+            )
+        )
+
+    assert any("study context" in blocker for blocker in exc.value.blockers)
+
+
+def test_analysis_rejects_checkpoint_modified_after_approval(tmp_path):
+    dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
+    checkpoint_path = tmp_path / "dvc_assessments" / f"{checkpoint_id}.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    approval = DVCAnalysisApproval(
+        approval_id="approval-1",
+        approved_by="scientist@example.org",
+        approved_at=datetime.now(timezone.utc),
+        dataset_id=dataset_id,
+        pre_analysis_checkpoint_id=checkpoint_id,
+        pre_analysis_checkpoint_sha256=canonical_checkpoint_sha256(checkpoint),
+        operation="check_data_sanity",
+        context_sha256=canonical_context_sha256(context),
+        parameters_sha256=canonical_parameters_sha256({}),
+    )
+    checkpoint["assessments"] = [{"tampered": True}]
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(DVCAnalysisBlockedError) as exc:
+        DVCAnalysisService(tmp_path).execute(
+            DVCAnalysisRequest(
+                dataset_id=dataset_id,
+                pre_analysis_checkpoint_id=checkpoint_id,
+                operation="check_data_sanity",
+                context=context,
+                approval=approval,
+            )
+        )
+
+    assert any("approved checkpoint content" in blocker for blocker in exc.value.blockers)
