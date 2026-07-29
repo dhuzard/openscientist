@@ -7,11 +7,13 @@ import httpx
 import pytest
 
 from openscientist.integrations.fair_prepare import (
+    FAIR_VCG_REQUIRED_TEMPLATES,
     FairPrepareError,
     HttpFairPrepareProvider,
     bundle_manifest_to_csv,
     context_to_csv,
     context_to_metadata,
+    validate_fair_prepare_url,
 )
 from openscientist.preclinical_context.models import (
     EvidenceStatus,
@@ -171,3 +173,110 @@ def test_provider_redacts_credentials_from_http_failure():
 
     assert credential not in str(caught.value)
     assert "token=[REDACTED]" in str(caught.value)
+
+
+def test_fair_prepare_url_rejects_embedded_credentials():
+    with pytest.raises(FairPrepareError, match="must not contain credentials"):
+        validate_fair_prepare_url("https://user:secret@fair-vcg.test")
+
+
+def test_compatibility_canary_exercises_pinned_contract():
+    calls: list[tuple[str, str]] = []
+    template_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0"},
+                    "paths": {
+                        "/api/upload": {"post": {}},
+                        "/api/metadata/{dataset_id}": {"put": {}},
+                        "/api/fair-score/{dataset_id}": {"get": {}},
+                        "/api/{dataset_id}/template/apply-from-paper": {"post": {}},
+                    },
+                },
+            )
+        if request.url.path == "/api/upload":
+            assert b"synthetic-1" in request.content
+            return httpx.Response(200, json={"dataset_id": "canary-1"})
+        if request.url.path == "/api/metadata/canary-1":
+            submitted = json.loads(request.content)
+            return httpx.Response(200, json={"metadata": submitted})
+        if request.url.path == "/api/fair-score/canary-1":
+            dimension = {"score": 1, "max_score": 1, "criteria": {}}
+            return httpx.Response(
+                200,
+                json={
+                    "fair_score": 100,
+                    "findable": dimension,
+                    "accessible": dimension,
+                    "interoperable": dimension,
+                    "reusable": dimension,
+                },
+            )
+        if request.url.path == "/api/canary-1/template/apply-from-paper":
+            template_id = json.loads(request.content)["template_id"]
+            template_calls.append(template_id)
+            return httpx.Response(
+                200,
+                json={"template_id": template_id, "conformance_report": []},
+            )
+        return httpx.Response(404)
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    report = provider.check_compatibility()
+
+    assert report.api_version == "1.0.0"
+    assert report.dataset_id == "canary-1"
+    assert report.templates == FAIR_VCG_REQUIRED_TEMPLATES
+    assert template_calls == list(FAIR_VCG_REQUIRED_TEMPLATES)
+    assert calls[:5] == [
+        ("GET", "/openapi.json"),
+        ("POST", "/api/upload"),
+        ("PUT", "/api/metadata/canary-1"),
+        ("GET", "/api/fair-score/canary-1"),
+        ("POST", "/api/canary-1/template/apply-from-paper"),
+    ]
+
+
+def test_compatibility_canary_fails_closed_on_version_mismatch():
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={"info": {"version": "2.0.0"}, "paths": {}},
+                )
+            )
+        ),
+    )
+
+    with pytest.raises(FairPrepareError, match="API version mismatch"):
+        provider.check_compatibility()
+
+
+def test_compatibility_canary_fails_closed_on_missing_operation():
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={
+                        "info": {"version": "1.0.0"},
+                        "paths": {"/api/upload": {"post": {}}},
+                    },
+                )
+            )
+        ),
+    )
+
+    with pytest.raises(FairPrepareError, match="OpenAPI contract is missing"):
+        provider.check_compatibility()

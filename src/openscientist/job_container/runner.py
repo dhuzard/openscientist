@@ -36,6 +36,10 @@ from openscientist.exec_broker_client import (
     EXEC_TOKEN_ENV,
     container_broker_base_url,
 )
+from openscientist.integrations.fair_prepare import (
+    FAIR_PREPARE_URL_ENV,
+    validate_fair_prepare_url,
+)
 from openscientist.job_container.secrets import (
     derive_job_secret,
     make_dvc_capability,
@@ -184,6 +188,12 @@ class JobContainerRunner:
                     DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
                 }
             )
+            # FAIR-VCG is addressed through a non-secret internal service URL.
+            # Forward this one validated locator explicitly; do not copy
+            # arbitrary FAIR-related environment variables into the agent.
+            fair_prepare_url = os.environ.get(FAIR_PREPARE_URL_ENV)
+            if fair_prepare_url:
+                env[FAIR_PREPARE_URL_ENV] = validate_fair_prepare_url(fair_prepare_url)
         # Only set the run-mode override when it diverges from the default so
         # ordinary discovery launches keep a clean env. The entrypoint reads
         # OPENSCIENTIST_RUN_MODE. "report_only" re-runs just the report phase.

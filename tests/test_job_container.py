@@ -13,6 +13,7 @@ import pytest
 from docker import errors as docker_errors
 from openscientist.dvc_gateway_client import DVC_CAPABILITY_ENV, DVC_GATEWAY_URL_ENV
 from openscientist.exec_broker_client import EXEC_BROKER_URL_ENV, EXEC_TOKEN_ENV
+from openscientist.integrations.fair_prepare import FairPrepareError
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
 from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
 from openscientist.settings import Settings
@@ -572,6 +573,43 @@ class TestJobSecretInjection:
         assert DVC_CAPABILITY_ENV in env
         assert env[DVC_CAPABILITY_ENV].startswith("job-x.")
         assert env[DVC_GATEWAY_URL_ENV].endswith(":8083")
+
+    def test_env_forwards_only_validated_fair_service_url(self) -> None:
+        settings = self._settings()
+        with patch.dict(
+            os.environ,
+            {
+                "FAIR_PREPARE_URL": "http://fair-vcg-mentor:8000/",
+                "FAIR_PREPARE_API_KEY": "must-not-be-forwarded",
+            },
+            clear=False,
+        ):
+            env = JobContainerRunner._build_container_environment(
+                cast(Settings, settings),
+                job_id="job-fair",
+                job_mount="/agent/jobs/job-fair",
+                provider_env={},
+            )
+
+        assert env["FAIR_PREPARE_URL"] == "http://fair-vcg-mentor:8000"
+        assert "FAIR_PREPARE_API_KEY" not in env
+
+    def test_env_rejects_credential_bearing_fair_url(self) -> None:
+        settings = self._settings()
+        with (
+            patch.dict(
+                os.environ,
+                {"FAIR_PREPARE_URL": "http://user:secret@fair-vcg-mentor:8000"},
+                clear=False,
+            ),
+            pytest.raises(FairPrepareError, match="must not contain credentials"),
+        ):
+            JobContainerRunner._build_container_environment(
+                cast(Settings, settings),
+                job_id="job-fair",
+                job_mount="/agent/jobs/job-fair",
+                provider_env={},
+            )
 
 
 class TestAirgapFirewallLaunch:

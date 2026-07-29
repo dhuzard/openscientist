@@ -1,15 +1,21 @@
 """Egress allowlist for the air-gapped job-container firewall.
 
 Derives the host:port endpoints the job container may reach when air-gapped:
-Postgres, the execution broker, and the active provider's LLM endpoint.
+Postgres, the execution broker, the active provider's LLM endpoint, and an
+explicitly configured FAIR-VCG service.
 """
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 from openscientist.dvc_gateway_client import container_dvc_gateway_base_url
 from openscientist.exec_broker_client import container_broker_base_url
+from openscientist.integrations.fair_prepare import (
+    FAIR_PREPARE_URL_ENV,
+    validate_fair_prepare_url,
+)
 from openscientist.settings import Settings
 
 _DEFAULT_PORT_BY_SCHEME = {"https": 443, "http": 80}
@@ -85,6 +91,9 @@ def derive_egress_allowlist(settings: Settings) -> list[tuple[str, int]]:
         _host_port(container_dvc_gateway_base_url()),
         *_provider_endpoints(settings),
     ]
+    fair_prepare_url = os.environ.get(FAIR_PREPARE_URL_ENV)
+    if fair_prepare_url:
+        entries.append(_host_port(validate_fair_prepare_url(fair_prepare_url)))
 
     seen: set[tuple[str, int]] = set()
     unique: list[tuple[str, int]] = []

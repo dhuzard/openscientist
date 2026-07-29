@@ -72,6 +72,15 @@ def test_anthropic_default_endpoint() -> None:
     assert ("api.anthropic.com", 443) in entries
 
 
+def test_configured_fair_vcg_endpoint() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("FAIR_PREPARE_URL", "http://fair-vcg-mentor:8000")
+        monkeypatch.setenv("FAIR_PREPARE_API_KEY", "must-not-affect-egress")
+        entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
+
+    assert ("fair-vcg-mentor", 8000) in entries
+
+
 def test_anthropic_custom_base_url() -> None:
     entries = derive_egress_allowlist(
         _settings(provider_id="anthropic", anthropic_base_url="https://llm.internal:8443")

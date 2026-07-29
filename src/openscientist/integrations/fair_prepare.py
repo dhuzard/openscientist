@@ -12,13 +12,14 @@ import hashlib
 import io
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
-from openscientist.integrations.dvc.security import redact_sensitive_text
 from openscientist.preclinical_context.models import (
     AssessmentFinding,
     AssessmentResult,
@@ -30,10 +31,21 @@ DEFAULT_FAIR_PREPARE_URL = "http://fair-vcg-mentor:8000"
 FAIR_VCG_API_VERSION = "1.0.0"
 FAIR_VCG_REPOSITORY = "Neuronautix/FAIR-VCG-mentor"
 FAIR_VCG_PINNED_COMMIT = "11b0918c01062a0c9a388b33d28068982712d762"
+FAIR_PREPARE_URL_ENV = "FAIR_PREPARE_URL"
+FAIR_VCG_REQUIRED_TEMPLATES = ("prepare-v1", "arrive-v2", "mnms-v1")
 
 
 class FairPrepareError(RuntimeError):
     """Stable OpenScientist-facing FAIR/PREPARE integration failure."""
+
+
+@dataclass(frozen=True)
+class FairPrepareCompatibilityReport:
+    """Evidence returned only after the deployed FAIR-VCG contract is exercised."""
+
+    api_version: str
+    dataset_id: str
+    templates: tuple[str, ...]
 
 
 class FairPrepareProvider(Protocol):
@@ -50,6 +62,27 @@ class FairPrepareProvider(Protocol):
         *,
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]: ...
+
+
+def validate_fair_prepare_url(value: str) -> str:
+    """Validate the non-secret internal service locator before propagating it.
+
+    Embedded user info is rejected because environment variables are visible to
+    the agent container. Query strings and fragments are also disallowed so the
+    value remains a service locator rather than a credential-bearing request.
+    """
+
+    candidate = value.strip().rstrip("/")
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise FairPrepareError(
+            "FAIR_PREPARE_URL must be an absolute http(s) service URL."
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise FairPrepareError(
+            "FAIR_PREPARE_URL must not contain credentials, a query, or a fragment."
+        )
+    return candidate
 
 
 def _flatten(prefix: str, value: Any, row: dict[str, str]) -> None:
@@ -192,9 +225,10 @@ class HttpFairPrepareProvider:
         timeout: float = 60.0,
         client: httpx.Client | None = None,
     ) -> None:
-        self.base_url = (
+        configured_url = (
             base_url or os.getenv("FAIR_PREPARE_URL") or DEFAULT_FAIR_PREPARE_URL
-        ).rstrip("/")
+        )
+        self.base_url = validate_fair_prepare_url(configured_url)
         self.timeout = timeout
         self.client = client or httpx.Client(timeout=timeout)
 
@@ -226,6 +260,11 @@ class HttpFairPrepareProvider:
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        # Import lazily: the DVC package re-exports assessment providers that
+        # depend on this module, so importing its security helper at module load
+        # time would create a circular initialization.
+        from openscientist.integrations.dvc.security import redact_sensitive_text
+
         try:
             response = self.client.request(method, f"{self.base_url}{path}", **kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -241,6 +280,151 @@ class HttpFairPrepareProvider:
         except ValueError as exc:
             raise FairPrepareError(f"FAIR-VCG {path} returned invalid JSON.") from exc
 
+    @staticmethod
+    def _mapping(payload: Any, *, endpoint: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise FairPrepareError(
+                f"FAIR-VCG {endpoint} returned an incompatible response."
+            )
+        return payload
+
+    @staticmethod
+    def _dataset_id(payload: dict[str, Any]) -> str:
+        dataset_id = payload.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
+            raise FairPrepareError(
+                "FAIR-VCG /api/upload response is missing a valid dataset_id."
+            )
+        return dataset_id
+
+    @staticmethod
+    def _validate_fair_score(payload: dict[str, Any]) -> None:
+        if not isinstance(payload.get("fair_score"), (int, float)):
+            raise FairPrepareError(
+                "FAIR-VCG fair-score response is missing numeric fair_score."
+            )
+        for dimension in ("findable", "accessible", "interoperable", "reusable"):
+            score = payload.get(dimension)
+            if not isinstance(score, dict):
+                raise FairPrepareError(
+                    f"FAIR-VCG fair-score response is missing {dimension}."
+                )
+            if not isinstance(score.get("score"), (int, float)) or not isinstance(
+                score.get("max_score"), (int, float)
+            ):
+                raise FairPrepareError(
+                    f"FAIR-VCG fair-score {dimension} values are incompatible."
+                )
+            if not isinstance(score.get("criteria"), dict):
+                raise FairPrepareError(
+                    f"FAIR-VCG fair-score {dimension}.criteria is incompatible."
+                )
+
+    @staticmethod
+    def _validate_template(
+        payload: dict[str, Any],
+        *,
+        framework: str,
+    ) -> None:
+        if payload.get("template_id") != framework:
+            raise FairPrepareError(
+                f"FAIR-VCG template response did not confirm {framework}."
+            )
+        if not isinstance(payload.get("conformance_report"), list):
+            raise FairPrepareError(
+                f"FAIR-VCG template {framework} returned an incompatible report."
+            )
+
+    def check_compatibility(self) -> FairPrepareCompatibilityReport:
+        """Exercise the pinned API contract with synthetic, non-sensitive data.
+
+        A report is returned only when the advertised API version and every
+        production endpoint/template are compatible. Any outage or mismatch
+        raises :class:`FairPrepareError`, allowing deployment to fail closed.
+        """
+
+        openapi = self._mapping(
+            self._request("GET", "/openapi.json"),
+            endpoint="/openapi.json",
+        )
+        info = self._mapping(openapi.get("info"), endpoint="/openapi.json info")
+        version = info.get("version")
+        if version != FAIR_VCG_API_VERSION:
+            raise FairPrepareError(
+                "FAIR-VCG API version mismatch: "
+                f"expected {FAIR_VCG_API_VERSION}, received {version!r}."
+            )
+        paths = self._mapping(openapi.get("paths"), endpoint="/openapi.json paths")
+        required_operations = {
+            "/api/upload": "post",
+            "/api/metadata/{dataset_id}": "put",
+            "/api/fair-score/{dataset_id}": "get",
+            "/api/{dataset_id}/template/apply-from-paper": "post",
+        }
+        for path, method in required_operations.items():
+            operations = paths.get(path)
+            if not isinstance(operations, dict) or method not in operations:
+                raise FairPrepareError(
+                    f"FAIR-VCG OpenAPI contract is missing {method.upper()} {path}."
+                )
+
+        synthetic_csv = (
+            b"subject_id,group,activity_count\n"
+            b"synthetic-1,control,1\n"
+            b"synthetic-2,treatment,2\n"
+        )
+        uploaded = self._mapping(
+            self._request(
+                "POST",
+                "/api/upload",
+                files={"file": ("openscientist-canary.csv", synthetic_csv, "text/csv")},
+            ),
+            endpoint="/api/upload",
+        )
+        dataset_id = self._dataset_id(uploaded)
+        marker = "OpenScientist FAIR-VCG compatibility canary"
+        metadata = self._mapping(
+            self._request(
+                "PUT",
+                f"/api/metadata/{dataset_id}",
+                json={
+                    "title": marker,
+                    "description": "Synthetic deployment readiness record; no study data.",
+                    "base_uri": f"urn:openscientist:fair-canary:{dataset_id}",
+                    "version": "canary/1",
+                },
+            ),
+            endpoint="/api/metadata/{dataset_id}",
+        )
+        returned_metadata = metadata.get("metadata")
+        if not isinstance(returned_metadata, dict) or returned_metadata.get("title") != marker:
+            raise FairPrepareError(
+                "FAIR-VCG metadata endpoint did not persist the synthetic marker."
+            )
+
+        fair_score = self._mapping(
+            self._request("GET", f"/api/fair-score/{dataset_id}"),
+            endpoint="/api/fair-score/{dataset_id}",
+        )
+        self._validate_fair_score(fair_score)
+
+        for framework in FAIR_VCG_REQUIRED_TEMPLATES:
+            applied = self._mapping(
+                self._request(
+                    "POST",
+                    f"/api/{dataset_id}/template/apply-from-paper",
+                    json={"template_id": framework},
+                ),
+                endpoint="/api/{dataset_id}/template/apply-from-paper",
+            )
+            self._validate_template(applied, framework=framework)
+
+        return FairPrepareCompatibilityReport(
+            api_version=version,
+            dataset_id=dataset_id,
+            templates=FAIR_VCG_REQUIRED_TEMPLATES,
+        )
+
     def _assess_bytes(
         self,
         content: bytes,
@@ -250,21 +434,32 @@ class HttpFairPrepareProvider:
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]:
         source_hash = hashlib.sha256(content).hexdigest()
-        uploaded = self._request(
-            "POST",
-            "/api/upload",
-            files={"file": (filename, content, "text/csv")},
+        uploaded = self._mapping(
+            self._request(
+                "POST",
+                "/api/upload",
+                files={"file": (filename, content, "text/csv")},
+            ),
+            endpoint="/api/upload",
         )
-        dataset_id = str(uploaded["dataset_id"])
+        dataset_id = self._dataset_id(uploaded)
         self._request("PUT", f"/api/metadata/{dataset_id}", json=metadata)
-        fair_score = self._request("GET", f"/api/fair-score/{dataset_id}")
+        fair_score = self._mapping(
+            self._request("GET", f"/api/fair-score/{dataset_id}"),
+            endpoint="/api/fair-score/{dataset_id}",
+        )
+        self._validate_fair_score(fair_score)
         results = [self._fair_result(dataset_id, source_hash, fair_score)]
         for framework in frameworks:
-            applied = self._request(
-                "POST",
-                f"/api/{dataset_id}/template/apply-from-paper",
-                json={"template_id": framework},
+            applied = self._mapping(
+                self._request(
+                    "POST",
+                    f"/api/{dataset_id}/template/apply-from-paper",
+                    json={"template_id": framework},
+                ),
+                endpoint="/api/{dataset_id}/template/apply-from-paper",
             )
+            self._validate_template(applied, framework=framework)
             results.append(self._template_result(dataset_id, source_hash, framework, applied))
         return results
 

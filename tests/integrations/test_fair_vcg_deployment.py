@@ -1,0 +1,44 @@
+from pathlib import Path
+
+import yaml
+
+from openscientist.integrations.fair_prepare import FAIR_VCG_PINNED_COMMIT
+
+OVERLAY = Path(__file__).parents[2] / "docker-compose.fair-vcg.yml"
+
+
+def _compose() -> dict:
+    return yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
+
+
+def test_fair_vcg_build_is_pinned_and_not_host_published():
+    service = _compose()["services"]["fair-vcg-mentor"]
+
+    assert FAIR_VCG_PINNED_COMMIT in service["build"]["context"]
+    assert service["expose"] == ["8000"]
+    assert "ports" not in service
+    assert service["networks"]["agent-runtime"]["aliases"] == ["fair-vcg-mentor"]
+
+
+def test_application_startup_is_gated_by_full_contract_canary():
+    services = _compose()["services"]
+
+    assert services["fair-vcg-canary"]["depends_on"]["fair-vcg-mentor"]["condition"] == (
+        "service_healthy"
+    )
+    assert services["openscientist"]["depends_on"]["fair-vcg-canary"]["condition"] == (
+        "service_completed_successfully"
+    )
+    command = services["fair-vcg-canary"]["command"]
+    assert "openscientist.integrations.fair_prepare_canary" in command
+
+
+def test_spawned_agents_use_the_attachable_runtime_bridge():
+    compose = _compose()
+    service = compose["services"]["openscientist"]
+
+    assert service["environment"]["FAIR_PREPARE_URL"] == "http://fair-vcg-mentor:8000"
+    assert service["environment"]["OPENSCIENTIST_AGENT_NETWORK"].startswith(
+        "${OPENSCIENTIST_AGENT_NETWORK:-"
+    )
+    assert compose["networks"]["agent-runtime"]["attachable"] is True
