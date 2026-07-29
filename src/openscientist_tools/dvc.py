@@ -1,8 +1,8 @@
-"""Typed MCP tools for DVC acquisition and governed deterministic analysis."""
+"""Typed MCP tools for DVC acquisition, assessment and governed analysis."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from openscientist.integrations.dvc import (
     DVCAcquisitionService,
@@ -10,6 +10,7 @@ from openscientist.integrations.dvc import (
     DVCAnalysisError,
     DVCAnalysisRequest,
     DVCAnalysisService,
+    DVCAssessmentService,
     DVCImportRequest,
 )
 from openscientist.integrations.dvc.approvals import (
@@ -19,6 +20,7 @@ from openscientist.integrations.dvc.approvals import (
 from openscientist.integrations.dvc.credentials import DVCConnectionNotFoundError
 from openscientist.integrations.dvc.security import redact_sensitive_text
 from openscientist.integrations.dvc.service import DVCAcquisitionError
+from openscientist.integrations.fair_prepare import FairPrepareError
 from openscientist.preclinical_context.models import PreclinicalStudyContext
 from openscientist_tools.server import mcp
 from openscientist_tools.state import STATE
@@ -30,6 +32,10 @@ def _service() -> DVCAcquisitionService:
 
 def _analysis_service() -> DVCAnalysisService:
     return DVCAnalysisService(STATE.job_dir)
+
+
+def _assessment_service() -> DVCAssessmentService:
+    return DVCAssessmentService(STATE.job_dir)
 
 
 def _error(exc: Exception) -> dict[str, Any]:
@@ -78,14 +84,10 @@ def dvc_import_dataset(
     metric_id: str,
     start: str,
     stop: str,
-    aggregation: str = "MINUTE",
+    aggregation: Literal["MINUTE", "HOUR"] = "MINUTE",
     connection_id: str = "default",
 ) -> dict[str, Any]:
-    """Import one metric for a bounded cage/time window through UDWA.
-
-    Full data remain in the current job directory. Only compact metadata, hashes,
-    warnings and asset paths are returned.
-    """
+    """Import one metric for a bounded cage/time window through UDWA."""
     try:
         request = DVCImportRequest(
             connection_id=connection_id,
@@ -102,6 +104,27 @@ def dvc_import_dataset(
 
 
 @mcp.tool()
+def dvc_assess_pre_analysis(dataset_id: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Assess study context with FAIR, PREPARE and ARRIVE before analysis."""
+    try:
+        study_context = PreclinicalStudyContext.model_validate(context)
+        result = _assessment_service().pre_analysis(dataset_id, study_context)
+        return {"ok": True, **result.model_dump(mode="json")}
+    except (FairPrepareError, FileNotFoundError, ValueError) as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+def dvc_assess_post_analysis(dataset_id: str) -> dict[str, Any]:
+    """Assess the generated DVC bundle after analysis."""
+    try:
+        result = _assessment_service().post_analysis(dataset_id)
+        return {"ok": True, **result.model_dump(mode="json")}
+    except (FairPrepareError, FileNotFoundError, ValueError) as exc:
+        return _error(exc)
+
+
+@mcp.tool()
 def dvc_run_analysis(
     dataset_id: str,
     operation: str,
@@ -109,12 +132,7 @@ def dvc_run_analysis(
     parameters: dict[str, Any] | None = None,
     approval_id: str | None = None,
 ) -> dict[str, Any]:
-    """Run one allowlisted UDWA operation after scientific and approval gates.
-
-    Context must use the versioned OpenScientist preclinical-context schema.
-    Approval metadata are never accepted from the agent. When required, the tool
-    resolves `approval_id` from a trusted record under the current job directory.
-    """
+    """Run one allowlisted UDWA operation after scientific and approval gates."""
     try:
         study_context = PreclinicalStudyContext.model_validate(context)
         approval = (
