@@ -21,7 +21,13 @@ from openscientist.skill_provenance import (
     build_job_skill_provenance,
     extract_skill_usage,
 )
-from openscientist.transcript import AssistantText, ShellExecution, ToolCall, ToolResult
+from openscientist.transcript import (
+    AssistantText,
+    ShellExecution,
+    ToolCall,
+    ToolResult,
+    TranscriptEntry,
+)
 
 
 def _skill(*, skill_id: UUID, name: str, category: str, slug: str) -> Skill:
@@ -62,6 +68,7 @@ async def test_codex_materializes_only_assigned_skills_and_removes_stale(tmp_pat
         await write_skills_to_codex_dir(tmp_path, skill_ids=(str(selected_id),))
 
     get_skills.assert_awaited_once()
+    assert get_skills.await_args is not None
     assert get_skills.await_args.args[1] == (str(selected_id),)
     assert not stale.exists()
     assert (tmp_path / ".agents" / "skills" / "analysis--selected" / "SKILL.md").exists()
@@ -87,6 +94,7 @@ async def test_explicit_empty_assignment_materializes_no_claude_skills(tmp_path:
     ):
         await write_skills_to_claude_dir(tmp_path, skill_ids=())
 
+    assert get_skills.await_args is not None
     assert get_skills.await_args.args[1] == ()
     assert not stale.exists()
     assert (
@@ -114,7 +122,7 @@ async def test_validate_skill_ids_rejects_disabled_or_unknown() -> None:
 
 
 def test_extracts_explicit_claude_skill_prompt_and_produced_result() -> None:
-    transcript = [
+    transcript: list[TranscriptEntry] = [
         ToolCall(
             id="call-1",
             tool="Skill",
@@ -156,7 +164,7 @@ def test_extracts_implicit_codex_skill_read_and_builds_job_summary(tmp_path: Pat
     )
     provenance = tmp_path / "provenance"
     provenance.mkdir()
-    transcript = [
+    transcript: list[TranscriptEntry] = [
         ShellExecution(
             id="shell-1",
             command="Get-Content .agents/skills/analysis--profile/SKILL.md",

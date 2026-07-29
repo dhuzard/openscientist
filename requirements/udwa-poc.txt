@@ -1,0 +1,4 @@
+# Deterministic DVC acquisition and analytics boundary for the first POC.
+# Install alongside OpenScientist until the dependency is promoted into
+# pyproject.toml after wheel/install verification in CI.
+udwa[ingest,report] @ git+https://github.com/dhuzard/UDWA-Ultimate-DVC-Workflow-Analyzer.git@2a7f8ff042f2db1baa6e368126cbc4bd9034bd88

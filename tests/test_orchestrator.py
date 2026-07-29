@@ -1563,6 +1563,7 @@ async def test_cost_tracked_iteration_persists_incremental_usage() -> None:
         )
 
     assert result.output == "turn"
+    assert persist.await_args is not None
     persisted_tokens = persist.await_args.args[1]
     assert persisted_tokens == TokenUsage(
         input_tokens=100,

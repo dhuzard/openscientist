@@ -1,11 +1,13 @@
 """Tests for application-recorded cost aggregation."""
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openscientist.cost_tracker import get_recorded_cost_info
+from openscientist.providers.base import Provider
 
 
 @pytest.mark.asyncio
@@ -16,7 +18,7 @@ async def test_get_recorded_cost_info_aggregates_provider_spend() -> None:
     session.execute.return_value = result
     session_context = AsyncMock()
     session_context.__aenter__.return_value = session
-    provider = SimpleNamespace(id="openai", display_name="OpenAI API")
+    provider = cast(Provider, SimpleNamespace(id="openai", display_name="OpenAI API"))
 
     with patch("openscientist.cost_tracker.AsyncSessionLocal", return_value=session_context):
         info = await get_recorded_cost_info(provider, lookback_hours=48)

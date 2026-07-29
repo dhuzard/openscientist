@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 import pandas as pd
@@ -89,7 +90,9 @@ def propose_plan(context: StudyContext, assessment: MetadataAssessment) -> Analy
             approval_required=True,
         ),
     ]
-    active_block = any(step.status == "blocked" and step.step_id in {"inspect", "qc", "describe"} for step in steps)
+    active_block = any(
+        step.status == "blocked" and step.step_id in {"inspect", "qc", "describe"} for step in steps
+    )
     return AnalysisPlan(
         objective=context.objective.value or "Unresolved DVC analysis objective",
         scope=context.mode,
@@ -99,7 +102,9 @@ def propose_plan(context: StudyContext, assessment: MetadataAssessment) -> Analy
             "Cage labels are opaque until explicit group metadata are supplied.",
             "All outputs are exploratory; deterministic UDWA tools compute numerical results.",
         ],
-        status="blocked" if active_block or not assessment.ready_for_descriptive_analysis else "draft",
+        status="blocked"
+        if active_block or not assessment.ready_for_descriptive_analysis
+        else "draft",
     )
 
 
@@ -110,9 +115,13 @@ def validate_plan(plan: AnalysisPlan, context: StudyContext) -> list[str]:
             continue
         text = f"{step.title} {step.rationale} {step.tool_name}".lower()
         if "per-animal" in text or "per animal" in text:
-            violations.append(f"{step.step_id}: cage-level signal cannot be silently attributed to animals")
-        if "group" in text and "compare" in text and any(
-            _unknown(cage.biological_group) for cage in context.cages
+            violations.append(
+                f"{step.step_id}: cage-level signal cannot be silently attributed to animals"
+            )
+        if (
+            "group" in text
+            and "compare" in text
+            and any(_unknown(cage.biological_group) for cage in context.cages)
         ):
             violations.append(f"{step.step_id}: biological groups are unresolved")
         if ("light" in text or "zt" in text) and (
@@ -126,7 +135,9 @@ def validate_plan(plan: AnalysisPlan, context: StudyContext) -> list[str]:
 
 def adapt_plan_for_event_qc(plan: AnalysisPlan, low_coverage_event_bins: int) -> AnalysisPlan:
     out = plan.model_copy(deep=True)
-    if low_coverage_event_bins <= 0 or any(step.step_id == "event-sensitivity" for step in out.steps):
+    if low_coverage_event_bins <= 0 or any(
+        step.step_id == "event-sensitivity" for step in out.steps
+    ):
         return out
     sensitivity = AnalysisPlanStep(
         step_id="event-sensitivity",
@@ -138,7 +149,9 @@ def adapt_plan_for_event_qc(plan: AnalysisPlan, low_coverage_event_bins: int) ->
         tool_name="udwa.compare_event_mask_sensitivity",
         approval_required=True,
     )
-    report_index = next((index for index, step in enumerate(out.steps) if step.step_id == "report"), len(out.steps))
+    report_index = next(
+        (index for index, step in enumerate(out.steps) if step.step_id == "report"), len(out.steps)
+    )
     out.steps.insert(report_index, sensitivity)
     return out
 
@@ -233,7 +246,9 @@ MANDATORY_GATES = (
 )
 
 
-def score_poc(category_percentages: dict[str, float], gate_results: dict[str, bool]) -> dict[str, Any]:
+def score_poc(
+    category_percentages: Mapping[str, float], gate_results: Mapping[str, bool]
+) -> dict[str, Any]:
     missing = set(EVALUATION_WEIGHTS) - set(category_percentages)
     if missing:
         raise ValueError(f"missing category scores: {sorted(missing)}")

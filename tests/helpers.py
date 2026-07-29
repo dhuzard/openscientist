@@ -76,7 +76,7 @@ class StubCodexProvider(CodexCompatible):
     def codex_config_overrides(self) -> list[str]:
         return []
 
-    def codex_model_name(self) -> str:
+    def codex_model_name(self) -> str | None:
         return "stub-codex-model"
 
     def codex_model_provider_id(self) -> str:
