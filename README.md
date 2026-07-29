@@ -36,6 +36,10 @@ OpenScientist is a domain-agnostic autonomous discovery agent that:
   - `execute_code`: Run Python, Rust, or SPARQL analysis
   - `search_pubmed`: Search literature
   - `update_knowledge_state`: Record findings
+  - `dvc_test_connection`, `dvc_list_metrics`, `dvc_search_cages`,
+    `dvc_import_dataset`: Acquire Tecniplast DVC data through pinned UDWA
+  - `dvc_assess_pre_analysis`, `dvc_run_analysis`,
+    `dvc_assess_post_analysis`: Run the governed DVC assessment and analysis flow
   - `run_phenix_tool`, `compare_structures`, `parse_alphafold_confidence` (optional, requires Phenix)
 - **Knowledge State**: PostgreSQL-backed tracking for findings, hypotheses, literature, analysis logs, and iteration summaries
 - **Job Manager**: Multi-job queueing with pause/resume, live iteration limits, and early reports
@@ -46,6 +50,36 @@ Each job runs in a dedicated agent container. The agent calls the standalone
 execution broker into short-lived executor containers. Executor containers have
 resource limits and no network in air-gapped mode; the agent container can also
 run behind a default-deny egress firewall.
+
+### Governed Tecniplast DVC workflow
+
+The integration foundation supports this ordered flow:
+
+```text
+DVC API
+→ UDWA-backed MCP acquisition
+→ pre-analysis FAIR/PREPARE/ARRIVE assessment
+→ authenticated human approval
+→ governed UDWA analysis
+→ immutable provenance
+→ post-analysis FAIR/ARRIVE/MNMS assessment
+```
+
+OpenScientist resolves DVC credentials server-side; agents use logical
+connection identifiers and never receive API keys. Scientific operations are
+allowlisted, prerequisite-checked, bound to authenticated approvals when
+required, and persisted with input hashes and versioned provenance.
+
+This is an implemented integration foundation, not yet a proven live POC. A
+usable deployment still requires a reachable FAIR-VCG service, DVC credentials,
+container-network verification, agent orchestration instructions, and one real
+end-to-end run against Tecniplast DVC and FAIR-VCG. Approval currently uses an
+authenticated REST endpoint; a graphical approval experience and dedicated
+evidence-linked final-report workflow remain backlog items.
+
+See [DVC POC and backlog](docs/DVC_POC.md),
+[integration boundaries](docs/DVC_INTEGRATION_ARCHITECTURE.md), and
+[FAIR/PREPARE integration](docs/FAIR_PREPARE_INTEGRATION.md).
 
 ### Structural Biology Support (Optional)
 
@@ -172,6 +206,27 @@ These estimates do not include OpenAI usage outside this app.
 OPENSCIENTIST_DEV_MODE=true
 ```
 
+### DVC and FAIR/PREPARE settings
+
+The governed DVC flow resolves credentials in the agent/tool-server
+environment:
+
+```bash
+DVC_BASE_URL=https://<dvc-api-host>
+DVC_API_KEY=<dvc-api-key>
+FAIR_PREPARE_URL=http://fair-vcg-mentor:8000
+```
+
+Named DVC connections use
+`DVC_CONNECTION_<NORMALIZED_CONNECTION_ID>_API_KEY` and optionally
+`DVC_CONNECTION_<NORMALIZED_CONNECTION_ID>_BASE_URL`. Never place credentials
+in MCP arguments, manifests, analysis parameters, or provenance.
+
+UDWA is pinned in `requirements/udwa-poc.txt` and currently comes from a private
+repository. Building `Dockerfile.agent` therefore requires a BuildKit
+`github_token` secret with read access to that repository; the secret is used
+only during installation and is not retained in the image.
+
 ### Job Manager Settings
 
 - `OPENSCIENTIST_MAX_CONCURRENT_JOBS`: Maximum concurrent jobs (default: `1`)
@@ -198,6 +253,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and deplo
 - [Design Document](docs/DESIGN.md)
 - [Deployment Guide](docs/DEPLOYMENT.md)
 - [Job Run Controls](docs/JOB_RUN_CONTROLS.md)
+- [DVC POC and Development Backlog](docs/DVC_POC.md)
+- [DVC Integration Architecture](docs/DVC_INTEGRATION_ARCHITECTURE.md)
+- [FAIR/PREPARE Integration](docs/FAIR_PREPARE_INTEGRATION.md)
 - [Security Review](docs/SECURITY_REVIEW.md)
 - [Environment Configuration](.env.example)
 

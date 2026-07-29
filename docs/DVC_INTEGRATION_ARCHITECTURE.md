@@ -7,12 +7,18 @@ OpenScientist does not reimplement the DVC Analytics API or UDWA numerical analy
 - **UDWA** owns DVC API acquisition, archive parsing, normalization, and deterministic scientific functions.
 - **Preclinical assessment providers** own FAIR, PREPARE, ARRIVE, or related rule evaluation.
 - **OpenScientist** owns study-context reconstruction, scientific prerequisites, approvals, evidence lineage, orchestration, and reporting.
-- **MCP** will expose narrow typed operations over these boundaries in a later PR.
+- **MCP** exposes narrow typed acquisition, assessment and governed-analysis
+  operations over these boundaries; it does not expose credentials or a generic
+  DVC HTTP client.
 
 ## Pinned UDWA baseline
 
 The first POC pins UDWA commit `2a7f8ff042f2db1baa6e368126cbc4bd9034bd88` in
-`requirements/udwa-poc.txt`. The pin is intentionally separate from the main project dependency list until CI verifies a clean wheel/install path across the OpenScientist web and agent images.
+`requirements/udwa-poc.txt`. The pin remains separate from the main project
+dependency list while the live POC and CI compatibility matrix are completed.
+`Dockerfile.agent` installs it from the private repository with a transient
+BuildKit secret and retains neither the token nor Git authentication state in
+the image.
 
 The supported initial import surface is limited to:
 
@@ -48,27 +54,52 @@ A new UDWA function is not automatically available to an agent. It must receive 
 
 Values retain epistemic status: recorded, computed, inferred, or unknown. Inferred values require confidence, and unknown values cannot silently carry a value.
 
-## Assessment provider boundary
+## Implemented assessment provider boundary
 
 `PreclinicalAssessmentProvider` supports two checkpoints:
 
 1. `assess_context`: pre-analysis readiness and missing-context assessment;
 2. `assess_bundle`: post-analysis FAIR and reporting-package assessment.
 
-The included stub provider exists only to test orchestration and report rendering. It never reports a requirement as satisfied and explicitly states that an authoritative provider is still required.
+The deterministic stub provider remains available for isolated tests and never
+claims compliance. The concrete `HttpFairPrepareProvider` implements the
+versioned FAIR-VCG REST contract. UI automation is not an accepted integration
+boundary.
 
-A future FAIR-PREPARE adapter may be:
+## Implemented runtime sequence
 
-1. a local Python package adapter;
-2. a versioned HTTP API adapter;
-3. a JSON CLI adapter.
+```text
+logical DVC connection
+  -> UDWA-backed discovery and bounded import
+  -> immutable dataset assets and hashes
+  -> pre-analysis FAIR/PREPARE/ARRIVE checkpoint
+  -> authenticated context-bound approval
+  -> allowlisted UDWA operation with prerequisite checks
+  -> immutable result and provenance
+  -> post-analysis FAIR/ARRIVE/MNMS checkpoint
+```
 
-UI automation is not an accepted integration boundary.
+The agent can reference an approval identifier but cannot create approval
+identity, timestamps, decisions or context hashes through MCP. Approval-required
+operations resolve the trusted record from the job workspace and fail when it
+is missing, stale, future-dated or bound to different context.
 
-## Next PRs
+## Next increments
 
-1. Add UDWA-backed read-only DVC MCP tools for connection testing, metrics, cage search, and bounded import.
-2. Register imported raw ZIP, normalized metric, events, request manifest, and hashes as job assets.
-3. Add governed `dvc_run_analysis` execution with scientific prerequisites and approval gates.
-4. Connect the concrete FAIR-PREPARE provider through the neutral contract.
-5. Add an offline API-to-report end-to-end fixture and direct-UDWA parity tests.
+1. Deploy the pinned FAIR-VCG service and verify `FAIR_PREPARE_URL` routing from
+   actual agent containers.
+2. Configure a deployment-managed DVC credential and complete one redacted live
+   acquisition smoke test.
+3. Add a versioned agent skill and transcript tests that prescribe and enforce
+   the MCP orchestration order.
+4. Add a graphical approval/rejection experience over the authenticated REST
+   boundary.
+5. Add dedicated evidence-linked report assembly and a downloadable governed
+   bundle.
+6. Add authoritative GitHub CI, offline API-to-report fixtures and direct-UDWA
+   parity checks.
+7. Complete a real Tecniplast DVC + FAIR-VCG end-to-end run with scientific
+   owner sign-off.
+
+The prioritized acceptance criteria and owner-ready TODOs are maintained in
+[DVC_POC.md](DVC_POC.md).

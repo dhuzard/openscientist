@@ -11,6 +11,7 @@ contract rather than importing web-application internals.
 OpenScientist calls:
 
 - `POST /api/upload`
+- `PUT /api/metadata/{dataset_id}`
 - `GET /api/fair-score/{dataset_id}`
 - `POST /api/{dataset_id}/template/apply-from-paper`
 
@@ -80,6 +81,20 @@ records. FAIR-VCG assesses this bundle manifest against FAIR, ARRIVE and MNMS.
 
 ## Remaining deployment work
 
-Container deployments must make `FAIR_PREPARE_URL` reachable from the per-job
-agent container. A deployment can place both services on the same Docker network
-or expose FAIR-VCG through an internal HTTPS endpoint.
+The adapter and mock-contract tests are implemented. The remaining work is
+deployment and live acceptance:
+
+- [ ] Deploy the pinned FAIR-VCG revision.
+- [ ] Make `FAIR_PREPARE_URL` reachable from each per-job agent container.
+- [ ] Verify Docker DNS/network forwarding or the internal HTTPS route in the
+  actual deployment configuration.
+- [ ] Add service readiness and version checks.
+- [ ] Exercise upload, metadata, FAIR score and template application from the
+  built agent image.
+- [ ] Verify that upstream errors remain redacted in application and MCP logs.
+- [ ] Complete a live pre- and post-analysis assessment against a bounded
+  Tecniplast validation dataset.
+
+A deployment can place both services on the same private Docker network or
+expose FAIR-VCG through an internal HTTPS endpoint. FAIR-VCG availability must
+fail closed before approval-dependent analysis proceeds.
