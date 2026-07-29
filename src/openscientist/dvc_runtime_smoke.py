@@ -7,6 +7,7 @@ import and registration checks. It never connects to DVC or reads credentials.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from typing import Any
 
@@ -26,6 +27,13 @@ APPROVAL_ROUTE = "/api/v1/dvc/jobs/{job_id}/approvals"
 
 def collect_runtime_report() -> dict[str, Any]:
     """Require every pinned runtime boundary and return a redaction-safe report."""
+
+    # The standalone MCP server intentionally fails closed when a real job
+    # identity is absent. Give this isolated import-only smoke check a synthetic
+    # identity so the image can verify tool registration without credentials or
+    # a running job.
+    os.environ.setdefault("OPENSCIENTIST_JOB_ID", "dvc-runtime-smoke")
+    os.environ.setdefault("OPENSCIENTIST_JOB_DIR", "/tmp/openscientist-dvc-runtime-smoke")
 
     from openscientist.api.router import api_router
     from openscientist_tools import dvc as dvc_tools
