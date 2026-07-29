@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .hypothesis import Hypothesis
     from .job_chat_message import JobChatMessage
     from .job_data_file import JobDataFile
+    from .job_guidance import JobGuidance
     from .job_share import JobShare
     from .user import User
 
@@ -55,6 +56,7 @@ class Job(UUIDv7Mixin, Base):
         data_files: Uploaded data files for this job
         hypotheses: Generated hypotheses
         chat_messages: In-page chat messages
+        guidance: Owner-submitted ideas queued for a future turn
         cost_records: Cost tracking records
     """
 
@@ -223,6 +225,11 @@ class Job(UUIDv7Mixin, Base):
     )
 
     chat_messages: Mapped[list["JobChatMessage"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+    guidance: Mapped[list["JobGuidance"]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
     )

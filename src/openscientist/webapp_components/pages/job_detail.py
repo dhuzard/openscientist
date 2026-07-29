@@ -36,6 +36,11 @@ from openscientist.job_chat import (
     normalize_chat_artifact_links,
     send_chat_message,
 )
+from openscientist.job_guidance import (
+    MAX_JOB_GUIDANCE_LENGTH,
+    JobGuidanceError,
+    queue_job_guidance,
+)
 from openscientist.job_manager import _db_get_job, _db_get_share_permission
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
@@ -1165,6 +1170,64 @@ def _show_iteration_limit_dialog(context: _JobDetailContext) -> None:
     dialog.open()
 
 
+def _queue_job_idea(context: _JobDetailContext, content: str) -> bool:
+    """Queue owner-authored guidance without changing the active run state."""
+    if not context.is_owner:
+        ui.notify("Only the job owner can add ideas to this run.", type="negative")
+        return False
+
+    user_id = get_current_user_id()
+    if not user_id:
+        ui.notify("You must be signed in to add an idea.", type="negative")
+        return False
+
+    try:
+        run_sync(queue_job_guidance(context.job_id, UUID(user_id), content))
+    except JobGuidanceError as exc:
+        ui.notify(str(exc), type="warning")
+        return False
+    except Exception:
+        logger.exception("Failed to queue scientist idea for job %s", context.job_id)
+        ui.notify("The idea could not be queued. Please try again.", type="negative")
+        return False
+
+    ui.notify("Idea queued for the next iteration.", type="positive")
+    return True
+
+
+def _show_add_idea_dialog(context: _JobDetailContext) -> None:
+    """Collect non-blocking guidance for the next safe discovery boundary."""
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-xl"):
+        ui.label("Add an idea for the next iteration").classes("text-lg font-bold")
+        ui.label(
+            "The current turn will finish normally. Your idea will be included at the next "
+            "safe iteration boundary, and the run will not pause."
+        ).classes("text-sm text-gray-600")
+        ui.label("This is guidance for the investigation, not a scientific approval.").classes(
+            "text-sm text-amber-700"
+        )
+        idea_input = (
+            ui.textarea(
+                label="Idea or guidance",
+                placeholder=(
+                    "e.g., Compare activity by cage and inspect whether event timing explains "
+                    "the observed pattern..."
+                ),
+            )
+            .props(f"outlined autogrow counter maxlength={MAX_JOB_GUIDANCE_LENGTH}")
+            .classes("w-full")
+        )
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def queue_idea() -> None:
+                if _queue_job_idea(context, str(idea_input.value or "")):
+                    dialog.close()
+
+            ui.button("Queue idea", icon="lightbulb", on_click=queue_idea).props("color=primary")
+    dialog.open()
+
+
 def _available_run_controls(context: _JobDetailContext) -> set[str]:
     """Return lifecycle controls available to this user and job state."""
     if not context.is_owner:
@@ -1173,6 +1236,10 @@ def _available_run_controls(context: _JobDetailContext) -> set[str]:
     controls: set[str] = set()
     if status in {JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK}:
         controls.add("pause")
+    if status == JobStatus.RUNNING:
+        current_iteration = max(context.job_info.iterations_completed + 1, 1)
+        if current_iteration < context.job_info.max_iterations:
+            controls.add("add_idea")
     if status == JobStatus.PAUSED:
         controls.add("resume")
     if status in {
@@ -1209,6 +1276,12 @@ def _render_job_runtime_controls(context: _JobDetailContext) -> None:
                     "take effect."
                 ).classes("text-xs text-gray-600")
             with ui.row().classes("gap-2 flex-wrap"):
+                if "add_idea" in controls:
+                    ui.button(
+                        "Add idea",
+                        icon="lightbulb",
+                        on_click=lambda: _show_add_idea_dialog(context),
+                    ).props("color=primary")
                 if "pause" in controls:
                     ui.button(
                         "Pause",

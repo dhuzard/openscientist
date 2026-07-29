@@ -28,6 +28,11 @@ from openscientist.database.models.job import Job as JobModel
 from openscientist.database.session import AsyncSessionLocal
 from openscientist.evidence_librarian import initialise_evidence_trace
 from openscientist.exceptions import OpenScientistError
+from openscientist.job_guidance import (
+    has_pending_job_guidance,
+    list_pending_job_guidance,
+    mark_job_guidance_delivered,
+)
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import (
     FeedbackWaitResult,
@@ -174,6 +179,17 @@ async def _wait_for_coinvestigate_feedback(
     """Pause for user feedback between iterations in co-investigation mode."""
     if investigation_mode != "coinvestigate" or current_iteration >= max_iterations:
         return None
+    try:
+        if await has_pending_job_guidance(job_dir.name):
+            logger.info(
+                "Skipping feedback wait for job %s: scientist guidance is already queued",
+                job_dir.name,
+            )
+            return {"outcome": "continued", "feedback_text": None}
+    except Exception as exc:
+        # Guidance is an enhancement to the discovery loop. A transient queue
+        # read failure must not replace the established HITL workflow.
+        logger.warning("Failed to check queued guidance for job %s: %s", job_dir.name, exc)
     await update_job_status(job_dir, "awaiting_feedback")
     wait_result = await wait_for_feedback_or_timeout(job_dir)
     if wait_result["outcome"] in {"feedback", "timeout", "continued"}:
@@ -297,6 +313,11 @@ async def _run_primary_discovery_loop(
         ks = KnowledgeState.load_from_database_sync(job_id)
         if pending_feedback is None:
             pending_feedback = ks.get_feedback_for_iteration(iteration)
+        try:
+            queued_guidance = await list_pending_job_guidance(job_id)
+        except Exception as exc:
+            logger.warning("Failed to load queued guidance for job %s: %s", job_id, exc)
+            queued_guidance = []
 
         iteration_prompt = build_iteration_prompt(
             iteration,
@@ -304,6 +325,7 @@ async def _run_primary_discovery_loop(
             ks,
             pending_feedback,
             description=runtime.get("description"),
+            queued_ideas=[guidance.content for guidance in queued_guidance],
         )
         pending_feedback = None
         should_reset = iteration == start_iteration or iteration % reset_interval == 1
@@ -330,6 +352,22 @@ async def _run_primary_discovery_loop(
             prompt=iteration_prompt,
             result=result,
         )
+        if queued_guidance:
+            try:
+                await mark_job_guidance_delivered(
+                    job_id,
+                    [guidance.id for guidance in queued_guidance],
+                    iteration,
+                )
+            except Exception as exc:
+                # Keep the run moving. Because only the frozen IDs from this
+                # turn are marked, a failed acknowledgement leaves them queued
+                # for a transparent retry on the next iteration.
+                logger.warning(
+                    "Failed to mark queued guidance delivered for job %s: %s",
+                    job_id,
+                    exc,
+                )
 
         current_limit = await _job_control_checkpoint(job_id)
         if iteration >= current_limit:

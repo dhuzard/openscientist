@@ -181,7 +181,10 @@ def test_restart_action_blocks_when_edit_permission_was_revoked() -> None:
 @pytest.mark.parametrize(
     "status,expected",
     [
-        (JobStatus.RUNNING, {"pause", "reduce_iterations", "stop_and_report"}),
+        (
+            JobStatus.RUNNING,
+            {"add_idea", "pause", "reduce_iterations", "stop_and_report"},
+        ),
         (JobStatus.AWAITING_FEEDBACK, {"pause", "reduce_iterations", "stop_and_report"}),
         (JobStatus.PAUSED, {"resume", "reduce_iterations", "stop_and_report"}),
         (JobStatus.COMPLETED, set()),
@@ -212,6 +215,67 @@ def test_shared_user_cannot_see_run_controls() -> None:
         ),
     )
     assert job_detail._available_run_controls(context) == set()  # type: ignore[arg-type]
+
+
+def test_add_idea_hidden_when_current_iteration_is_final() -> None:
+    context = SimpleNamespace(
+        is_owner=True,
+        job_info=SimpleNamespace(
+            status=JobStatus.RUNNING,
+            iterations_completed=4,
+            max_iterations=5,
+        ),
+    )
+    assert "add_idea" not in job_detail._available_run_controls(context)  # type: ignore[arg-type]
+
+
+def test_queue_job_idea_persists_without_lifecycle_transition() -> None:
+    owner_id = uuid4()
+    queued_call = object()
+    context = SimpleNamespace(
+        is_owner=True,
+        job_id="00000000-0000-0000-0000-000000000001",
+        job_manager=SimpleNamespace(),
+    )
+    queue_guidance = MagicMock(return_value=queued_call)
+    with (
+        patch.object(job_detail, "get_current_user_id", return_value=str(owner_id)),
+        patch.object(job_detail, "queue_job_guidance", new=queue_guidance),
+        patch.object(job_detail, "run_sync") as run_sync_mock,
+        patch.object(job_detail, "ui") as ui_mock,
+    ):
+        result = job_detail._queue_job_idea(context, "Inspect activity timing.")  # type: ignore[arg-type]
+
+    assert result is True
+    queue_guidance.assert_called_once_with(
+        context.job_id,
+        owner_id,
+        "Inspect activity timing.",
+    )
+    run_sync_mock.assert_called_once_with(queued_call)
+    ui_mock.notify.assert_called_once_with(
+        "Idea queued for the next iteration.",
+        type="positive",
+    )
+    assert vars(context.job_manager) == {}
+
+
+def test_queue_job_idea_rejects_non_owner_before_persistence() -> None:
+    context = SimpleNamespace(is_owner=False, job_id="job-1")
+    with (
+        patch.object(job_detail, "queue_job_guidance") as queue_guidance,
+        patch.object(job_detail, "run_sync") as run_sync_mock,
+        patch.object(job_detail, "ui") as ui_mock,
+    ):
+        result = job_detail._queue_job_idea(context, "A new direction")  # type: ignore[arg-type]
+
+    assert result is False
+    queue_guidance.assert_not_called()
+    run_sync_mock.assert_not_called()
+    ui_mock.notify.assert_called_once_with(
+        "Only the job owner can add ideas to this run.",
+        type="negative",
+    )
 
 
 def test_owner_action_calls_requested_manager_method() -> None:

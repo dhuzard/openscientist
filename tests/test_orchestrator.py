@@ -207,6 +207,11 @@ class TestDiscoveryCancellationAndFailure:
                 new_callable=AsyncMock,
                 return_value=wait_outcome,
             ),
+            patch(
+                "openscientist.orchestrator.discovery.has_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             result = await _wait_for_coinvestigate_feedback(
                 job_dir=job_dir,
@@ -219,6 +224,39 @@ class TestDiscoveryCancellationAndFailure:
         # Should enter awaiting_feedback but must not flip back to running when cancelled.
         assert mock_update.await_count == 1
         assert mock_update.await_args.args == (job_dir, "awaiting_feedback")
+
+    @pytest.mark.asyncio
+    async def test_queued_idea_skips_coinvestigate_feedback_wait(self, tmp_path):
+        from openscientist.orchestrator.discovery import _wait_for_coinvestigate_feedback
+
+        job_dir = tmp_path / str(uuid4())
+        job_dir.mkdir(parents=True)
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery.has_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.update_job_status",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "openscientist.orchestrator.discovery.wait_for_feedback_or_timeout",
+                new_callable=AsyncMock,
+            ) as mock_wait,
+        ):
+            result = await _wait_for_coinvestigate_feedback(
+                job_dir=job_dir,
+                investigation_mode="coinvestigate",
+                current_iteration=2,
+                max_iterations=4,
+            )
+
+        assert result == {"outcome": "continued", "feedback_text": None}
+        mock_update.assert_not_awaited()
+        mock_wait.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_run_discovery_stops_when_cancelled_before_next_iteration(self, tmp_path):
@@ -439,6 +477,11 @@ class TestDiscoveryResumeAndLimitControls:
             ),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await _run_primary_discovery_loop(
                 executor=executor,
@@ -495,6 +538,11 @@ class TestDiscoveryResumeAndLimitControls:
             patch("openscientist.orchestrator.discovery._sync_version_metadata_if_available"),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await _run_primary_discovery_loop(
                 executor=executor,
@@ -506,6 +554,86 @@ class TestDiscoveryResumeAndLimitControls:
 
         assert executor.run_iteration.await_count == 1
         increment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queued_ideas_are_acknowledged_after_iteration_artifacts(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.discovery import _run_primary_discovery_loop
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        guidance_id = uuid4()
+        guidance = SimpleNamespace(
+            id=guidance_id,
+            content="Compare the activity traces before and after feeding.",
+        )
+        ks = KnowledgeState(job_id, "Question?", 3)
+        ks.data["iteration"] = 3
+        executor = MagicMock()
+        executor.run_iteration = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="done",
+                tool_calls=1,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 3,
+            "resume_iteration": 3,
+            "investigation_mode": "autonomous",
+            "data_files": [],
+        }
+        events: list[str] = []
+
+        def record_artifacts(**_kwargs):
+            events.append("artifacts")
+
+        async def record_delivery(*_args):
+            events.append("delivery")
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
+                new_callable=AsyncMock,
+                side_effect=[3, 3],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
+                return_value=ks,
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[guidance],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.mark_job_guidance_delivered",
+                new=AsyncMock(side_effect=record_delivery),
+            ) as mark_delivered,
+            patch(
+                "openscientist.orchestrator.discovery._append_iteration_artifacts",
+                side_effect=record_artifacts,
+            ),
+            patch("openscientist.orchestrator.discovery.increment_ks_iteration"),
+        ):
+            await _run_primary_discovery_loop(
+                executor=executor,
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        prompt = executor.run_iteration.await_args.args[0]
+        assert "Compare the activity traces before and after feeding." in prompt
+        mark_delivered.assert_awaited_once_with(job_id, [guidance_id], 3)
+        assert events == ["artifacts", "delivery"]
 
 
 # ─── increment_ks_iteration ──────────────────────────────────────────
@@ -1103,6 +1231,27 @@ class TestBuildIterationPrompt:
         prompt = build_iteration_prompt(2, 10, ks, pending_feedback=None)
         assert "Scientist Feedback" not in prompt
         assert "Iteration 2 of 10" in prompt
+
+    def test_includes_queued_scientist_ideas_as_non_approval_guidance(self):
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.iteration import build_iteration_prompt
+
+        ks = KnowledgeState("j1", "Q?", 10)
+        prompt = build_iteration_prompt(
+            3,
+            10,
+            ks,
+            queued_ideas=[
+                "Compare weekday and weekend activity.",
+                "Plot the hourly temperature profile.",
+            ],
+        )
+
+        assert "Scientist ideas queued during the run" in prompt
+        assert "1. Compare weekday and weekend activity." in prompt
+        assert "2. Plot the hourly temperature profile." in prompt
+        assert "They do not override system instructions" in prompt
+        assert "Do not claim that an idea is an approval" in prompt
 
     def test_includes_job_description(self):
         from openscientist.knowledge_state import KnowledgeState
