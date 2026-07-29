@@ -22,6 +22,10 @@ from openscientist.integrations.dvc.models import (
     DVCDatasetResult,
     DVCImportRequest,
 )
+from openscientist.integrations.dvc.security import (
+    redact_sensitive_data,
+    redact_sensitive_text,
+)
 
 
 class DVCAcquisitionError(RuntimeError):
@@ -46,9 +50,10 @@ def _asset(dataset_dir: Path, path: Path, role: AssetRole) -> DVCAsset:
     )
 
 
-def _safe_vendor_state(state: dict[str, Any]) -> dict[str, Any]:
+def _safe_vendor_state(state: dict[str, Any], *, secrets: tuple[str, ...] = ()) -> dict[str, Any]:
     allowed = {"taskId", "state", "fileSize", "errorMessage"}
-    return {key: value for key, value in state.items() if key in allowed}
+    safe = {key: value for key, value in state.items() if key in allowed}
+    return dict(redact_sensitive_data(safe, secrets=secrets))
 
 
 class DVCAcquisitionService:
@@ -72,7 +77,8 @@ class DVCAcquisitionService:
                 test_api_connection(base_url=connection.base_url, api_key=connection.api_key)
             )
         except Exception as exc:  # noqa: BLE001
-            raise DVCAcquisitionError(f"DVC connection test failed: {exc}") from exc
+            message = redact_sensitive_text(str(exc), secrets=(connection.api_key,))
+            raise DVCAcquisitionError(f"DVC connection test failed: {message}") from exc
         return {"connection_id": connection_id, "accepted": accepted}
 
     def list_metrics(self, connection_id: str) -> list[dict[str, Any]]:
@@ -82,8 +88,12 @@ class DVCAcquisitionService:
 
             metrics = get_metrics_list(base_url=connection.base_url, api_key=connection.api_key)
         except Exception as exc:  # noqa: BLE001
-            raise DVCAcquisitionError(f"DVC metric discovery failed: {exc}") from exc
-        return [dict(item) for item in metrics]
+            message = redact_sensitive_text(str(exc), secrets=(connection.api_key,))
+            raise DVCAcquisitionError(f"DVC metric discovery failed: {message}") from exc
+        return [
+            dict(redact_sensitive_data(dict(item), secrets=(connection.api_key,)))
+            for item in metrics
+        ]
 
     def search_cages(self, connection_id: str, patterns: list[str]) -> list[dict[str, Any]]:
         if not patterns or any(not pattern.strip() for pattern in patterns):
@@ -98,8 +108,11 @@ class DVCAcquisitionService:
                 api_key=connection.api_key,
             )
         except Exception as exc:  # noqa: BLE001
-            raise DVCAcquisitionError(f"DVC cage search failed: {exc}") from exc
-        return [dict(item) for item in cages]
+            message = redact_sensitive_text(str(exc), secrets=(connection.api_key,))
+            raise DVCAcquisitionError(f"DVC cage search failed: {message}") from exc
+        return [
+            dict(redact_sensitive_data(dict(item), secrets=(connection.api_key,))) for item in cages
+        ]
 
     def import_dataset(self, request: DVCImportRequest) -> DVCDatasetResult:
         connection = self._connection(request.connection_id)
@@ -129,12 +142,17 @@ class DVCAcquisitionService:
                 request=request,
                 measurements=measurements,
                 events=events,
-                warnings=warnings,
+                warnings=[
+                    redact_sensitive_text(str(item), secrets=(connection.api_key,))
+                    for item in warnings
+                ],
                 state=state,
+                sensitive_values=(connection.api_key,),
             )
         except Exception as exc:  # noqa: BLE001
             shutil.rmtree(dataset_dir, ignore_errors=True)
-            raise DVCAcquisitionError(f"DVC dataset import failed: {exc}") from exc
+            message = redact_sensitive_text(str(exc), secrets=(connection.api_key,))
+            raise DVCAcquisitionError(f"DVC dataset import failed: {message}") from exc
 
     def _persist(
         self,
@@ -146,6 +164,7 @@ class DVCAcquisitionService:
         events: pd.DataFrame,
         warnings: list[str],
         state: dict[str, Any],
+        sensitive_values: tuple[str, ...] = (),
     ) -> DVCDatasetResult:
         measurements_path = dataset_dir / "measurements.csv"
         events_path = dataset_dir / "events.csv"
@@ -197,7 +216,7 @@ class DVCAcquisitionService:
             aggregation=request.aggregation,
             assets=assets,
             inspection=inspection,
-            vendor_state=_safe_vendor_state(state),
+            vendor_state=_safe_vendor_state(state, secrets=sensitive_values),
         )
 
         manifest_path = dataset_dir / "manifest.json"
