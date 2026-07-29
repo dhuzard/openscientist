@@ -98,8 +98,12 @@ is missing, stale, future-dated or bound to different context.
    bundle.
 6. Add authoritative GitHub CI, offline API-to-report fixtures and direct-UDWA
    parity checks.
-7. Complete a real Tecniplast DVC + FAIR-VCG end-to-end run with scientific
-   owner sign-off.
+7. ~~Complete a real Tecniplast DVC + FAIR-VCG end-to-end run with scientific
+   owner sign-off.~~ Completed locally on 2026-07-29 for three bounded,
+   non-contemporaneous `ACTIVATION` datasets. Authenticated approvals,
+   governed execution, direct-UDWA parity, plotting, and post-analysis
+   assessment all passed; evidence remains in the intentionally untracked job
+   workspace.
 
 The prioritized acceptance criteria and owner-ready TODOs are maintained in
 [DVC_POC.md](DVC_POC.md).

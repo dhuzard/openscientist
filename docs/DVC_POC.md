@@ -193,13 +193,13 @@ Acceptance criteria:
 
 #### DVC-104: Execute one live end-to-end validation run
 
-- [ ] Select a low-risk Tecniplast validation study and approved scientific
+- [x] Select a low-risk Tecniplast validation study and approved scientific
   question.
-- [ ] Record study context and resolve consequential unknowns.
-- [ ] Run acquisition, pre-analysis assessment, authenticated approval,
+- [x] Record study context and resolve consequential unknowns.
+- [x] Run acquisition, pre-analysis assessment, authenticated approval,
   governed analysis and post-analysis assessment.
-- [ ] Verify every result against direct UDWA output for identical inputs.
-- [ ] Archive the redacted run manifest, checks, discrepancies and sign-off.
+- [x] Verify every result against direct UDWA output for identical inputs.
+- [x] Archive the redacted run manifest, checks, discrepancies and sign-off.
 
 Acceptance criteria:
 
@@ -207,6 +207,16 @@ Acceptance criteria:
 - Numerical results match UDWA within declared tolerances.
 - Every claim, approval, input and output has inspectable lineage.
 - No credential appears in collected evidence.
+
+Completed locally on 2026-07-29 with authenticated scientific approval for
+three separate, bounded `ACTIVATION` datasets (`S81P-40332`, `S81P-40287`, and
+`S81P-40648`). All three governed `summarize_time_bins` executions returned 48
+complete hourly records without warnings and matched independent direct UDWA
+outputs under canonical JSON exact equality (zero discrepancies). The
+intentionally untracked job workspace contains
+`DVC_REAL_VALIDATION_REPORT.md`, `dvc_validation_manifest.json`,
+`dvc_udwa_parity.json`, the approval/checkpoint records, and the final plot.
+Nothing was pushed or deployed as part of this validation.
 
 ### P1 — Complete the usable product workflow
 

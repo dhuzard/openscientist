@@ -95,6 +95,13 @@ deployment and live acceptance:
 - [ ] Complete a live pre- and post-analysis assessment against a bounded
   Tecniplast validation dataset.
 
+Local Compose acceptance completed on 2026-07-29: the pinned FAIR-VCG Mentor
+container passed readiness checks on the private
+`openscientist-agent-runtime` network, the real job completed pre-analysis
+FAIR/PREPARE/ARRIVE assessment, and three bounded datasets completed
+post-analysis FAIR/ARRIVE/MNMS assessment. This validates the local integration;
+the unchecked items above remain production deployment and operational gates.
+
 A deployment can place both services on the same private Docker network or
 expose FAIR-VCG through an internal HTTPS endpoint. FAIR-VCG availability must
 fail closed before approval-dependent analysis proceeds.
