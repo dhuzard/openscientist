@@ -148,6 +148,24 @@ class TestMcpConfig:
         assert server["env"]["OPENSCIENTIST_JOB_ID"] == tmp_path.resolve().name
         assert server["env"]["OPENSCIENTIST_USE_HYPOTHESES"] == "1"
 
+    def test_inherited_env_is_referenced_by_name_not_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The job dir is a downloadable artifact, so the config must not hold
+        secret values. omp substitutes an env value whose entry names a set
+        variable, so the name alone is enough to reach the tools server."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:hunter2@db:5432/os")
+        monkeypatch.setenv("OPENSCIENTIST_SECRET_KEY", "s3cret-master-key")
+        agent = _agent(tmp_path)
+        agent._write_mcp_config()
+        raw = (tmp_path / ".omp" / "mcp.json").read_text()
+        env = json.loads(raw)["mcpServers"]["openscientist-tools"]["env"]
+
+        assert env["DATABASE_URL"] == "DATABASE_URL"
+        assert env["OPENSCIENTIST_SECRET_KEY"] == "OPENSCIENTIST_SECRET_KEY"
+        assert "hunter2" not in raw
+        assert "s3cret-master-key" not in raw
+
 
 class TestRunIteration:
     @pytest.mark.asyncio

@@ -51,6 +51,46 @@ class TestCreateArtifactsZip:
             assert "report.md" in names
             assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
 
+    def test_excludes_omp_runtime_state_and_credential_vault(self, tmp_path):
+        """The omp harness writes its MCP config and a copy of the credential
+        vault into the job dir, so neither may reach a downloadable archive."""
+        omp_dir = tmp_path / ".omp"
+        omp_dir.mkdir()
+        (omp_dir / "mcp.json").write_text('{"env": {"OPENSCIENTIST_EXEC_TOKEN": "job-1.tok"}}')
+        (omp_dir / "session").mkdir()
+        (omp_dir / "session" / "turn.jsonl").write_text("{}")
+        vault = tmp_path / ".omp-home"
+        vault.mkdir()
+        (vault / "agent.db").write_bytes(b"SQLite format 3\x00")
+        (tmp_path / "report.md").write_text("# Report")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+        assert "report.md" in names
+        assert not any(n == ".omp" or n.startswith(".omp/") for n in names)
+        assert not any(n == ".omp-home" or n.startswith(".omp-home/") for n in names)
+
+    def test_no_excluded_directory_ever_reaches_the_archive(self, tmp_path):
+        """Guards the denylist itself: every entry must actually be pruned, so a
+        future harness cannot add a directory here and leave it unenforced."""
+        from openscientist.artifact_packager import _EXCLUDE_DIRS
+
+        for name in _EXCLUDE_DIRS:
+            excluded = tmp_path / name
+            excluded.mkdir()
+            (excluded / "secret.txt").write_text("credential")
+        (tmp_path / "report.md").write_text("# Report")
+
+        buf = create_artifacts_zip(tmp_path, "j1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+        assert "report.md" in names
+        for name in _EXCLUDE_DIRS:
+            assert not any(n == name or n.startswith(f"{name}/") for n in names), name
+
     def test_excludes_symlinks_to_runtime_state(self, tmp_path):
         codex_home = tmp_path / ".codex"
         codex_home.mkdir()

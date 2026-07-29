@@ -145,9 +145,22 @@ class OmpAgent(AbstractAgent[Provider]):
         return self._model_override or self._provider.effective_model_name()
 
     def _mcp_env(self) -> dict[str, str]:
-        # omp gives stdio MCP servers the parent env, so forward it plus the
-        # per-job overlay (matching the codex backend).
-        env = dict(os.environ)
+        """Env table for the tools MCP server, written into ``.omp/mcp.json``.
+
+        Inherited keys are passed as variable *names*, not values. When an omp
+        stdio ``env`` value names a set environment variable, omp substitutes
+        that variable's value just before launching the server, so the config on
+        disk never holds the secret. This matters because the job directory is a
+        downloadable artifact and the tools server legitimately needs
+        ``DATABASE_URL`` and the exec-broker token.
+
+        The per-job overlay is written literally, because those values are
+        computed rather than inherited and a name reference could not resolve
+        them. The chat path threads a per-job exec token through that overlay,
+        so this alone is not sufficient: ``.omp`` is also excluded from packaged
+        artifacts in ``artifact_packager``.
+        """
+        env = {name: name for name in os.environ}
         env.update(self._job_env_overlay(self._job_dir()))
         return env
 
