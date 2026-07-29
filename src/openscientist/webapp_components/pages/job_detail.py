@@ -29,7 +29,7 @@ from openscientist.auth import (
 )
 from openscientist.database.models import CostRecord
 from openscientist.database.rls import set_current_user
-from openscientist.database.session import get_session_ctx
+from openscientist.database.session import get_session_ctx, get_thread_safe_session_ctx
 from openscientist.job.types import JobInfo, JobStatus
 from openscientist.job_chat import (
     get_chat_history,
@@ -103,7 +103,7 @@ def _load_knowledge_state(job_id: str, user_id: str) -> tuple[dict[str, Any] | N
 async def _load_job_cost_records(job_id: str, user_id: str) -> list[CostRecord]:
     """Load model-turn usage visible to this user through job-scoped RLS."""
     try:
-        async with get_session_ctx() as session:
+        async with get_thread_safe_session_ctx() as session:
             await set_current_user(session, UUID(user_id))
             result = await session.execute(
                 select(CostRecord)

@@ -1,9 +1,10 @@
-.PHONY: start stop restart build build-executor rebuild logs shell clean clean-jobs reset-db help deploy status
+.PHONY: start start-fair stop restart restart-fair build build-executor rebuild logs shell clean clean-jobs reset-db help deploy status fair-status
 
 # Deployment configuration
 DEPLOY_HOST ?= gassh
 DEPLOY_DIR ?= ~/openscientist
 COMPOSE_FILE ?= docker-compose.yml
+FAIR_COMPOSE_FILES ?= -f docker-compose.yml -f docker-compose.fair-vcg.yml
 
 # Load .env if present so OPENSCIENTIST_*_IMAGE values steer build tags
 # (same source of truth as docker-compose substitution).
@@ -26,8 +27,10 @@ help:
 	@echo "  make build      - Build all Docker images (base, main, agent, executor)"
 	@echo "  make build-executor - Build only the isolated code executor image"
 	@echo "  make start      - Start containers"
+	@echo "  make start-fair - Start OpenScientist with the FAIR-VCG runtime overlay"
 	@echo "  make stop       - Stop containers"
 	@echo "  make restart    - Restart containers (no rebuild)"
+	@echo "  make restart-fair - Reconcile the FAIR-VCG stack without dropping its overlay"
 	@echo "  make rebuild    - Rebuild images and restart"
 	@echo "  make logs       - Tail container logs"
 	@echo "  make shell      - Open shell in main container"
@@ -42,12 +45,22 @@ start:
 	docker compose -f $(COMPOSE_FILE) up -d --remove-orphans
 	@echo "OpenScientist started at http://localhost:8080"
 
+start-fair:
+	@echo "Starting OpenScientist with FAIR-VCG..."
+	docker compose $(FAIR_COMPOSE_FILES) up -d --remove-orphans
+	@echo "OpenScientist and FAIR-VCG started at http://localhost:8080"
+
 stop:
 	@echo "Stopping OpenScientist..."
 	docker compose -f $(COMPOSE_FILE) down --remove-orphans
 	@echo "OpenScientist stopped"
 
 restart: stop start
+
+restart-fair:
+	@echo "Reconciling OpenScientist with the FAIR-VCG runtime overlay..."
+	docker compose $(FAIR_COMPOSE_FILES) up -d --remove-orphans
+	@echo "OpenScientist and FAIR-VCG reconciled at http://localhost:8080"
 
 build:
 	@echo "Building base image (Python, uv) as $(BASE_IMAGE)..."
@@ -116,6 +129,9 @@ reset-db:
 status:
 	@echo "Job status:"
 	docker compose -f $(COMPOSE_FILE) exec openscientist python -m openscientist.job_manager summary
+
+fair-status:
+	docker compose $(FAIR_COMPOSE_FILES) ps
 
 # Deploy to production server
 deploy:

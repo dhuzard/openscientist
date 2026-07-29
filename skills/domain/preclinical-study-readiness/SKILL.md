@@ -81,6 +81,62 @@ framework-specific details that the schema cannot transport as unresolved
 questions or evidence references, and say that they were not evaluated from
 the submitted context.
 
+Use this canonical structure. Replace the example values and sources with
+evidence-backed study values; keep unavailable values as `{"status":"unknown"}`
+without a `value`. The field is named `status`, not `state`. Do not flatten the
+`design`, `animals`, `environment`, or `acquisition` sections.
+
+```json
+{
+  "schema_version": "openscientist-preclinical-context/0.1",
+  "study_id": "example-study-id",
+  "objective": {
+    "value": "Example bounded analysis objective",
+    "status": "recorded",
+    "source": "scientist-provided job specification"
+  },
+  "design": {
+    "mode": "exploratory",
+    "assignment_unit": {"status": "unknown"},
+    "experimental_unit": {
+      "value": "cage",
+      "status": "recorded",
+      "source": "scientist-provided job specification"
+    },
+    "observational_unit": {"status": "unknown"},
+    "analysis_unit": {"status": "unknown"},
+    "randomization": {"status": "unknown"},
+    "blinding": {"status": "unknown"},
+    "exclusion_policy": {"status": "unknown"}
+  },
+  "animals": {
+    "species": {"status": "unknown"},
+    "strain": {"status": "unknown"},
+    "sex": {"status": "unknown"},
+    "age": {"status": "unknown"},
+    "occupancy": {"status": "unknown"}
+  },
+  "environment": {
+    "timezone": {"status": "unknown"},
+    "light_schedule": {"status": "unknown"},
+    "housing": {"status": "unknown"},
+    "husbandry": {"status": "unknown"}
+  },
+  "acquisition": {
+    "system": {"status": "unknown"},
+    "software_version": {"status": "unknown"},
+    "metric_contract": {"status": "unknown"},
+    "temporal_resolution": {"status": "unknown"}
+  },
+  "asset_ids": [],
+  "evidence_ids": []
+}
+```
+
+The dataset manifest, not this strict context object, binds the cage IDs,
+metric, aggregation, and time bounds. Do not add `cage_id`, `start`, `stop`, or
+arbitrary metadata keys to the context.
+
 ## Ask efficient questions
 
 Ask in small, prioritized batches. Start with facts that can change or block the

@@ -5,6 +5,7 @@ import yaml
 from openscientist.integrations.fair_prepare import FAIR_VCG_PINNED_COMMIT
 
 OVERLAY = Path(__file__).parents[2] / "docker-compose.fair-vcg.yml"
+MAKEFILE = Path(__file__).parents[2] / "Makefile"
 
 
 def _compose() -> dict:
@@ -51,3 +52,15 @@ def test_trusted_gateway_build_receives_private_udwa_as_a_secret():
     assert build["args"]["INSTALL_UDWA"] == "true"
     assert build["secrets"] == ["github_token"]
     assert compose["secrets"]["github_token"]["environment"] == "GITHUB_TOKEN"
+
+
+def test_fair_make_targets_never_drop_the_runtime_overlay():
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+
+    assert (
+        "FAIR_COMPOSE_FILES ?= -f docker-compose.yml -f docker-compose.fair-vcg.yml"
+        in makefile
+    )
+    for target in ("start-fair:", "restart-fair:", "fair-status:"):
+        section = makefile.split(target, 1)[1].split("\n\n", 1)[0]
+        assert "docker compose $(FAIR_COMPOSE_FILES)" in section

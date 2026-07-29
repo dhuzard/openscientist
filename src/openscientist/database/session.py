@@ -191,6 +191,32 @@ get_session_ctx = asynccontextmanager(get_session)
 
 
 @asynccontextmanager
+async def get_thread_safe_session_ctx() -> AsyncGenerator[AsyncSession, None]:
+    """Provide an RLS-enforced session safe in a newly created event loop.
+
+    Synchronous NiceGUI render paths use ``run_sync()``, which executes their
+    coroutine in a worker thread with its own event loop. Such code must not use
+    the pooled main-loop engine: asyncpg connections are bound to the loop that
+    created them. A fresh NullPool-backed factory avoids contaminating the main
+    request pool while preserving the same fail-closed RLS lifecycle as
+    :func:`get_session`.
+    """
+    factory = _create_fresh_session_factory()
+    async with factory() as session:
+        try:
+            await _set_app_role(session)
+            await _clear_rls_user_context(session)
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await _clear_rls_user_context(session)
+            await _reset_role(session)
+            await session.close()
+
+
+@asynccontextmanager
 async def get_admin_session() -> AsyncGenerator[AsyncSession, None]:
     """
     Dependency to provide a database session with admin privileges.

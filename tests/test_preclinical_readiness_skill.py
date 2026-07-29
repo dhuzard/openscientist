@@ -1,5 +1,7 @@
 """FAIR/PREPARE/ARRIVE readiness instructions for both agent backends."""
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ import yaml  # type: ignore[import-untyped]
 
 from openscientist.agent.skills import claude_skill_markdown, codex_skill_markdown
 from openscientist.database.models import Skill
+from openscientist.preclinical_context.models import PreclinicalStudyContext
 from openscientist.skill_ingestion import SkillParser
 
 SKILL_DIR = Path(__file__).parents[1] / "skills" / "domain" / "preclinical-study-readiness"
@@ -75,3 +78,15 @@ def test_skill_is_self_contained_for_openscientist_transport() -> None:
 
     assert "references/" not in content
     assert metadata["interface"]["default_prompt"].startswith("Use $preclinical-study-readiness")
+
+
+def test_skill_embeds_a_valid_strict_context_contract() -> None:
+    content = SKILL_PATH.read_text(encoding="utf-8")
+    match = re.search(r"```json\n(\{.*?\})\n```", content, re.DOTALL)
+
+    assert match is not None
+    context = PreclinicalStudyContext.model_validate(json.loads(match.group(1)))
+    assert context.design.experimental_unit.value == "cage"
+    assert context.animals.species.status == "unknown"
+    assert '"state"' not in match.group(1)
+    assert "`cage_id`, `start`, `stop`" in content

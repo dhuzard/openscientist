@@ -113,7 +113,12 @@ def dvc_import_dataset(
 
 @mcp.tool()
 def dvc_assess_pre_analysis(dataset_id: str, context: dict[str, Any]) -> dict[str, Any]:
-    """Assess study context with FAIR, PREPARE and ARRIVE before analysis."""
+    """Assess a strict nested study context with FAIR, PREPARE and ARRIVE.
+
+    Context uses EvidenceValue ``status`` (not ``state``) and nested ``design``,
+    ``animals``, ``environment``, and ``acquisition`` sections. Cage IDs and
+    import time bounds belong to the immutable dataset manifest, not context.
+    """
     try:
         study_context = PreclinicalStudyContext.model_validate(context)
         result = _assessment_service().pre_analysis(dataset_id, study_context)

@@ -48,7 +48,7 @@ async def test_load_job_cost_records_applies_user_rls_and_returns_turns() -> Non
     session_context.__aexit__ = AsyncMock(return_value=None)
 
     with (
-        patch.object(job_detail, "get_session_ctx", return_value=session_context),
+        patch.object(job_detail, "get_thread_safe_session_ctx", return_value=session_context),
         patch.object(job_detail, "set_current_user", new=AsyncMock()) as set_user,
     ):
         result = await job_detail._load_job_cost_records(str(job_id), str(user_id))
