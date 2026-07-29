@@ -2797,6 +2797,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-magic" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "scanpy" },
     { name = "scikit-learn" },
@@ -2827,6 +2828,7 @@ dev = [
     { name = "types-docker" },
     { name = "types-fpdf2" },
     { name = "types-openpyxl" },
+    { name = "types-pyyaml" },
     { name = "types-requests" },
     { name = "types-seaborn" },
 ]
@@ -2865,6 +2867,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3.0" },
     { name = "python-magic", specifier = ">=0.4.27" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "scanpy", specifier = ">=1.12.0" },
     { name = "scikit-learn", specifier = ">=1.6.0" },
@@ -2895,6 +2898,7 @@ dev = [
     { name = "types-docker", specifier = ">=7.0.0" },
     { name = "types-fpdf2", specifier = ">=2.7.0" },
     { name = "types-openpyxl", specifier = ">=3.1.0" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
     { name = "types-requests", specifier = ">=2.31.0" },
     { name = "types-seaborn", specifier = ">=0.13.0" },
 ]
@@ -4501,6 +4505,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b7/b8/c6ff3b10c2f7b9897650af746f0dc6c5cddf054db857bc79d621f53c7d22/types_paramiko-4.0.0.20250822.tar.gz", hash = "sha256:1b56b0cbd3eec3d2fd123c9eb2704e612b777e15a17705a804279ea6525e0c53", size = 28730, upload-time = "2025-08-22T03:03:43.262Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/a1/b3774ed924a66ee2c041224d89c36f0c21f4f6cf75036d6ee7698bf8a4b9/types_paramiko-4.0.0.20250822-py3-none-any.whl", hash = "sha256:55bdb14db75ca89039725ec64ae3fa26b8d57b6991cfb476212fa8f83a59753c", size = 38833, upload-time = "2025-08-22T03:03:42.072Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260724"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b", size = 17893, upload-time = "2026-07-24T04:58:43.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453", size = 20312, upload-time = "2026-07-24T04:58:42.486Z" },
 ]
 
 [[package]]
