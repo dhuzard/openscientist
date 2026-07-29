@@ -36,11 +36,7 @@ class DVCGatewayError(RuntimeError):
 def without_dvc_credentials(environment: dict[str, str]) -> dict[str, str]:
     """Remove direct DVC settings before crossing into an agent/MCP process."""
 
-    return {
-        key: value
-        for key, value in environment.items()
-        if not key.upper().startswith("DVC_")
-    }
+    return {key: value for key, value in environment.items() if not key.upper().startswith("DVC_")}
 
 
 def container_dvc_gateway_base_url() -> str:

@@ -80,7 +80,9 @@ def _exact_arguments(arguments: dict[str, Any], allowed: set[str]) -> None:
 def _connection_id(value: object) -> str:
     connection_id = str(value).strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", connection_id):
-        raise ValueError("connection_id must be 1-100 letters, numbers, dots, dashes or underscores.")
+        raise ValueError(
+            "connection_id must be 1-100 letters, numbers, dots, dashes or underscores."
+        )
     return connection_id
 
 

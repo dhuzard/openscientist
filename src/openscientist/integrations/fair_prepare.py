@@ -75,9 +75,7 @@ def validate_fair_prepare_url(value: str) -> str:
     candidate = value.strip().rstrip("/")
     parsed = urlsplit(candidate)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise FairPrepareError(
-            "FAIR_PREPARE_URL must be an absolute http(s) service URL."
-        )
+        raise FairPrepareError("FAIR_PREPARE_URL must be an absolute http(s) service URL.")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise FairPrepareError(
             "FAIR_PREPARE_URL must not contain credentials, a query, or a fragment."
@@ -225,9 +223,7 @@ class HttpFairPrepareProvider:
         timeout: float = 60.0,
         client: httpx.Client | None = None,
     ) -> None:
-        configured_url = (
-            base_url or os.getenv("FAIR_PREPARE_URL") or DEFAULT_FAIR_PREPARE_URL
-        )
+        configured_url = base_url or os.getenv("FAIR_PREPARE_URL") or DEFAULT_FAIR_PREPARE_URL
         self.base_url = validate_fair_prepare_url(configured_url)
         self.timeout = timeout
         self.client = client or httpx.Client(timeout=timeout)
@@ -283,42 +279,30 @@ class HttpFairPrepareProvider:
     @staticmethod
     def _mapping(payload: Any, *, endpoint: str) -> dict[str, Any]:
         if not isinstance(payload, dict):
-            raise FairPrepareError(
-                f"FAIR-VCG {endpoint} returned an incompatible response."
-            )
+            raise FairPrepareError(f"FAIR-VCG {endpoint} returned an incompatible response.")
         return payload
 
     @staticmethod
     def _dataset_id(payload: dict[str, Any]) -> str:
         dataset_id = payload.get("dataset_id")
         if not isinstance(dataset_id, str) or not dataset_id.strip():
-            raise FairPrepareError(
-                "FAIR-VCG /api/upload response is missing a valid dataset_id."
-            )
+            raise FairPrepareError("FAIR-VCG /api/upload response is missing a valid dataset_id.")
         return dataset_id
 
     @staticmethod
     def _validate_fair_score(payload: dict[str, Any]) -> None:
         if not isinstance(payload.get("fair_score"), (int, float)):
-            raise FairPrepareError(
-                "FAIR-VCG fair-score response is missing numeric fair_score."
-            )
+            raise FairPrepareError("FAIR-VCG fair-score response is missing numeric fair_score.")
         for dimension in ("findable", "accessible", "interoperable", "reusable"):
             score = payload.get(dimension)
             if not isinstance(score, dict):
-                raise FairPrepareError(
-                    f"FAIR-VCG fair-score response is missing {dimension}."
-                )
+                raise FairPrepareError(f"FAIR-VCG fair-score response is missing {dimension}.")
             if not isinstance(score.get("score"), (int, float)) or not isinstance(
                 score.get("max_score"), (int, float)
             ):
-                raise FairPrepareError(
-                    f"FAIR-VCG fair-score {dimension} values are incompatible."
-                )
+                raise FairPrepareError(f"FAIR-VCG fair-score {dimension} values are incompatible.")
             if not isinstance(score.get("criteria"), dict):
-                raise FairPrepareError(
-                    f"FAIR-VCG fair-score {dimension}.criteria is incompatible."
-                )
+                raise FairPrepareError(f"FAIR-VCG fair-score {dimension}.criteria is incompatible.")
 
     @staticmethod
     def _validate_template(
@@ -327,9 +311,7 @@ class HttpFairPrepareProvider:
         framework: str,
     ) -> None:
         if payload.get("template_id") != framework:
-            raise FairPrepareError(
-                f"FAIR-VCG template response did not confirm {framework}."
-            )
+            raise FairPrepareError(f"FAIR-VCG template response did not confirm {framework}.")
         if not isinstance(payload.get("conformance_report"), list):
             raise FairPrepareError(
                 f"FAIR-VCG template {framework} returned an incompatible report."
@@ -369,9 +351,7 @@ class HttpFairPrepareProvider:
                 )
 
         synthetic_csv = (
-            b"subject_id,group,activity_count\n"
-            b"synthetic-1,control,1\n"
-            b"synthetic-2,treatment,2\n"
+            b"subject_id,group,activity_count\nsynthetic-1,control,1\nsynthetic-2,treatment,2\n"
         )
         uploaded = self._mapping(
             self._request(
