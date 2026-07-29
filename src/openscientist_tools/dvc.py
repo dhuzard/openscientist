@@ -96,7 +96,7 @@ def dvc_import_dataset(
     aggregation: Literal["MINUTE", "HOUR"] = "MINUTE",
     connection_id: str = "default",
 ) -> dict[str, Any]:
-    """Import one metric for a bounded cage/time window through UDWA."""
+    """Import a bounded metric through UDWA using cage humanReadableId values, not UUIDs."""
     try:
         request = DVCImportRequest(
             connection_id=connection_id,

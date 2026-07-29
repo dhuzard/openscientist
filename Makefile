@@ -1,4 +1,4 @@
-.PHONY: start stop restart build rebuild logs shell clean clean-jobs reset-db help deploy status
+.PHONY: start stop restart build build-executor rebuild logs shell clean clean-jobs reset-db help deploy status
 
 # Deployment configuration
 DEPLOY_HOST ?= gassh
@@ -24,6 +24,7 @@ help:
 	@echo ""
 	@echo "Docker:"
 	@echo "  make build      - Build all Docker images (base, main, agent, executor)"
+	@echo "  make build-executor - Build only the isolated code executor image"
 	@echo "  make start      - Start containers"
 	@echo "  make stop       - Stop containers"
 	@echo "  make restart    - Restart containers (no rebuild)"
@@ -55,11 +56,14 @@ build:
 	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f $(COMPOSE_FILE) build \
 		--build-arg OPENSCIENTIST_COMMIT=$$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") \
 		--build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
-	@echo "Building executor image as $(EXECUTOR_IMAGE)..."
-	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -f Dockerfile.executor -t $(EXECUTOR_IMAGE) .
+	$(MAKE) build-executor
 	@echo "Building agent image as $(AGENT_IMAGE)..."
 	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -f Dockerfile.agent -t $(AGENT_IMAGE) .
 	@echo "All images built: $(BASE_IMAGE), openscientist, $(EXECUTOR_IMAGE), $(AGENT_IMAGE)"
+
+build-executor:
+	@echo "Building executor image as $(EXECUTOR_IMAGE)..."
+	docker build --platform linux/amd64 -f Dockerfile.executor -t $(EXECUTOR_IMAGE) .
 
 rebuild: build
 	docker compose -f $(COMPOSE_FILE) down --remove-orphans

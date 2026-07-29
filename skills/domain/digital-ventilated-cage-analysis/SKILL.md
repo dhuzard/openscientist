@@ -85,7 +85,10 @@ review before it controls an analysis.
 
 Follow this governed MCP sequence exactly:
 
-1. Call `dvc_import_dataset`.
+1. Resolve each requested cage with `dvc_search_cages`, then call
+   `dvc_import_dataset`. Pass the returned `humanReadableId` values (for
+   example, `S81P-40332`) as `cage_ids`; the Tecniplast import resource
+   contract does not accept the cage UUID in that field.
 2. Call `dvc_assess_pre_analysis` with the imported `dataset_id` and exact study
    context.
 3. For an operation that requires approval, request authenticated approval

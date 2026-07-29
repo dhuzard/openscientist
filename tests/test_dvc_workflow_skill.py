@@ -56,3 +56,5 @@ def test_backend_skill_prescribes_exact_fail_closed_dvc_sequence(render):
     assert "Do not skip or reorder checkpoints" in rendered
     assert "reuse an approval for changed inputs" in normalized
     assert "status: completed" in rendered
+    assert "humanReadableId" in rendered
+    assert "does not accept the cage UUID" in rendered
