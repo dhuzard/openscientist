@@ -117,25 +117,50 @@ def stub_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class TestBuildArgs:
     def test_core_flags_present(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path)
-        args = agent._build_args(tmp_path / "sp.md", tmp_path / "turn.md")
+        args = agent._build_args(tmp_path / "sp.md", tmp_path / "turn.md", tmp_path / "c.yml")
         assert "-p" in args
         assert "--mode=json" in args
         assert "--auto-approve" in args
         assert f"--cwd={tmp_path.resolve()}" in args
         assert f"--system-prompt={tmp_path / 'sp.md'}" in args
         assert f"--session-dir={tmp_path.resolve() / '.omp' / 'session'}" in args
+        assert f"--config={tmp_path / 'c.yml'}" in args
         assert "--model=claude-omp-test" in args
         assert args[-1] == f"@{tmp_path / 'turn.md'}"
 
+    def test_code_execution_tools_are_withheld(self, tmp_path: Path) -> None:
+        """Analysis must go through execute_code, which runs in the sandboxed
+        executor and captures figures, not omp's in-container code tools."""
+        agent = _agent(tmp_path)
+        flag = next(
+            a for a in agent._build_args(tmp_path, tmp_path, tmp_path) if a.startswith("--tools=")
+        )
+        enabled = set(flag.removeprefix("--tools=").split(","))
+        assert "write" in enabled, "write is how omp reaches MCP tools"
+        assert enabled.isdisjoint({"eval", "python", "bash", "notebook"})
+
     def test_resume_only_when_session_known(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path)
-        assert not any(a.startswith("--resume=") for a in agent._build_args(tmp_path, tmp_path))
+        args = agent._build_args(tmp_path, tmp_path, tmp_path)
+        assert not any(a.startswith("--resume=") for a in args)
         agent._session_id = "SID-xyz"
-        assert "--resume=SID-xyz" in agent._build_args(tmp_path, tmp_path)
+        assert "--resume=SID-xyz" in agent._build_args(tmp_path, tmp_path, tmp_path)
 
     def test_model_override_wins(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path, model_override="opus-override")
-        assert "--model=opus-override" in agent._build_args(tmp_path, tmp_path)
+        assert "--model=opus-override" in agent._build_args(tmp_path, tmp_path, tmp_path)
+
+
+class TestOmpConfigOverlay:
+    def test_disables_xdev_so_mcp_tools_are_callable(self, tmp_path: Path) -> None:
+        """With xdev on, MCP tools are xd:// devices and the shared prompts'
+        plain tool names resolve to nothing."""
+        import yaml
+
+        agent = _agent(tmp_path)
+        path = agent._write_omp_config()
+        assert path == tmp_path.resolve() / ".omp" / "omp-config.yml"
+        assert yaml.safe_load(path.read_text()) == {"tools": {"xdev": False}}
 
 
 class TestMcpConfig:

@@ -26,6 +26,7 @@ _STUB_FRAGMENTS = BackendFragments(
     builtin_read_tool_short="the read tool",
     search_skills_doc="",
     skills_discovery_note="",
+    mcp_tool_prefix="",
 )
 
 

@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import yaml
+
 from openscientist.agent.base import (
     AbstractAgent,
     AgentBackend,
@@ -181,6 +183,23 @@ class OmpAgent(AbstractAgent[Provider]):
         }
         (omp_dir / "mcp.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
+    def _write_omp_config(self) -> Path:
+        """Write the per-run omp config overlay and return its path.
+
+        ``tools.xdev`` defaults on, which mounts MCP tools as ``xd://`` devices
+        driven through ``write`` instead of exposing them as callable tools. The
+        shared prompts name the openscientist tools plainly (as Claude and codex
+        see them), so disabling it keeps one tool vocabulary across backends
+        rather than teaching omp a second calling convention. The cost is that
+        every enabled tool's schema ships on each request, which is why
+        ``_OMP_ENABLED_TOOLS`` is a short list.
+        """
+        omp_dir = self._omp_dir()
+        omp_dir.mkdir(parents=True, exist_ok=True)
+        path = omp_dir / "omp-config.yml"
+        path.write_text(yaml.safe_dump({"tools": {"xdev": False}}), encoding="utf-8")
+        return path
+
     def _write_system_prompt(self) -> Path:
         omp_dir = self._omp_dir()
         omp_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +215,21 @@ class OmpAgent(AbstractAgent[Provider]):
         path.write_text(prompt, encoding="utf-8")
         return path
 
+    def _write_omp_model_catalog(self) -> None:
+        """Write the active provider's ``models.yml`` into the omp home, if any."""
+        catalog = self._provider.omp_model_catalog()
+        if not catalog:
+            return
+        home = self._omp_home()
+        if not home.exists():
+            # Only when we create it: the vault provisioner already made it
+            # agent-writable, and chmod on a root-owned dir fails for the agent.
+            home.mkdir(parents=True, exist_ok=True)
+            home.chmod(0o777)
+        path = home / "models.yml"
+        path.write_text(yaml.safe_dump(dict(catalog), sort_keys=False), encoding="utf-8")
+        logger.info("Wrote omp model catalog to %s", path)
+
     def _build_subprocess_env(self) -> dict[str, str]:
         """omp process env: inherited env plus provider auth, the per-job overlay,
         and the proxy base URL when active. The container env is overlaid so auth
@@ -207,6 +241,11 @@ class OmpAgent(AbstractAgent[Provider]):
         env.update(provider_settings.get_container_env_vars())
         env.update(self._job_env_overlay(self._job_dir()))
 
+        # Declare a self-hosted model to omp. Its built-in catalog knows hosted
+        # APIs only, so without this omp cannot resolve --model and fails with
+        # "Model ... not found" before ever reaching the server.
+        self._write_omp_model_catalog()
+
         # Use the provisioned vault (e.g. ChatGPT subscription) as omp's home.
         omp_home = self._omp_home()
         if omp_home.is_dir():
@@ -217,7 +256,25 @@ class OmpAgent(AbstractAgent[Provider]):
             env.setdefault(key, value)
         return env
 
-    def _build_args(self, system_prompt_path: Path, prompt_path: Path) -> list[str]:
+    #: omp built-in tools the discovery loop may use. ``--tools`` is an enable
+    #: list, so everything absent here is off, notably omp's own code execution.
+    #: Analysis MUST go through the ``execute_code`` MCP tool: it runs in the
+    #: sandboxed executor container and captures figures into the report, whereas
+    #: omp's ``eval`` runs inside the agent container and only renders figures
+    #: inline, so its plots never reach the job artifacts. ``write`` is required:
+    #: omp invokes MCP tools by writing JSON to their ``xd://`` device.
+    _OMP_ENABLED_TOOLS: ClassVar[tuple[str, ...]] = (
+        "read",
+        "write",
+        "edit",
+        "grep",
+        "glob",
+        "todo",
+    )
+
+    def _build_args(
+        self, system_prompt_path: Path, prompt_path: Path, config_path: Path
+    ) -> list[str]:
         job_dir = self._job_dir()
         args = [
             _resolve_omp_bin(),
@@ -227,6 +284,8 @@ class OmpAgent(AbstractAgent[Provider]):
             "--no-lsp",
             "--no-pty",
             "--auto-approve",
+            f"--config={config_path}",
+            f"--tools={','.join(self._OMP_ENABLED_TOOLS)}",
             f"--cwd={job_dir}",
             f"--session-dir={self._omp_dir() / 'session'}",
             f"--system-prompt={system_prompt_path}",
@@ -286,8 +345,9 @@ class OmpAgent(AbstractAgent[Provider]):
         """Spawn omp for one turn, parse its JSON stream, build the result."""
         system_prompt_path = self._write_system_prompt()
         self._write_mcp_config()
+        config_path = self._write_omp_config()
         prompt_path = self._write_turn_prompt(prompt)
-        args = self._build_args(system_prompt_path, prompt_path)
+        args = self._build_args(system_prompt_path, prompt_path, config_path)
 
         proc = await asyncio.create_subprocess_exec(
             *args,

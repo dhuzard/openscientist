@@ -17,4 +17,6 @@ CODEX_FRAGMENTS = BackendFragments(
     builtin_read_tool_short="the built-in file-reading tool",
     search_skills_doc="",
     skills_discovery_note="",
+    # Codex exposes the MCP tools under their bare names.
+    mcp_tool_prefix="",
 )
