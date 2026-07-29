@@ -26,7 +26,9 @@ class _Provider(StubClaudeProvider):
 
 
 # Canned stream: user, assistant+toolCall, toolResult, final assistant.
-_STREAM = [
+# Annotated: the entries are heterogeneous, so mypy would widen the element type
+# to object and reject passing this to _write_stub.
+_STREAM: list[dict[str, object]] = [
     {"type": "session", "id": "SID-abc123"},
     {"type": "agent_start"},
     {
