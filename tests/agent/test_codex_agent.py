@@ -123,6 +123,30 @@ def test_mcp_env_merges_tool_server_env(tmp_path: Path) -> None:
     assert agent._mcp_env()["OPENSCIENTIST_EXEC_TOKEN"] == "job-9.tok"
 
 
+def test_mcp_env_never_serializes_dvc_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DVC_API_KEY", "must-never-enter-codex-config")
+    monkeypatch.setenv("DVC_BASE_URL", "https://vendor.example")
+    monkeypatch.setenv("DVC_CONNECTION_LAB_API_KEY", "named-secret")
+    agent = _agent(
+        tmp_path,
+        tool_server_env={
+            "OPENSCIENTIST_DVC_CAPABILITY": "job-1.capability",
+            "OPENSCIENTIST_DVC_GATEWAY_URL": "http://web:8083",
+        },
+    )
+
+    agent._write_codex_config()
+
+    config_text = (tmp_path / ".codex" / "config.toml").read_text()
+    env = tomllib.loads(config_text)["mcp_servers"]["openscientist-tools"]["env"]
+    assert "must-never-enter-codex-config" not in config_text
+    assert "named-secret" not in config_text
+    assert not any(key.startswith("DVC_") for key in env)
+    assert env["OPENSCIENTIST_DVC_CAPABILITY"] == "job-1.capability"
+
+
 # ── run loop ───────────────────────────────────────────────────────────
 
 

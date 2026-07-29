@@ -43,6 +43,7 @@ from openscientist.agent.base import (
     TranscriptEntry,
     TurnOutcome,
 )
+from openscientist.dvc_gateway_client import without_dvc_credentials
 from openscientist.models import default_model_profile
 from openscientist.providers.base import CodexCompatible
 from openscientist.transcript import CODEX
@@ -187,7 +188,9 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         """
         config = self._config
         job_dir = self._job_dir()
-        env = dict(os.environ)
+        # Never serialize trusted DVC connection settings into per-job
+        # CODEX_HOME/config.toml. Only gateway values may cross this boundary.
+        env = without_dvc_credentials(dict(os.environ))
         env.update(
             {
                 "OPENSCIENTIST_JOB_ID": job_dir.name,

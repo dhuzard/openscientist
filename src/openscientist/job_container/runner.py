@@ -25,6 +25,12 @@ from typing import Any, cast
 
 import docker
 from docker import errors as docker_errors
+from openscientist.dvc_gateway_client import (
+    DVC_CAPABILITY_ENV,
+    DVC_GATEWAY_URL_ENV,
+    container_dvc_gateway_base_url,
+    without_dvc_credentials,
+)
 from openscientist.exec_broker_client import (
     EXEC_BROKER_URL_ENV,
     EXEC_TOKEN_ENV,
@@ -32,6 +38,7 @@ from openscientist.exec_broker_client import (
 )
 from openscientist.job_container.secrets import (
     derive_job_secret,
+    make_dvc_capability,
     make_exec_placeholder,
     make_job_placeholder,
 )
@@ -145,6 +152,9 @@ class JobContainerRunner:
             }
             provider_env = JobContainerRunner._authoring_provider_environment(provider_env)
 
+        # A future provider/settings refactor must not accidentally carry DVC
+        # credentials, CA paths, or the vendor base URL into the agent.
+        provider_env = without_dvc_credentials(provider_env)
         env: dict[str, str] = {
             "JOB_ID": job_id,
             "JOB_DIR": job_mount,
@@ -169,6 +179,9 @@ class JobContainerRunner:
                     # Per-job execution credential the broker verifies, plus the broker URL.
                     EXEC_TOKEN_ENV: make_exec_placeholder(settings.secret_key, job_id),
                     EXEC_BROKER_URL_ENV: container_broker_base_url(),
+                    # The only DVC-related values an agent may receive.
+                    DVC_CAPABILITY_ENV: make_dvc_capability(settings.secret_key, job_id),
+                    DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
                 }
             )
         # Only set the run-mode override when it diverges from the default so

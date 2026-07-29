@@ -41,6 +41,7 @@ from openscientist.agent.base import (
     TurnOutcome,
 )
 from openscientist.agent.mcp_specs import StdioMcpServerSpec
+from openscientist.dvc_gateway_client import without_dvc_credentials
 from openscientist.providers.base import ClaudeCompatible
 from openscientist.transcript import CLAUDE
 
@@ -213,7 +214,7 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         from the agent container plus the per-job overlays).
         """
         config = self._config
-        env = dict(os.environ)
+        env = without_dvc_credentials(dict(os.environ))
         env["OPENSCIENTIST_JOB_ID"] = config.job_dir.name
         env["OPENSCIENTIST_JOB_DIR"] = str(config.job_dir)
         env["OPENSCIENTIST_USE_HYPOTHESES"] = "1" if config.use_hypotheses else "0"

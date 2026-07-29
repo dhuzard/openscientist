@@ -299,12 +299,17 @@ async def _send_message_via_executor(
     """
     from openscientist.agent.base import AgentConfig
     from openscientist.agent.factory import agent_class_for_provider, build_agent
+    from openscientist.dvc_gateway_client import (
+        DVC_CAPABILITY_ENV,
+        DVC_GATEWAY_URL_ENV,
+        container_dvc_gateway_base_url,
+    )
     from openscientist.exec_broker_client import (
         EXEC_BROKER_URL_ENV,
         EXEC_TOKEN_ENV,
         container_broker_base_url,
     )
-    from openscientist.job_container.secrets import make_exec_placeholder
+    from openscientist.job_container.secrets import make_dvc_capability, make_exec_placeholder
     from openscientist.providers import get_provider
     from openscientist.settings import get_settings
 
@@ -383,6 +388,11 @@ Be concise, accurate, and cite specific papers or findings when relevant. Focus 
             # Chat's tools run in-process here, so hand them this job's exec token.
             EXEC_TOKEN_ENV: make_exec_placeholder(get_settings().secret_key, str(job_id)),
             EXEC_BROKER_URL_ENV: container_broker_base_url(),
+            DVC_CAPABILITY_ENV: make_dvc_capability(
+                get_settings().secret_key,
+                str(job_id),
+            ),
+            DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
         },
     )
     executor = build_agent(config, provider)

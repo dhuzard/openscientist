@@ -125,6 +125,27 @@ def test_subprocess_env_merges_tool_server_env(tmp_path: Path) -> None:
     assert env["X_EXTRA"] == "1"
 
 
+def test_subprocess_env_never_inherits_dvc_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DVC_API_KEY", "must-never-reach-mcp")
+    monkeypatch.setenv("DVC_BASE_URL", "https://vendor.example")
+    monkeypatch.setenv("DVC_CONNECTION_LAB_API_KEY", "named-secret")
+
+    env = _make_agent(
+        tmp_path,
+        tool_server_env={
+            "OPENSCIENTIST_DVC_CAPABILITY": "job-1.capability",
+            "OPENSCIENTIST_DVC_GATEWAY_URL": "http://web:8083",
+        },
+    )._build_subprocess_env()
+
+    assert not any(key.startswith("DVC_") for key in env)
+    assert "must-never-reach-mcp" not in env.values()
+    assert "named-secret" not in env.values()
+    assert env["OPENSCIENTIST_DVC_CAPABILITY"] == "job-1.capability"
+
+
 def test_subprocess_env_inherits_critical_parent_vars(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

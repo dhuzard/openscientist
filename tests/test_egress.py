@@ -20,6 +20,10 @@ def _fixed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
         "openscientist.job_container.egress.container_broker_base_url",
         lambda: "http://openscientist:8082",
     )
+    monkeypatch.setattr(
+        "openscientist.job_container.egress.container_dvc_gateway_base_url",
+        lambda: "http://openscientist:8083",
+    )
 
 
 def _settings(
@@ -53,6 +57,7 @@ def test_postgres_and_broker_always_present() -> None:
     entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
     assert ("postgres", 5432) in entries
     assert ("openscientist", 8082) in entries
+    assert ("openscientist", 8083) in entries
 
 
 def test_postgres_default_port_when_absent() -> None:

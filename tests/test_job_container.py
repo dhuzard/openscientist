@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from docker import errors as docker_errors
+from openscientist.dvc_gateway_client import DVC_CAPABILITY_ENV, DVC_GATEWAY_URL_ENV
 from openscientist.exec_broker_client import EXEC_BROKER_URL_ENV, EXEC_TOKEN_ENV
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
 from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
@@ -551,6 +552,26 @@ class TestJobSecretInjection:
         assert env["OPENSCIENTIST_EXEC_TOKEN"] == make_exec_placeholder("master-key", "job-x")
         assert env["OPENSCIENTIST_EXEC_TOKEN"].startswith("job-x.")
         assert env["OPENSCIENTIST_EXEC_BROKER_URL"].endswith(":8082")
+
+    def test_env_injects_only_dvc_gateway_capability_not_direct_credentials(self) -> None:
+        settings = self._settings(master="master-key")
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, settings),
+            job_id="job-x",
+            job_mount="/agent/jobs/job-x",
+            provider_env={
+                "DVC_API_KEY": "must-never-leak",
+                "DVC_BASE_URL": "https://credentialed-vendor.example",
+                "DVC_CONNECTION_LAB_API_KEY": "also-secret",
+            },
+        )
+
+        assert not any(key.startswith("DVC_") for key in env)
+        assert "must-never-leak" not in env.values()
+        assert "also-secret" not in env.values()
+        assert DVC_CAPABILITY_ENV in env
+        assert env[DVC_CAPABILITY_ENV].startswith("job-x.")
+        assert env[DVC_GATEWAY_URL_ENV].endswith(":8083")
 
 
 class TestAirgapFirewallLaunch:

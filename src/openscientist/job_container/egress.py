@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from openscientist.dvc_gateway_client import container_dvc_gateway_base_url
 from openscientist.exec_broker_client import container_broker_base_url
 from openscientist.settings import Settings
 
@@ -81,6 +82,7 @@ def derive_egress_allowlist(settings: Settings) -> list[tuple[str, int]]:
     entries: list[tuple[str, int]] = [
         _host_port(settings.database.effective_database_url, default_port=5432),
         _host_port(container_broker_base_url()),
+        _host_port(container_dvc_gateway_base_url()),
         *_provider_endpoints(settings),
     ]
 

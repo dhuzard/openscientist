@@ -1,7 +1,8 @@
 """Server-side DVC connection resolution.
 
 Agents and MCP clients pass only a logical ``connection_id``. API keys are
-resolved inside the tools process and are never included in returned models.
+resolved inside the trusted acquisition gateway and are never included in
+agent environments, MCP configuration, requests, or returned models.
 """
 
 from __future__ import annotations
@@ -57,6 +58,6 @@ class EnvironmentDVCConnectionProvider:
 
         if not api_key:
             raise DVCConnectionNotFoundError(
-                f"DVC connection {connection_id!r} is not configured for this tool server."
+                f"DVC connection {connection_id!r} is not configured for the trusted gateway."
             )
         return DVCConnection(connection_id=connection_id, api_key=api_key, base_url=base_url)
