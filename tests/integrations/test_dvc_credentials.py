@@ -45,3 +45,10 @@ def test_agent_image_uses_buildkit_secret_for_private_udwa_install() -> None:
     assert "ARG GITHUB_TOKEN" not in dockerfile
     assert "ENV GITHUB_TOKEN" not in dockerfile
     assert "https://x-access-token:" not in dockerfile
+
+
+def test_agent_image_installs_locked_application_dependencies() -> None:
+    dockerfile = (Path(__file__).parents[2] / "Dockerfile.agent").read_text(encoding="utf-8")
+
+    assert "uv export --locked --no-dev --no-emit-project" in dockerfile
+    assert "uv pip install --system --no-deps -e ." in dockerfile

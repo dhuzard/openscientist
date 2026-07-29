@@ -1,5 +1,9 @@
-"""Secure UDWA-backed DVC acquisition and governed analysis boundary."""
+"""Secure UDWA-backed DVC acquisition, assessment and analysis boundary."""
 
+from openscientist.integrations.dvc.assessment import (
+    DVCAssessmentService,
+    DVCCheckpointResult,
+)
 from openscientist.integrations.dvc.credentials import (
     DVCConnection,
     DVCConnectionNotFoundError,
@@ -25,6 +29,8 @@ from openscientist.integrations.dvc.service import DVCAcquisitionService
 
 __all__ = [
     "DVCAcquisitionService",
+    "DVCAssessmentService",
+    "DVCCheckpointResult",
     "DVCAnalysisApproval",
     "DVCAnalysisBlockedError",
     "DVCAnalysisError",

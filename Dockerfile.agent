@@ -87,12 +87,20 @@ COPY pyproject.toml README.md uv.lock* ./
 COPY requirements/udwa-poc.txt ./requirements/udwa-poc.txt
 COPY src/ ./src/
 
-# Install OpenScientist plus the immutable UDWA POC dependency used by the DVC
+# Install the locked OpenScientist dependency graph, then the project itself
+# without re-resolving it. A plain `uv pip install -e .` ignores uv.lock and can
+# silently pull incompatible framework releases into the runtime image.
+RUN uv export --locked --no-dev --no-emit-project --no-hashes \
+        --output-file /tmp/openscientist-requirements.txt \
+    && uv pip install --system -r /tmp/openscientist-requirements.txt \
+    && uv pip install --system --no-deps -e . \
+    && rm -f /tmp/openscientist-requirements.txt
+
+# Install the immutable UDWA POC dependency used by the DVC
 # MCP tools. The Git revision remains isolated from the main dependency set until
 # compatibility is established in both runtime images. UDWA is private: the
 # transient askpass helper reads the BuildKit secret without copying the token
 # into an ARG, ENV, URL, filesystem layer, or build log.
-RUN uv pip install --system -e .
 RUN --mount=type=secret,id=github_token,required=true \
     set -eu; \
     askpass="$(mktemp)"; \
