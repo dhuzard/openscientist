@@ -142,6 +142,13 @@ def test_parse_pubmed_xml_title_with_inline_markup() -> None:
     assert papers[0]["title"] == "LAMA5 links matrix to a niche."
 
 
+# Opt-in: this is the only test here that calls NCBI for real, and NCBI rate
+# limits by IP. From a shared CI runner the search returns zero results and the
+# assertions below fail for reasons unrelated to the code. The search_pubmed
+# formatting, persistence and empty-result paths are covered with mocks above,
+# so deselecting this in CI costs only the live contract and the stdio
+# subprocess smoke. Run it with: pytest -m network
+@pytest.mark.network
 async def test_subprocess_smoke_real_ncbi(
     tmp_path: Path,
     server_env: Callable[..., dict[str, str]],

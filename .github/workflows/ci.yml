@@ -81,4 +81,6 @@ jobs:
       - run: uv sync
 
       - name: Unit & Integration Tests
-        run: uv run pytest --cov=src/openscientist --cov-report=term-missing
+        # Live third-party APIs are deselected: NCBI rate limits by IP and the
+        # shared runner egress makes those tests fail unrelated to the change.
+        run: uv run pytest -m "not network" --cov=src/openscientist --cov-report=term-missing

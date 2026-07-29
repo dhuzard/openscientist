@@ -145,6 +145,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: marks tests as integration tests (require Docker and executor image)",
+    "network: marks tests that call a live third-party API (deselected in CI, which shares egress IPs and gets rate limited)",
 ]
 
 [tool.coverage.run]
