@@ -6,8 +6,10 @@
 # Builds on openscientist-base (Python 3.12, uv, git) and installs the full
 # openscientist package so the agent can import orchestrator/discovery code.
 #
-# Build:
-#   docker build -f Dockerfile.agent -t openscientist-agent:latest .
+# Build (UDWA is private, so authenticate through a BuildKit secret):
+#   GITHUB_TOKEN="$(gh auth token)" docker build \
+#     --secret id=github_token,env=GITHUB_TOKEN \
+#     -f Dockerfile.agent -t openscientist-agent:latest .
 #
 # Labels:
 #   openscientist.job_id=<uuid>   set by JobContainerRunner at runtime
@@ -58,6 +60,7 @@ FROM openscientist-base:latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    git \
     libhdf5-dev \
     pkg-config \
     rustc \
@@ -81,13 +84,30 @@ WORKDIR /app
 
 # Copy project files (README.md required by pyproject.toml readme field)
 COPY pyproject.toml README.md uv.lock* ./
+COPY requirements/udwa-poc.txt ./requirements/udwa-poc.txt
 COPY src/ ./src/
 
-# Install dependencies including claude-agent-sdk and openai-codex (both listed
-# in pyproject.toml). The official openai-codex bundles its codex binary only as
-# a musl wheel, which is dropped via the uv override in pyproject.toml. The
-# binary is provisioned separately below.
+# Install OpenScientist plus the immutable UDWA POC dependency used by the DVC
+# MCP tools. The Git revision remains isolated from the main dependency set until
+# compatibility is established in both runtime images. UDWA is private: the
+# transient askpass helper reads the BuildKit secret without copying the token
+# into an ARG, ENV, URL, filesystem layer, or build log.
 RUN uv pip install --system -e .
+RUN --mount=type=secret,id=github_token,required=true \
+    set -eu; \
+    askpass="$(mktemp)"; \
+    trap 'rm -f "${askpass}"' EXIT; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'case "$1" in' \
+        '  *Username*) printf "%s\n" "x-access-token" ;;' \
+        '  *Password*) cat /run/secrets/github_token ;;' \
+        '  *) exit 1 ;;' \
+        'esac' \
+        > "${askpass}"; \
+    chmod 700 "${askpass}"; \
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+        uv pip install --system -r requirements/udwa-poc.txt
 
 # Install the open-codex CLI built in the codex-build stage above (namespace
 # tools, function apply_patch, web_search capability gate, and the apply_patch
