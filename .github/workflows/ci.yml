@@ -2,12 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dax/dvc]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: uv sync
+      - run: uv sync --locked
 
       - name: Lint
         run: uv run ruff check src/ tests/
@@ -29,6 +37,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +49,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: uv sync
+      - run: uv sync --locked
 
       - name: Type check
         run: uv run mypy src/openscientist/ tests/
@@ -48,6 +57,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: [lint, typecheck]
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -78,7 +88,96 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: uv sync
+      - run: uv sync --locked
 
       - name: Unit & Integration Tests
-        run: uv run pytest --cov=src/openscientist --cov-report=term-missing
+        run: >-
+          uv run pytest
+          --cov=src/openscientist
+          --cov-report=term-missing
+          --junitxml=pytest-results.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: pytest-results.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  dvc-contract:
+    name: DVC contract and leakage tests
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: uv sync --locked
+
+      - name: Governed DVC contract suite
+        run: >-
+          uv run pytest -q
+          tests/integrations
+          tests/api/test_dvc_governance_api.py
+          tests/preclinical_context
+          tests/dvc
+          tests/tools/test_dvc_runtime_smoke.py
+
+  agent-image:
+    name: Agent image and pinned UDWA
+    runs-on: ubuntu-latest
+    needs: [dvc-contract]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    timeout-minutes: 90
+    env:
+      UDWA_REPOSITORY_TOKEN: ${{ secrets.UDWA_REPOSITORY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require scoped private-UDWA token
+        shell: bash
+        run: |
+          if [ -z "${UDWA_REPOSITORY_TOKEN}" ]; then
+            echo "::error::UDWA_REPOSITORY_TOKEN is required for the authoritative agent-image check."
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build immutable base image
+        run: docker build --pull -f Dockerfile.base -t openscientist-base:latest .
+
+      - name: Build agent image with transient private-UDWA secret
+        run: >-
+          docker build
+          --secret id=github_token,env=UDWA_REPOSITORY_TOKEN
+          -f Dockerfile.agent
+          -t openscientist-agent:dvc-ci
+          .
+
+      - name: Inspect image config and history for the build secret
+        shell: bash
+        run: |
+          docker image inspect openscientist-agent:dvc-ci > image-inspect.json
+          docker history --no-trunc openscientist-agent:dvc-ci > image-history.txt
+          if grep -Fq "${UDWA_REPOSITORY_TOKEN}" image-inspect.json image-history.txt; then
+            echo "::error::Private-UDWA token found in image metadata or history."
+            exit 1
+          fi
+
+      - name: Verify UDWA, MCP tools, and FastAPI router in built image
+        run: >-
+          docker run --rm
+          --entrypoint python
+          openscientist-agent:dvc-ci
+          -m openscientist.dvc_runtime_smoke
