@@ -27,7 +27,7 @@ from openscientist.agent.factory import (
 from openscientist.agent.omp_agent import OmpAgent  # noqa: F401
 from openscientist.prompts.common import BackendFragments
 from openscientist.providers import provider_class, provider_ids
-from openscientist.providers.base import CodexCompatible, Provider
+from openscientist.providers.base import OpenAiWireCompatible, Provider
 
 
 def _concrete_agent_classes() -> set[type[AbstractAgent[Provider]]]:
@@ -131,33 +131,40 @@ def test_every_provider_declares_its_own_harness_routing() -> None:
         )
 
 
-#: Providers for which inheriting ``CodexCompatible.harness_env`` is correct: the
-#: endpoint really is OpenAI's, so an unproxied harness should use its default.
+#: Providers for which inheriting ``OpenAiWireCompatible.harness_env`` is correct:
+#: the endpoint really is OpenAI's, so an unproxied harness should use its default.
 _HOSTED_OPENAI_FAMILY = {"openai", "azure-openai"}
 
 
 def test_self_hosted_providers_do_not_inherit_the_openai_default() -> None:
     """The inherited default is silently wrong for a self-hosted provider.
 
-    ``CodexCompatible.harness_env`` returns nothing when no proxy is active, which
-    leaves omp on its built-in default of ``api.openai.com``. For OpenAI and Azure
-    that is right. For anything self-hosted it means a job configured against a
-    local server quietly talks to OpenAI instead, the same silent-reachability
-    failure that motivated making ``harness_env`` abstract. Inheriting is
-    therefore opt-in, so a new OpenAI-compatible provider has to choose.
+    ``OpenAiWireCompatible.harness_env`` returns nothing when no proxy is active,
+    which leaves omp on its built-in default of ``api.openai.com``. For OpenAI and
+    Azure that is right. For anything self-hosted it means a job configured against
+    a local server quietly talks to OpenAI instead, the same silent-reachability
+    failure that motivated making ``harness_env`` abstract. Inheriting is therefore
+    opt-in, so a new OpenAI-wire provider has to choose.
+
+    Anchored on the class that actually defines the default. It previously named
+    ``CodexCompatible``, and when the default moved up to the wire layer the
+    condition stopped matching anything and the guard passed vacuously.
     """
+    checked = 0
     for provider_id in provider_ids():
         cls = provider_class(provider_id)
-        if not issubclass(cls, CodexCompatible):
+        if not issubclass(cls, OpenAiWireCompatible):
             continue
         owner = next(k for k in cls.__mro__ if "harness_env" in k.__dict__)
-        if owner is CodexCompatible:
+        if owner is OpenAiWireCompatible:
+            checked += 1
             assert provider_id in _HOSTED_OPENAI_FAMILY, (
                 f"{provider_id} inherits the OpenAI harness default, so an unproxied "
                 "run points at api.openai.com. Override harness_env to name its real "
                 f"endpoint, or add it to {sorted(_HOSTED_OPENAI_FAMILY)} if it is "
                 "genuinely OpenAI-hosted"
             )
+    assert checked, "guard matched no provider, so it is no longer testing anything"
 
 
 def test_every_concrete_agent_declares_a_display_name() -> None:

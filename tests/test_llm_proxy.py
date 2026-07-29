@@ -43,6 +43,9 @@ def active_provider(monkeypatch):
         "ANTHROPIC_FOUNDRY_BASE_URL",
         "ANTHROPIC_FOUNDRY_API_KEY",
         "OLLAMA_BASE_URL",
+        "VLLM_BASE_URL",
+        "VLLM_MODEL",
+        "VLLM_API_KEY",
         "CODEX_AUTH_HOST_PATH",
         "AWS_REGION",
         "AWS_ACCESS_KEY_ID",
@@ -249,6 +252,25 @@ class TestCodexUpstream:
         )
         assert provider.llm_upstream() == LlmUpstream("http://ollama:11434/v1", {})
 
+    def test_vllm_upstream_is_keyless_without_api_key(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="vllm",
+            VLLM_BASE_URL="http://vllm:8000/v1",
+            VLLM_MODEL="Qwen/Qwen3-32B",
+        )
+        assert provider.llm_upstream() == LlmUpstream("http://vllm:8000/v1", {})
+
+    def test_vllm_upstream_injects_bearer_when_keyed(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="vllm",
+            VLLM_BASE_URL="http://vllm:8000/v1",
+            VLLM_MODEL="Qwen/Qwen3-32B",
+            VLLM_API_KEY="vk-real",
+        )
+        assert provider.llm_upstream() == LlmUpstream(
+            "http://vllm:8000/v1", {"authorization": "Bearer vk-real"}
+        )
+
 
 class TestCodexProxiedEnv:
     """Codex env redirect: placeholder key plus the proxy URL for config.toml."""
@@ -288,6 +310,33 @@ class TestCodexProxiedEnv:
         )
         assert env["OPENAI_API_KEY"] == "job-1.tok"
         assert env["OPENSCIENTIST_LLM_PROXY_URL"] == "http://openscientist:8081"
+
+    def test_vllm_redirects(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="vllm",
+            VLLM_BASE_URL="http://vllm:8000/v1",
+            VLLM_MODEL="Qwen/Qwen3-32B",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "job-1.tok"
+        assert env["OPENSCIENTIST_LLM_PROXY_URL"] == "http://openscientist:8081"
+        assert "VLLM_API_KEY" not in env
+
+    def test_vllm_redirects_and_strips_the_real_key(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="vllm",
+            VLLM_BASE_URL="http://vllm:8000/v1",
+            VLLM_MODEL="Qwen/Qwen3-32B",
+            VLLM_API_KEY="vk-real",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "job-1.tok"
+        assert env["VLLM_API_KEY"] == "job-1.tok"
+        assert "vk-real" not in env.values()
 
 
 class TestCodexConfigRedirect:
@@ -575,6 +624,10 @@ class TestAirgapPosture:
         p = active_provider(OPENSCIENTIST_PROVIDER="ollama")
         assert p.airgap_egress().mode is AirgapEgress.PROXY
 
+    def test_vllm_proxies(self, active_provider):
+        p = active_provider(OPENSCIENTIST_PROVIDER="vllm", VLLM_MODEL="Qwen/Qwen3-32B")
+        assert p.airgap_egress().mode is AirgapEgress.PROXY
+
     def test_bedrock_bearer_proxies(self, active_provider):
         p = active_provider(
             OPENSCIENTIST_PROVIDER="bedrock",
@@ -601,6 +654,12 @@ class TestAirgapPosture:
             {"OPENSCIENTIST_PROVIDER": "anthropic", "CLAUDE_CODE_OAUTH_TOKEN": "o"},
             {"OPENSCIENTIST_PROVIDER": "openai", "OPENAI_API_KEY": "sk"},
             {"OPENSCIENTIST_PROVIDER": "ollama"},
+            {"OPENSCIENTIST_PROVIDER": "vllm", "VLLM_MODEL": "Qwen/Qwen3-32B"},
+            {
+                "OPENSCIENTIST_PROVIDER": "vllm",
+                "VLLM_MODEL": "Qwen/Qwen3-32B",
+                "VLLM_API_KEY": "vk",
+            },
             {
                 "OPENSCIENTIST_PROVIDER": "bedrock",
                 "AWS_REGION": "us-east-1",
@@ -695,6 +754,15 @@ class TestHarnessRouting:
                 "ANTHROPIC_FOUNDRY_API_KEY": "k",
             },
             {"OPENSCIENTIST_PROVIDER": "openai", "OPENAI_API_KEY": "sk"},
+            # Self-hosted providers route themselves rather than inheriting the
+            # OpenAI default, so their credential wiring is bespoke and is the
+            # class most likely to omit one.
+            {"OPENSCIENTIST_PROVIDER": "vllm", "VLLM_MODEL": "Qwen/Qwen3-32B"},
+            {
+                "OPENSCIENTIST_PROVIDER": "vllm",
+                "VLLM_MODEL": "Qwen/Qwen3-32B",
+                "VLLM_API_KEY": "vk",
+            },
         ],
     )
     def test_proxied_provider_gives_the_harness_a_credential_it_reads(self, active_provider, env):

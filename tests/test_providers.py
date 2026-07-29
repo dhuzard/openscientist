@@ -128,6 +128,8 @@ class TestAgentBackendForProvider:
         assert backend_for_provider_id("openai") is AgentBackend.CODEX
         assert backend_for_provider_id("azure-openai") is AgentBackend.CODEX
         assert backend_for_provider_id("ollama") is AgentBackend.CODEX
+        # vLLM is OpenAI-wire but not a Codex backend, so omp is its only harness.
+        assert backend_for_provider_id("vllm") is AgentBackend.OMP
 
     def test_claude_compatible_providers_map_to_claude_code(self):
         from openscientist.agent.base import AgentBackend

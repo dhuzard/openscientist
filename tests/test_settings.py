@@ -450,6 +450,35 @@ class TestProviderContainerEnvVars:
         env = settings.get_container_env_vars()
         assert env["OLLAMA_BASE_URL"] == "http://localhost:11434/v1"
 
+    def test_vllm_vars_passed_for_codex_provider(self):
+        settings = ProviderSettings(
+            OPENSCIENTIST_PROVIDER="vllm",
+            VLLM_BASE_URL="http://host.docker.internal:8000/v1",
+            VLLM_MODEL="Qwen/Qwen3-32B",
+            VLLM_API_KEY="vk-real",
+        )
+
+        env = settings.get_container_env_vars()
+
+        assert env["OPENSCIENTIST_PROVIDER"] == "vllm"
+        assert env["VLLM_BASE_URL"] == "http://host.docker.internal:8000/v1"
+        assert env["VLLM_MODEL"] == "Qwen/Qwen3-32B"
+        assert env["VLLM_API_KEY"] == "vk-real"
+
+    def test_vllm_optional_vars_default_or_are_omitted(self, monkeypatch, tmp_path):
+        # The dev .env reaches tests via both os.environ (database.engine calls
+        # load_dotenv() at import) and the settings env_file. Neutralize both.
+        monkeypatch.chdir(tmp_path)
+        for var in ("VLLM_BASE_URL", "VLLM_MODEL", "VLLM_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        settings = ProviderSettings(OPENSCIENTIST_PROVIDER="vllm")
+        env = settings.get_container_env_vars()
+        assert env["VLLM_BASE_URL"] == "http://localhost:8000/v1"
+        # There is no default served model and no default key, so neither is
+        # invented for the container.
+        assert "VLLM_MODEL" not in env
+        assert "VLLM_API_KEY" not in env
+
     def test_optional_model_and_token_env_vars_are_included(self):
         settings = ProviderSettings(
             OPENSCIENTIST_PROVIDER="anthropic",

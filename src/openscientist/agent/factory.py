@@ -15,7 +15,12 @@ from openscientist.agent.base import AbstractAgent, AgentBackend, AgentConfig
 from openscientist.agent.claude_code_agent import ClaudeCodeAgent
 from openscientist.agent.omp_agent import OmpAgent
 from openscientist.providers import provider_class
-from openscientist.providers.base import ClaudeCompatible, CodexCompatible, Provider
+from openscientist.providers.base import (
+    ClaudeCompatible,
+    CodexCompatible,
+    OpenAiWireCompatible,
+    Provider,
+)
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -74,9 +79,14 @@ def _agent_class_for(cls: type[Provider], harness: str) -> type[AbstractAgent[An
         return ClaudeCodeAgent
     if is_codex:
         return _codex_agent_class()
+    if issubclass(cls, OpenAiWireCompatible):
+        # Speaks the OpenAI wire but is not a Codex backend, so omp is its only
+        # harness. Deriving it here keeps the default working rather than making
+        # every such provider require an explicit OPENSCIENTIST_HARNESS=omp.
+        return OmpAgent
     raise ValueError(
         f"Provider {cls.__name__} does not implement a known agent "
-        "compatibility family (ClaudeCompatible or CodexCompatible)."
+        "compatibility family (ClaudeCompatible or OpenAiWireCompatible)."
     )
 
 

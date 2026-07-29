@@ -542,6 +542,17 @@ class TestStatsBadgesHypotheses:
         assert self._badge_value(badges, "Provider") == "Ollama (local)"
         assert self._badge_value(badges, "Model") == "gpt-oss:20b"
 
+    def test_vllm_job_shows_omp_and_vllm_provider(self) -> None:
+        from openscientist.webapp_components.pages.job_detail import _stats_badges
+
+        badges = _stats_badges(
+            self._make_job(llm_provider="vllm", llm_model="Qwen/Qwen3-32B"), lit_count=0
+        )
+        # vLLM is not a Codex backend, so the badge names the harness that drives it.
+        assert self._badge_value(badges, "Agent") == "Oh My Pi"
+        assert self._badge_value(badges, "Provider") == "vLLM (self-hosted)"
+        assert self._badge_value(badges, "Model") == "Qwen/Qwen3-32B"
+
     def test_claude_job_shows_agent_and_model(self) -> None:
         from openscientist.webapp_components.pages.job_detail import _stats_badges
 

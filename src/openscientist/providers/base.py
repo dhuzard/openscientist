@@ -418,7 +418,26 @@ class ClaudeCompatible(Provider, abc.ABC):
         return self.claude_model_name()
 
 
-class CodexCompatible(Provider, abc.ABC):
+class OpenAiWireCompatible(Provider, abc.ABC):
+    """Provider reachable over the OpenAI wire, drivable by a generic harness.
+
+    Speaking this wire does not make a provider a Codex backend. Codex needs the
+    extra contract in ``CodexCompatible`` and, in practice, tolerant handling of
+    non-gptoss models. A self-hosted server that omp drives happily belongs here
+    rather than there.
+    """
+
+    @abc.abstractmethod
+    def effective_model_name(self) -> str | None:
+        """The model id sent to the server, or None to let the harness decide."""
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        # OpenAI-family harnesses read OPENAI_BASE_URL; point it at the proxy
+        # when active (codex uses config.toml instead, so this is omp's path).
+        return {"OPENAI_BASE_URL": proxy} if proxy else {}
+
+
+class CodexCompatible(OpenAiWireCompatible, abc.ABC):
     """Provider that speaks the OpenAI Responses API and can be driven by
     the Codex agent."""
 
@@ -445,8 +464,3 @@ class CodexCompatible(Provider, abc.ABC):
 
     def effective_model_name(self) -> str | None:
         return self.codex_model_name()
-
-    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
-        # OpenAI-family harnesses read OPENAI_BASE_URL; point it at the proxy
-        # when active (codex uses config.toml instead, so this is omp's path).
-        return {"OPENAI_BASE_URL": proxy} if proxy else {}
