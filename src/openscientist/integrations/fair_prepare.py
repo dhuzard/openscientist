@@ -317,13 +317,8 @@ class HttpFairPrepareProvider:
                 f"FAIR-VCG template {framework} returned an incompatible report."
             )
 
-    def check_compatibility(self) -> FairPrepareCompatibilityReport:
-        """Exercise the pinned API contract with synthetic, non-sensitive data.
-
-        A report is returned only when the advertised API version and every
-        production endpoint/template are compatible. Any outage or mismatch
-        raises :class:`FairPrepareError`, allowing deployment to fail closed.
-        """
+    def _require_api_contract(self) -> str:
+        """Fail before assessment when the deployed API contract has drifted."""
 
         openapi = self._mapping(
             self._request("GET", "/openapi.json"),
@@ -349,6 +344,17 @@ class HttpFairPrepareProvider:
                 raise FairPrepareError(
                     f"FAIR-VCG OpenAPI contract is missing {method.upper()} {path}."
                 )
+        return str(version)
+
+    def check_compatibility(self) -> FairPrepareCompatibilityReport:
+        """Exercise the pinned API contract with synthetic, non-sensitive data.
+
+        A report is returned only when the advertised API version and every
+        production endpoint/template are compatible. Any outage or mismatch
+        raises :class:`FairPrepareError`, allowing deployment to fail closed.
+        """
+
+        version = self._require_api_contract()
 
         synthetic_csv = (
             b"subject_id,group,activity_count\nsynthetic-1,control,1\nsynthetic-2,treatment,2\n"
@@ -413,6 +419,7 @@ class HttpFairPrepareProvider:
         metadata: dict[str, Any],
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]:
+        self._require_api_contract()
         source_hash = hashlib.sha256(content).hexdigest()
         uploaded = self._mapping(
             self._request(

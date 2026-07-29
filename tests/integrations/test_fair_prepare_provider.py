@@ -69,6 +69,19 @@ def test_provider_calls_real_fair_vcg_contract():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, request.url.path))
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0"},
+                    "paths": {
+                        "/api/upload": {"post": {}},
+                        "/api/metadata/{dataset_id}": {"put": {}},
+                        "/api/fair-score/{dataset_id}": {"get": {}},
+                        "/api/{dataset_id}/template/apply-from-paper": {"post": {}},
+                    },
+                },
+            )
         if request.url.path == "/api/upload":
             return httpx.Response(200, json={"dataset_id": "remote-1"})
         if request.url.path == "/api/metadata/remote-1":
@@ -127,6 +140,7 @@ def test_provider_calls_real_fair_vcg_contract():
         for finding in results[1].findings
     )
     assert calls == [
+        ("GET", "/openapi.json"),
         ("POST", "/api/upload"),
         ("PUT", "/api/metadata/remote-1"),
         ("GET", "/api/fair-score/remote-1"),
@@ -260,6 +274,27 @@ def test_compatibility_canary_fails_closed_on_version_mismatch():
 
     with pytest.raises(FairPrepareError, match="API version mismatch"):
         provider.check_compatibility()
+
+
+def test_assessment_fails_closed_on_version_mismatch_before_upload():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={"info": {"version": "2.0.0"}, "paths": {}},
+        )
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(FairPrepareError, match="API version mismatch"):
+        provider.assess_context(PreclinicalStudyContext(study_id="study-1"))
+
+    assert calls == ["/openapi.json"]
 
 
 def test_compatibility_canary_fails_closed_on_missing_operation():
