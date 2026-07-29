@@ -132,9 +132,7 @@ def normalize_type1(
         out[column] = pd.to_numeric(out[column], errors="coerce")
     out["value"] = out[electrodes].mean(axis=1, skipna=True)
     out["electrode_sd"] = out[electrodes].std(axis=1, ddof=1, skipna=True)
-    out["interval_seconds"] = (
-        out["stop_timestamp_utc"] - out["timestamp_utc"]
-    ).dt.total_seconds()
+    out["interval_seconds"] = (out["stop_timestamp_utc"] - out["timestamp_utc"]).dt.total_seconds()
     if expected_frequency_hz is None:
         out["expected_samples"] = np.nan
         out["coverage_fraction"] = np.nan
@@ -171,7 +169,11 @@ def normalize_type1(
 
 
 def _type2_prefixes(columns: Iterable[str]) -> list[str]:
-    return [str(column)[: -len("_TIMESTAMP")] for column in columns if str(column).endswith("_TIMESTAMP")]
+    return [
+        str(column)[: -len("_TIMESTAMP")]
+        for column in columns
+        if str(column).endswith("_TIMESTAMP")
+    ]
 
 
 def normalize_type2(
@@ -187,11 +189,22 @@ def normalize_type2(
         timestamp = f"{prefix}_TIMESTAMP"
         excluded = {f"{prefix}{suffix}" for suffix in _META_SUFFIXES}
         cage_columns = [
-            column for column in frame.columns if column.startswith(f"{prefix}_") and column not in excluded
+            column
+            for column in frame.columns
+            if column.startswith(f"{prefix}_") and column not in excluded
         ]
         if not cage_columns:
             warnings.append(f"group {prefix!r} has no cage columns")
             continue
+        vendor_avg = frame.get(f"{prefix}_AVG")
+        vendor_sem = frame.get(f"{prefix}_SEM")
+        vendor_samples = frame.get(f"{prefix}_SAMPLES")
+        if vendor_avg is None:
+            vendor_avg = pd.Series(np.nan, index=frame.index)
+        if vendor_sem is None:
+            vendor_sem = pd.Series(np.nan, index=frame.index)
+        if vendor_samples is None:
+            vendor_samples = pd.Series(np.nan, index=frame.index)
         base = frame[shared].copy()
         base["timestamp_source"], base["timestamp_utc"] = _timestamps(frame[timestamp])
         for cage_column in cage_columns:
@@ -201,11 +214,9 @@ def normalize_type2(
             block["export_group"] = prefix
             block["cage_id"] = cage_column[len(prefix) + 1 :]
             block["value"] = pd.to_numeric(frame[cage_column], errors="coerce")
-            block["vendor_group_avg"] = pd.to_numeric(frame.get(f"{prefix}_AVG"), errors="coerce")
-            block["vendor_group_sem"] = pd.to_numeric(frame.get(f"{prefix}_SEM"), errors="coerce")
-            block["vendor_group_samples"] = pd.to_numeric(
-                frame.get(f"{prefix}_SAMPLES"), errors="coerce"
-            )
+            block["vendor_group_avg"] = pd.to_numeric(vendor_avg, errors="coerce")
+            block["vendor_group_sem"] = pd.to_numeric(vendor_sem, errors="coerce")
+            block["vendor_group_samples"] = pd.to_numeric(vendor_samples, errors="coerce")
             blocks.append(block)
     normalized = pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
     return normalized, _inspection(normalized, source_file, ExportType.TYPE2, warnings)
@@ -268,11 +279,15 @@ def validate_type2_group_statistics(
             continue
         rows.append(
             {
-                "vendor_avg": float(part["vendor_group_avg"].dropna().iloc[0]),
-                "vendor_sem": float(part["vendor_group_sem"].dropna().iloc[0]),
+                "vendor_avg": float(part["vendor_group_avg"].dropna().iloc[0]),  # type: ignore[arg-type]
+                "vendor_sem": float(part["vendor_group_sem"].dropna().iloc[0]),  # type: ignore[arg-type]
                 "mean": float(values.mean()),
                 "sd": float(values.std(ddof=1)) if len(values) > 1 else np.nan,
-                "sem": float(values.sem(ddof=1)) if len(values) > 1 else np.nan,
+                "sem": (
+                    float(values.sem(ddof=1))  # type: ignore[arg-type]
+                    if len(values) > 1
+                    else np.nan
+                ),
             }
         )
     stats = pd.DataFrame(rows)

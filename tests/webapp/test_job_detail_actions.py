@@ -218,8 +218,8 @@ def test_owner_action_calls_requested_manager_method() -> None:
     manager = SimpleNamespace(pause_job=MagicMock())
     context = SimpleNamespace(is_owner=True, job_id="job-1", job_manager=manager)
     with patch.object(job_detail, "ui"):
-        job_detail._run_owner_job_action(  # type: ignore[arg-type]
-            context,
+        job_detail._run_owner_job_action(
+            context,  # type: ignore[arg-type]
             "pause_job",
             "Paused",
         )

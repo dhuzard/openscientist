@@ -38,9 +38,12 @@ def context_from_udwa_bundle(
 ) -> StudyContext:
     """Convert the flat UDWA bundle conservatively; labels never imply biology."""
 
-    study = bundle.get("study") if isinstance(bundle.get("study"), dict) else {}
-    subjects = bundle.get("subjects") if isinstance(bundle.get("subjects"), list) else []
-    groups = bundle.get("groups") if isinstance(bundle.get("groups"), list) else []
+    raw_study = bundle.get("study")
+    raw_subjects = bundle.get("subjects")
+    raw_groups = bundle.get("groups")
+    study: dict[str, Any] = raw_study if isinstance(raw_study, dict) else {}
+    subjects: list[Any] = raw_subjects if isinstance(raw_subjects, list) else []
+    groups: list[Any] = raw_groups if isinstance(raw_groups, list) else []
     subject_by_cage = {
         str(row.get("cage_id") or row.get("subject_id")): row
         for row in subjects
@@ -53,21 +56,25 @@ def context_from_udwa_bundle(
     }
     cages: list[CageContext] = []
     for cage_id in detected_cages:
-        row = subject_by_cage.get(cage_id, {})
+        row = subject_by_cage.get(cage_id) or {}
         detected_group = row.get("group_id_detected")
-        group_row = group_by_id.get(str(detected_group), {})
+        group_row = group_by_id.get(str(detected_group)) or {}
         explicit_biology = row.get("treatment_group") or group_row.get("experimental_condition")
         cages.append(
             CageContext(
                 cage_id=cage_id,
                 submitted_label=cage_id,
                 export_group=(
-                    ContextValue[str].recorded(str(detected_group), "UDWA subjects.group_id_detected")
+                    ContextValue[str].recorded(
+                        str(detected_group), "UDWA subjects.group_id_detected"
+                    )
                     if detected_group
                     else ContextValue[str].unknown()
                 ),
                 biological_group=(
-                    ContextValue[str].recorded(str(explicit_biology), "UDWA explicit group metadata")
+                    ContextValue[str].recorded(
+                        str(explicit_biology), "UDWA explicit group metadata"
+                    )
                     if explicit_biology
                     else ContextValue[str].unknown(
                         "Cage labels such as Control or Donor are opaque without explicit metadata"
@@ -80,7 +87,11 @@ def context_from_udwa_bundle(
     context = StudyContext(
         metadata_level=MetadataLevel.M1_UDWA,
         study_id=study_id,
-        title=(ContextValue[str].recorded(str(title), "UDWA study metadata") if title else ContextValue[str].unknown()),
+        title=(
+            ContextValue[str].recorded(str(title), "UDWA study metadata")
+            if title
+            else ContextValue[str].unknown()
+        ),
         objective=(
             ContextValue[str].recorded(str(objective), "UDWA study metadata")
             if objective
@@ -92,11 +103,17 @@ def context_from_udwa_bundle(
     light_on = study.get("light_on_time")
     light_off = study.get("light_off_time")
     if timezone:
-        context.environment.iana_timezone = ContextValue[str].recorded(str(timezone), "UDWA study.timezone")
+        context.environment.iana_timezone = ContextValue[str].recorded(
+            str(timezone), "UDWA study.timezone"
+        )
     if light_on:
-        context.environment.light_on = ContextValue[str].recorded(str(light_on), "UDWA study.light_on_time")
+        context.environment.light_on = ContextValue[str].recorded(
+            str(light_on), "UDWA study.light_on_time"
+        )
     if light_off:
-        context.environment.light_off = ContextValue[str].recorded(str(light_off), "UDWA study.light_off_time")
+        context.environment.light_off = ContextValue[str].recorded(
+            str(light_off), "UDWA study.light_off_time"
+        )
     return context
 
 
@@ -105,7 +122,9 @@ def apply_known_poc_context(context: StudyContext, *, animals_per_cage: int = 5)
 
     out = context.model_copy(deep=True)
     out.metadata_level = MetadataLevel.M2_MNMS_DVC
-    out.objective = ContextValue[str].recorded(EXPLORATORY_OBJECTIVE, "POC design decision", approved=True)
+    out.objective = ContextValue[str].recorded(
+        EXPLORATORY_OBJECTIVE, "POC design decision", approved=True
+    )
     out.mode = "exploratory"
     out.units = UnitDefinition(
         experimental_unit=ContextValue[str].recorded("cage", "POC expert input", approved=True),
@@ -179,7 +198,9 @@ def ablate_context(context: StudyContext, ablation_id: str) -> StudyContext:
         out.units = UnitDefinition()
     elif ablation_id == "A3_occupancy":
         for cage in out.cages:
-            cage.animals_per_cage = ContextValue[int].unknown("Removed for metadata-ablation experiment")
+            cage.animals_per_cage = ContextValue[int].unknown(
+                "Removed for metadata-ablation experiment"
+            )
     elif ablation_id == "A4_light_rem":
         out.environment.light_on = ContextValue[str].unknown()
         out.environment.light_off = ContextValue[str].unknown()

@@ -171,7 +171,9 @@ def run(args: argparse.Namespace) -> Path:
 
     detected_cages = sorted(type1["cage_id"].dropna().astype(str).unique().tolist())
     bundle = load_udwa_bundle(args.metadata) if args.metadata else {}
-    context = context_from_udwa_bundle(bundle, study_id=args.study_id, detected_cages=detected_cages)
+    context = context_from_udwa_bundle(
+        bundle, study_id=args.study_id, detected_cages=detected_cages
+    )
     context = apply_known_poc_context(context, animals_per_cage=args.animals_per_cage)
     context = add_acquisition_context(
         context,
@@ -182,7 +184,12 @@ def run(args: argparse.Namespace) -> Path:
     context.environment.source_utc_offset = context.environment.source_utc_offset.recorded(
         "-04:00", "POC expert input"
     )
-    for role, path in (("type1", args.type1), ("type2", args.type2), ("events", args.events), ("metadata", args.metadata)):
+    for role, path in (
+        ("type1", args.type1),
+        ("type2", args.type2),
+        ("events", args.events),
+        ("metadata", args.metadata),
+    ):
         if path:
             context = register_asset(context, path, role, file_sha256(path))
 
@@ -238,7 +245,9 @@ def run(args: argparse.Namespace) -> Path:
     _json(output / "metadata_assessment.json", assessment)
     _json(output / "analysis_plan.json", plan)
     _json(output / "plan_violations.json", violations)
-    _json(output / "export_inspections.json", [item.model_dump(mode="json") for item in inspections])
+    _json(
+        output / "export_inspections.json", [item.model_dump(mode="json") for item in inspections]
+    )
     _json(output / "evidence_ledger.json", ledger)
     if aggregation is not None:
         _json(output / "type1_type2_validation.json", aggregation)

@@ -256,7 +256,11 @@ class ScientificClaim(StrictModel):
     claim_id: str
     text: str
     kind: Literal[
-        "recorded_fact", "computed_result", "agent_inference", "unresolved_uncertainty", "human_conclusion"
+        "recorded_fact",
+        "computed_result",
+        "agent_inference",
+        "unresolved_uncertainty",
+        "human_conclusion",
     ]
     evidence_ids: list[str] = Field(min_length=1)
     review_status: ReviewStatus = ReviewStatus.UNREVIEWED
@@ -284,7 +288,9 @@ class EvidenceLedger(StrictModel):
         for claim in self.claims:
             missing = set(claim.evidence_ids) - evidence_ids
             if missing:
-                raise ValueError(f"claim {claim.claim_id} references missing evidence: {sorted(missing)}")
+                raise ValueError(
+                    f"claim {claim.claim_id} references missing evidence: {sorted(missing)}"
+                )
         for decision in self.decisions:
             missing = set(decision.evidence_ids) - evidence_ids
             if missing:
