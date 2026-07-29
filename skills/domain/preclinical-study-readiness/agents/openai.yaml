@@ -1,0 +1,4 @@
+interface:
+  display_name: "Preclinical Study Readiness"
+  short_description: "Interpret FAIR, PREPARE, and ARRIVE readiness"
+  default_prompt: "Use $preclinical-study-readiness to assess this study context and prioritize the gaps requiring human resolution."

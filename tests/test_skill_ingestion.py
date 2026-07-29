@@ -104,6 +104,42 @@ Skill content here.
         parsed = parser.parse_content(content, "scientific-skills/biopython/SKILL.md")
         assert parsed.category == "biopython"
 
+    def test_parse_portable_nested_metadata(self):
+        """Test standard metadata while preserving OpenScientist routing fields."""
+        parser = SkillParser()
+        content = """---
+name: Preclinical Study Readiness
+description: Interpret framework findings
+metadata:
+  category: domain
+  slug: preclinical-study-readiness
+  tags:
+    - fair
+    - arrive
+---
+
+# Preclinical Study Readiness
+"""
+
+        parsed = parser.parse_content(content, "skills/preclinical-study-readiness/SKILL.md")
+
+        assert parsed.category == "domain"
+        assert parsed.slug == "preclinical-study-readiness"
+        assert parsed.tags == ["fair", "arrive"]
+
+    def test_nested_metadata_must_be_mapping(self):
+        parser = SkillParser()
+        content = """---
+name: Invalid Metadata
+metadata: invalid
+---
+
+# Content
+"""
+
+        with pytest.raises(SkillParseError, match="metadata must be a mapping"):
+            parser.parse_content(content, "skills/invalid/SKILL.md")
+
     def test_derive_slug_from_directory_for_skill_md(self):
         """Test slug is derived from parent directory for SKILL.md files."""
         parser = SkillParser()
@@ -754,7 +790,7 @@ class TestBuiltinSkillsIngestion:
         stats = await ingester.sync_source(db_session, source)
 
         assert stats["errors"] == 0
-        assert stats["created"] == 11
+        assert stats["created"] == 12
 
         # Verify all expected slugs are present
         stmt = select(Skill).where(Skill.source_id == source.id)
@@ -769,6 +805,7 @@ class TestBuiltinSkillsIngestion:
             "kbase-query",
             "metabolomics",
             "phenix-tools-reference",
+            "preclinical-study-readiness",
             "hypothesis-generation",
             "prioritization",
             "result-interpretation",
@@ -776,10 +813,10 @@ class TestBuiltinSkillsIngestion:
         }
         assert set(skills.keys()) == expected_slugs
 
-        # Verify 7 domain + 4 workflow category split
+        # Verify 8 domain + 4 workflow category split
         domain_skills = [s for s in skills.values() if s.category == "domain"]
         workflow_skills = [s for s in skills.values() if s.category == "workflow"]
-        assert len(domain_skills) == 7
+        assert len(domain_skills) == 8
         assert len(workflow_skills) == 4
 
         # Spot-check one skill's metadata
@@ -804,3 +841,9 @@ class TestBuiltinSkillsIngestion:
         assert "`vendor_rdi_recomputed`" in dvc.content
         assert "questions for Tecniplast" in dvc.content
         assert "Do not contact Tecniplast without the user's authorization." in dvc.content
+
+        readiness = skills["preclinical-study-readiness"]
+        assert readiness.name == "preclinical-study-readiness"
+        assert readiness.category == "domain"
+        assert "FAIR-VCG Mentor as the authoritative rules engine" in readiness.content
+        assert "does not certify compliance" in readiness.content
