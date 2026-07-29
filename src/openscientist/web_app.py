@@ -616,7 +616,7 @@ def main(
 
     from openscientist.settings import get_settings
 
-    reload = get_settings().dev.dev_mode
+    reload = get_settings().dev.reload_enabled
     os.environ[JOBS_DIR_ENV] = str(jobs_dir)
 
     logger.info("Starting NiceGUI server on %s:%s (reload=%s)", host, port, reload)

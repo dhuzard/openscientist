@@ -29,7 +29,14 @@ class DevSettings(BaseSettings):
     )
 
     dev_mode: bool = Field(default=False, alias="OPENSCIENTIST_DEV_MODE")
+    reload: bool | None = Field(default=None, alias="OPENSCIENTIST_RELOAD")
     simulate_provider_error: bool = Field(default=False, alias="SIMULATE_PROVIDER_ERROR")
+
+    @property
+    def reload_enabled(self) -> bool:
+        """Use development reload by default, while allowing long jobs to disable it."""
+
+        return self.dev_mode if self.reload is None else self.reload
 
 
 class ProviderSettings(BaseSettings):

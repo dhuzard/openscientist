@@ -46,7 +46,7 @@ def test_main_reload_uses_factory_import_target(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr(web_app, "_settings_error", None)
     monkeypatch.setattr(
         "openscientist.settings.get_settings",
-        lambda: SimpleNamespace(dev=SimpleNamespace(dev_mode=True)),
+        lambda: SimpleNamespace(dev=SimpleNamespace(reload_enabled=True)),
     )
 
     uvicorn_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -70,7 +70,7 @@ def test_main_non_reload_runs_with_created_app(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(web_app, "_settings_error", None)
     monkeypatch.setattr(
         "openscientist.settings.get_settings",
-        lambda: SimpleNamespace(dev=SimpleNamespace(dev_mode=False)),
+        lambda: SimpleNamespace(dev=SimpleNamespace(reload_enabled=False)),
     )
 
     host_app = FastAPI()
