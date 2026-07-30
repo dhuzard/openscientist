@@ -51,6 +51,8 @@ def _error(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, DVCGatewayError):
         payload["error_code"] = exc.code
         payload["retryable"] = exc.retryable
+    if isinstance(exc, FairPrepareError):
+        payload.update(exc.to_dict())
     return payload
 
 

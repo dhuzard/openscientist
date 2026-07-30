@@ -26,10 +26,10 @@ help:
 	@echo "Docker:"
 	@echo "  make build      - Build all Docker images (base, main, agent, executor)"
 	@echo "  make build-executor - Build only the isolated code executor image"
-	@echo "  make start      - Start containers"
-	@echo "  make start-fair - Start OpenScientist with the FAIR-VCG runtime overlay"
+	@echo "  make start      - Start OpenScientist with the required FAIR-VCG runtime"
+	@echo "  make start-fair - Explicit alias for the FAIR-VCG runtime start"
 	@echo "  make stop       - Stop containers"
-	@echo "  make restart    - Restart containers (no rebuild)"
+	@echo "  make restart    - Restart the governed DVC runtime (no rebuild)"
 	@echo "  make restart-fair - Reconcile the FAIR-VCG stack without dropping its overlay"
 	@echo "  make rebuild    - Rebuild images and restart"
 	@echo "  make logs       - Tail container logs"
@@ -41,9 +41,9 @@ help:
 	@echo "  make deploy     - Deploy to production server"
 
 start:
-	@echo "Starting OpenScientist..."
-	docker compose -f $(COMPOSE_FILE) up -d --remove-orphans
-	@echo "OpenScientist started at http://localhost:8080"
+	@echo "Starting OpenScientist with required FAIR-VCG governance..."
+	docker compose $(FAIR_COMPOSE_FILES) up -d --remove-orphans
+	@echo "OpenScientist and FAIR-VCG started at http://localhost:8080"
 
 start-fair:
 	@echo "Starting OpenScientist with FAIR-VCG..."
@@ -52,10 +52,10 @@ start-fair:
 
 stop:
 	@echo "Stopping OpenScientist..."
-	docker compose -f $(COMPOSE_FILE) down --remove-orphans
+	docker compose $(FAIR_COMPOSE_FILES) down --remove-orphans
 	@echo "OpenScientist stopped"
 
-restart: stop start
+restart: restart-fair
 
 restart-fair:
 	@echo "Reconciling OpenScientist with the FAIR-VCG runtime overlay..."
@@ -66,7 +66,7 @@ build:
 	@echo "Building base image (Python, uv) as $(BASE_IMAGE)..."
 	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -f Dockerfile.base -t $(BASE_IMAGE) .
 	@echo "Building OpenScientist main image..."
-	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f $(COMPOSE_FILE) build \
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose $(FAIR_COMPOSE_FILES) build \
 		--build-arg OPENSCIENTIST_COMMIT=$$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") \
 		--build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	$(MAKE) build-executor
@@ -79,28 +79,28 @@ build-executor:
 	docker build --platform linux/amd64 -f Dockerfile.executor -t $(EXECUTOR_IMAGE) .
 
 rebuild: build
-	docker compose -f $(COMPOSE_FILE) down --remove-orphans
-	docker compose -f $(COMPOSE_FILE) up -d --remove-orphans
+	docker compose $(FAIR_COMPOSE_FILES) down --remove-orphans
+	docker compose $(FAIR_COMPOSE_FILES) up -d --remove-orphans
 	@echo "OpenScientist rebuilt and started at http://localhost:8080"
 
 logs:
 	@echo "Tailing OpenScientist logs (Ctrl+C to exit)..."
-	docker compose -f $(COMPOSE_FILE) logs -f
+	docker compose $(FAIR_COMPOSE_FILES) logs -f
 
 shell:
 	@echo "Opening shell in OpenScientist container..."
-	docker compose -f $(COMPOSE_FILE) exec openscientist /bin/bash
+	docker compose $(FAIR_COMPOSE_FILES) exec openscientist /bin/bash
 
 clean:
 	@echo "Removing containers and volumes..."
-	docker compose -f $(COMPOSE_FILE) down -v --remove-orphans
+	docker compose $(FAIR_COMPOSE_FILES) down -v --remove-orphans
 	@echo "Cleaned up"
 
 clean-jobs:
 	@echo "Cleaning up old job directories..."
 	@read -p "Delete jobs older than how many days? [7]: " days; \
 	days=$${days:-7}; \
-	docker compose -f $(COMPOSE_FILE) exec openscientist python -m openscientist.job_manager cleanup --days $$days
+	docker compose $(FAIR_COMPOSE_FILES) exec openscientist python -m openscientist.job_manager cleanup --days $$days
 	@echo "Job cleanup complete"
 
 reset-db:
@@ -109,17 +109,17 @@ reset-db:
 	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
 		set -e; \
 		echo "Stopping containers and removing volumes..."; \
-		docker compose -f $(COMPOSE_FILE) down -v --remove-orphans; \
+		docker compose $(FAIR_COMPOSE_FILES) down -v --remove-orphans; \
 		echo "Starting postgres..."; \
-		docker compose -f $(COMPOSE_FILE) up -d postgres; \
+		docker compose $(FAIR_COMPOSE_FILES) up -d postgres; \
 		echo "Waiting for postgres to be ready..."; \
-		until docker compose -f $(COMPOSE_FILE) exec -T postgres pg_isready -U $${POSTGRES_USER:-openscientist} -d $${POSTGRES_DB:-openscientist} >/dev/null 2>&1; do \
+		until docker compose $(FAIR_COMPOSE_FILES) exec -T postgres pg_isready -U $${POSTGRES_USER:-openscientist} -d $${POSTGRES_DB:-openscientist} >/dev/null 2>&1; do \
 			sleep 1; \
 		done; \
 		echo "Running migrations..."; \
-		docker compose -f $(COMPOSE_FILE) run --rm --no-deps openscientist alembic upgrade head; \
+		docker compose $(FAIR_COMPOSE_FILES) run --rm --no-deps openscientist alembic upgrade head; \
 		echo "Starting application..."; \
-		docker compose -f $(COMPOSE_FILE) up -d --remove-orphans openscientist; \
+		docker compose $(FAIR_COMPOSE_FILES) up -d --remove-orphans openscientist; \
 		echo "Database reset complete!"; \
 	else \
 		echo "Aborted."; \
@@ -128,7 +128,7 @@ reset-db:
 # Show job status
 status:
 	@echo "Job status:"
-	docker compose -f $(COMPOSE_FILE) exec openscientist python -m openscientist.job_manager summary
+	docker compose $(FAIR_COMPOSE_FILES) exec openscientist python -m openscientist.job_manager summary
 
 fair-status:
 	docker compose $(FAIR_COMPOSE_FILES) ps
@@ -167,7 +167,7 @@ deploy:
 	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && make rebuild"
 	@echo ""
 	@echo "Step 4: Running database migrations on $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker compose exec openscientist alembic upgrade head"
+	@ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && docker compose $(FAIR_COMPOSE_FILES) exec openscientist alembic upgrade head"
 	@echo ""
 	@echo "========================================="
 	@echo "Deployment complete!"

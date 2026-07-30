@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 import httpx
@@ -9,6 +10,7 @@ import pytest
 from openscientist.integrations.fair_prepare import (
     FAIR_VCG_REQUIRED_TEMPLATES,
     FairPrepareError,
+    FairPrepareFailureKind,
     HttpFairPrepareProvider,
     bundle_manifest_to_csv,
     context_to_csv,
@@ -165,6 +167,127 @@ def test_provider_translates_http_failure():
         )
 
 
+def test_http_failure_is_structured_and_retryable():
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(503, text="service unavailable")
+            )
+        ),
+    )
+
+    with pytest.raises(FairPrepareError) as caught:
+        provider.preflight()
+
+    assert caught.value.to_dict() == {
+        "error_code": "fair_vcg.http",
+        "failure_kind": "http",
+        "retryable": True,
+        "endpoint": "GET /openapi.json",
+        "status_code": 503,
+        "action": "Restore FAIR-VCG service health before retrying this checkpoint.",
+    }
+
+
+def test_dns_service_discovery_failure_is_distinguished():
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            raise socket.gaierror(-2, "Name or service not known")
+        except socket.gaierror as exc:
+            raise httpx.ConnectError(str(exc), request=request) from exc
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(FairPrepareError) as caught:
+        provider.preflight()
+
+    assert caught.value.kind == FairPrepareFailureKind.DNS_SERVICE_DISCOVERY
+    assert caught.value.retryable is True
+    assert caught.value.endpoint == "GET /openapi.json"
+    assert "runtime network" in (caught.value.action or "")
+
+
+@pytest.mark.parametrize(
+    ("network_error", "expected_kind"),
+    [
+        (
+            lambda request: httpx.ConnectError("connection refused", request=request),
+            FairPrepareFailureKind.CONNECTION,
+        ),
+        (
+            lambda request: httpx.ReadTimeout("read timed out", request=request),
+            FairPrepareFailureKind.TIMEOUT,
+        ),
+    ],
+)
+def test_transport_failure_classification(network_error, expected_kind):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise network_error(request)
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(FairPrepareError) as caught:
+        provider.preflight()
+
+    assert caught.value.kind == expected_kind
+    assert caught.value.retryable is True
+    assert calls == 1
+
+
+def test_invalid_payload_fails_locally_without_preflight_or_upload():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(FairPrepareError) as caught:
+        provider.assess_context(
+            PreclinicalStudyContext(study_id="study-1"),
+            frameworks=("not-deployed",),
+        )
+
+    assert caught.value.kind == FairPrepareFailureKind.PAYLOAD_VALIDATION
+    assert caught.value.retryable is False
+    assert calls == []
+
+
+def test_empty_bundle_fails_locally_without_network_io(tmp_path: Path):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    provider = HttpFairPrepareProvider(
+        "http://fair-vcg.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(FairPrepareError) as caught:
+        provider.assess_bundle(tmp_path)
+
+    assert caught.value.kind == FairPrepareFailureKind.PAYLOAD_VALIDATION
+    assert "header and at least one data row" in str(caught.value)
+    assert calls == []
+
+
 def test_provider_redacts_credentials_from_http_failure():
     credential = "fair-vcg-credential-value"
     provider = HttpFairPrepareProvider(
@@ -272,8 +395,11 @@ def test_compatibility_canary_fails_closed_on_version_mismatch():
         ),
     )
 
-    with pytest.raises(FairPrepareError, match="API version mismatch"):
+    with pytest.raises(FairPrepareError, match="API version mismatch") as caught:
         provider.check_compatibility()
+
+    assert caught.value.kind == FairPrepareFailureKind.CONTRACT
+    assert caught.value.retryable is False
 
 
 def test_assessment_fails_closed_on_version_mismatch_before_upload():
