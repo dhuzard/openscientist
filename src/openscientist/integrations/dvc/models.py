@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -26,12 +28,30 @@ class DVCImportRequest(StrictModel):
     stop: str = Field(min_length=10, max_length=40)
     aggregation: Literal["MINUTE", "HOUR"] = "MINUTE"
 
+    @field_validator("connection_id")
+    @classmethod
+    def valid_connection_id(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value):
+            raise ValueError(
+                "connection_id must be 1-100 letters, numbers, dots, dashes or underscores."
+            )
+        return value
+
     @field_validator("cage_ids")
     @classmethod
     def unique_cages(cls, value: list[str]) -> list[str]:
         cleaned = [item.strip() for item in value if item.strip()]
         if not cleaned:
             raise ValueError("At least one non-empty cage id is required.")
+        if any(len(item) > 100 for item in cleaned):
+            raise ValueError("Each cage id must be at most 100 characters.")
+        uuid_pattern = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+        if any(uuid_pattern.fullmatch(item) for item in cleaned):
+            raise ValueError(
+                "DVC imports require cage humanReadableId values (for example "
+                "S81P-40332), not vendor UUIDs."
+            )
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("Duplicate cage ids are not allowed.")
         return cleaned
@@ -43,6 +63,18 @@ class DVCImportRequest(StrictModel):
         if "," in value or " " in value:
             raise ValueError("Exactly one DVC metric id is allowed per import.")
         return value
+
+    @field_validator("start", "stop")
+    @classmethod
+    def canonical_timestamp(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Import bounds must be ISO-8601 timestamps.") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("Import bounds must include an explicit timezone offset.")
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @model_validator(mode="after")
     def bounded_window(self) -> "DVCImportRequest":
@@ -78,3 +110,8 @@ class DVCDatasetResult(StrictModel):
     assets: list[DVCAsset]
     inspection: DVCDatasetInspection
     vendor_state: dict[str, Any] = Field(default_factory=dict)
+    request_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    reused: bool = False
