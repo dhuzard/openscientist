@@ -18,6 +18,7 @@ from openscientist.integrations.dvc.execution import (
     DVCAnalysisError,
     DVCAnalysisRequest,
     DVCAnalysisService,
+    _assessment_conflict_blockers,
     canonical_checkpoint_sha256,
     canonical_context_sha256,
     canonical_parameters_sha256,
@@ -256,3 +257,29 @@ def test_analysis_rejects_checkpoint_modified_after_approval(tmp_path):
         )
 
     assert any("approved checkpoint content" in blocker for blocker in exc.value.blockers)
+
+
+def test_conflicting_light_cycle_assessment_blocks_biological_time_operation():
+    checkpoint = {
+        "assessments": [
+            {
+                "framework": "prepare-v1",
+                "findings": [
+                    {
+                        "requirement_id": "environment.light_schedule",
+                        "status": "conflicting",
+                        "blocks": ["summarize_circadian_cosinor"],
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert _assessment_conflict_blockers(
+        checkpoint,
+        "summarize_circadian_cosinor",
+    ) == [
+        "Conflicting assessment finding blocks biological-time analysis: "
+        "environment.light_schedule"
+    ]
+    assert _assessment_conflict_blockers(checkpoint, "check_data_sanity") == []

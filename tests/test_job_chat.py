@@ -20,6 +20,8 @@ from openscientist.agent.base import AbstractAgent, AgentConfig, IterationResult
 from openscientist.database.models import Job, JobChatMessage, User
 from openscientist.database.rls import set_current_user
 from openscientist.job_chat import (
+    _assigned_skills_prompt,
+    _load_assigned_skills,
     extract_chat_artifact_images,
     get_chat_history,
     load_job_context,
@@ -51,6 +53,33 @@ def _build_agent_recorder(
         return agent
 
     return _build
+
+
+def test_chat_recovers_assigned_skills_for_follow_up(tmp_path: Path) -> None:
+    manifest = [
+        {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "key": "domain--digital-ventilated-cage-analysis",
+            "name": "Digital Ventilated Cage Analysis",
+        },
+        {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "key": "domain--data-science",
+            "name": "data-science",
+        },
+    ]
+    (tmp_path / ".openscientist_skill_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    skills = _load_assigned_skills(tmp_path)
+    prompt = _assigned_skills_prompt(skills)
+
+    assert [skill.skill_id for skill in skills] == [item["id"] for item in manifest]
+    assert "domain--digital-ventilated-cage-analysis" in prompt
+    assert "domain--data-science" in prompt
+    assert "companion-skill rules" in prompt
 
 
 @pytest.mark.asyncio
@@ -753,6 +782,27 @@ async def test_send_chat_message_codex_provider(
 
     job_dir = temp_jobs_dir / str(test_job.id)
     job_dir.mkdir()
+    assigned_ids = (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
+    (job_dir / ".openscientist_skill_manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": assigned_ids[0],
+                    "key": "domain--digital-ventilated-cage-analysis",
+                    "name": "Digital Ventilated Cage Analysis",
+                },
+                {
+                    "id": assigned_ids[1],
+                    "key": "domain--data-science",
+                    "name": "data-science",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     # get_provider drives the codex backend, build_agent runs for real, so the
     # default chat_system_prompt folds the guidance in and write_chat_context is
@@ -765,6 +815,10 @@ async def test_send_chat_message_codex_provider(
     with (
         patch("openscientist.providers.get_provider", return_value=StubCodexProvider()),
         patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
+        patch(
+            "openscientist.agent.codex_agent.CodexAgent.prepare_job_workspace",
+            new_callable=AsyncMock,
+        ) as prepare_workspace,
     ):
         response = await send_chat_message(
             db_session, test_job.id, "Summarize the main findings.", job_dir
@@ -777,6 +831,10 @@ async def test_send_chat_message_codex_provider(
     config = captured["config"]
     assert config.system_prompt is not None
     assert "OpenScientist Job Chat Assistant" in config.system_prompt
+    assert "domain--digital-ventilated-cage-analysis" in config.system_prompt
+    assert "domain--data-science" in config.system_prompt
+    assert config.assigned_skill_ids == assigned_ids
+    prepare_workspace.assert_awaited_once_with(use_hypotheses=False)
     # No model override on the codex path, the model comes from the provider.
     assert config.model_override is None
 

@@ -120,11 +120,19 @@ OPERATION_CONTRACTS: dict[str, OperationContract] = {
         required_context=(
             "design.experimental_unit",
             "environment.timezone",
+            "environment.light_schedule",
             "acquisition.temporal_resolution",
         ),
         approval_required=True,
     ),
 }
+
+_BIOLOGICAL_TIME_OPERATIONS = frozenset(
+    {"summarize_light_dark", "summarize_circadian_cosinor"}
+)
+_VERIFIED_EVIDENCE_STATUSES = frozenset(
+    {EvidenceStatus.RECORDED, EvidenceStatus.COMPUTED}
+)
 
 
 class DVCAnalysisBlockedError(RuntimeError):
@@ -181,6 +189,19 @@ def _known(context: PreclinicalStudyContext, path: str) -> bool:
     return current.status != EvidenceStatus.UNKNOWN and current.value is not None
 
 
+def _verified(context: PreclinicalStudyContext, path: str) -> bool:
+    """Return whether a context value is source-backed rather than assumed."""
+    current: Any = context
+    for part in path.split("."):
+        current = getattr(current, part)
+    return (
+        current.status in _VERIFIED_EVIDENCE_STATUSES
+        and current.value is not None
+        and isinstance(current.source, str)
+        and bool(current.source.strip())
+    )
+
+
 def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
     contract = OPERATION_CONTRACTS.get(request.operation)
     if contract is None:
@@ -191,6 +212,12 @@ def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
         for path in contract.required_context
         if not _known(request.context, path)
     ]
+    if request.operation in _BIOLOGICAL_TIME_OPERATIONS:
+        for path in ("environment.timezone", "environment.light_schedule"):
+            if _known(request.context, path) and not _verified(request.context, path):
+                blockers.append(
+                    f"Verified recorded or computed context with a source is required: {path}"
+                )
     if request.context.design.mode not in contract.allowed_modes:
         blockers.append(
             f"Study mode '{request.context.design.mode}' is not allowed for {request.operation}."
@@ -221,6 +248,47 @@ def evaluate_prerequisites(request: DVCAnalysisRequest) -> list[str]:
     return blockers
 
 
+def _assessment_conflict_blockers(
+    checkpoint: dict[str, Any],
+    operation: str,
+) -> list[str]:
+    """Block biological-time work when FAIR/PREPARE reports a relevant conflict."""
+    if operation not in _BIOLOGICAL_TIME_OPERATIONS:
+        return []
+    relevant_terms = (
+        "light",
+        "dark",
+        "timezone",
+        "circadian",
+        "phase",
+        "zeitgeber",
+        operation.lower(),
+    )
+    blockers: list[str] = []
+    for assessment in checkpoint.get("assessments", []):
+        if not isinstance(assessment, dict):
+            continue
+        for finding in assessment.get("findings", []):
+            if not isinstance(finding, dict) or finding.get("status") != "conflicting":
+                continue
+            searchable = json.dumps(
+                {
+                    "requirement_id": finding.get("requirement_id"),
+                    "missing_fields": finding.get("missing_fields"),
+                    "blocks": finding.get("blocks"),
+                    "recommendation": finding.get("recommendation"),
+                },
+                sort_keys=True,
+                default=str,
+            ).lower()
+            if any(term in searchable for term in relevant_terms):
+                requirement = str(finding.get("requirement_id") or "light-cycle metadata")
+                blockers.append(
+                    f"Conflicting assessment finding blocks biological-time analysis: {requirement}"
+                )
+    return blockers
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -243,8 +311,11 @@ class DVCAnalysisService:
         self.job_dir = Path(job_dir)
 
     def execute(self, request: DVCAnalysisRequest) -> DVCAnalysisResult:
-        self._validate_pre_analysis_checkpoint(request)
-        blockers = evaluate_prerequisites(request)
+        checkpoint = self._validate_pre_analysis_checkpoint(request)
+        blockers = [
+            *evaluate_prerequisites(request),
+            *_assessment_conflict_blockers(checkpoint, request.operation),
+        ]
         if blockers:
             raise DVCAnalysisBlockedError("DVC analysis is blocked.", blockers=blockers)
 
@@ -320,6 +391,21 @@ class DVCAnalysisService:
             "started_at": started_at.isoformat(),
             "completed_at": completed_at.isoformat(),
             "warnings": [str(item) for item in output.get("warnings", [])],
+            "scientific_prerequisites": {
+                path: {
+                    "status": getattr(request.context, section).__getattribute__(field).status,
+                    "source": getattr(request.context, section).__getattribute__(field).source,
+                    "value_sha256": hashlib.sha256(
+                        json.dumps(
+                            getattr(request.context, section).__getattribute__(field).value,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+                for path in OPERATION_CONTRACTS[request.operation].required_context
+                for section, field in [path.split(".", maxsplit=1)]
+            },
         }
         provenance_path.write_text(
             json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
@@ -341,7 +427,7 @@ class DVCAnalysisService:
             provenance=provenance,
         )
 
-    def _validate_pre_analysis_checkpoint(self, request: DVCAnalysisRequest) -> None:
+    def _validate_pre_analysis_checkpoint(self, request: DVCAnalysisRequest) -> dict[str, Any]:
         checkpoint_id = request.pre_analysis_checkpoint_id
         root = (self.job_dir / "dvc_assessments").resolve()
         path = (root / f"{checkpoint_id}.json").resolve()
@@ -381,6 +467,7 @@ class DVCAnalysisService:
                     + "."
                 ],
             )
+        return payload
 
     def _dataset_dir(self, dataset_id: str) -> Path:
         if not re.fullmatch(r"dvc-[0-9a-fA-F-]{36}", dataset_id):

@@ -8,7 +8,9 @@ log_analysis writes.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,6 +30,164 @@ logger = logging.getLogger(__name__)
 _DATA_CACHE: dict[str, object] = {}
 _DATA_LOADED: dict[str, bool] = {}
 _DATA_ERROR: dict[str, str | None] = {}
+
+_DVC_SKILL_KEY = "domain--digital-ventilated-cage-analysis"
+_DATA_SCIENCE_SKILL_KEY = "domain--data-science"
+_EXPLORATORY_SCOPE_RE = re.compile(
+    r"\b(exploratory|validation|diagnostic|quality control|qc)\b",
+    re.IGNORECASE,
+)
+_STATISTICS_OR_PLOT_RE = re.compile(
+    r"\b("
+    r"ttest|t-test|wilcoxon|mannwhitney|anova|kruskal|pearson|spearman|"
+    r"correlation|effect[\s_-]*size|cohen|confidence[\s_-]*interval|"
+    r"regression|mixedlm|ols|cosinor|periodogram|scipy\.stats|statsmodels|"
+    r"matplotlib|seaborn|plot|corr"
+    r")\b",
+    re.IGNORECASE,
+)
+_BIOLOGICAL_TIME_RE = re.compile(
+    r"\b("
+    r"circadian|cosinor|acrophase|zeitgeber|zt\d*|dark[\s_-]*(?:onset|phase)|"
+    r"light[\s_-]*(?:onset|phase|schedule)|lights?[\s_-]*(?:on|off)|"
+    r"phase[\s_-]*(?:angle|shift|mean)"
+    r")\b",
+    re.IGNORECASE,
+)
+_DVC_DATASET_ID_RE = re.compile(r"\bdvc-[0-9a-fA-F-]{36}\b")
+
+
+def _assigned_skill_keys(job_dir: Path) -> set[str]:
+    try:
+        payload = json.loads(
+            (job_dir / ".openscientist_skill_manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(payload, list):
+        return set()
+    return {
+        str(item["key"])
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+
+
+def _verified_biological_time_context_issue(
+    job_dir: Path,
+    *,
+    searchable: str,
+) -> str | None:
+    """Return why exact-dataset biological-time provenance is insufficient."""
+    dataset_root = job_dir / "dvc_datasets"
+    available = {
+        path.name
+        for path in dataset_root.iterdir()
+        if path.is_dir() and _DVC_DATASET_ID_RE.fullmatch(path.name)
+    }
+    referenced = set(_DVC_DATASET_ID_RE.findall(searchable))
+    unknown = referenced - available
+    if unknown:
+        return "the code references an unknown DVC dataset"
+    if not referenced:
+        if len(available) != 1:
+            return (
+                "the exact DVC dataset is ambiguous; reference one dataset ID "
+                "explicitly"
+            )
+        referenced = available
+
+    analyses_dir = job_dir / "dvc_analyses"
+    if not analyses_dir.is_dir():
+        return "no governed analysis provenance is available"
+    verified: set[str] = set()
+    for path in analyses_dir.glob("*/provenance.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        dataset_id = payload.get("dataset_id")
+        prerequisites = payload.get("scientific_prerequisites", {})
+        if not isinstance(dataset_id, str) or not isinstance(prerequisites, dict):
+            continue
+        required = (
+            prerequisites.get("environment.light_schedule"),
+            prerequisites.get("environment.timezone"),
+        )
+        if all(
+            isinstance(item, dict)
+            and item.get("status") in {"recorded", "computed"}
+            and isinstance(item.get("source"), str)
+            and bool(item["source"].strip())
+            and isinstance(item.get("value_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", item["value_sha256"]))
+            for item in required
+        ):
+            verified.add(dataset_id)
+    missing = referenced - verified
+    if missing:
+        return (
+            "source-backed light schedule and local timezone provenance is missing "
+            f"for: {', '.join(sorted(missing))}"
+        )
+    return None
+
+
+def _dvc_code_guardrail(
+    job_dir: Path,
+    *,
+    code: str,
+    description: str,
+) -> tuple[str | None, str | None]:
+    """Fail closed for ad hoc code in a governed DVC job.
+
+    Returns ``(blocker, scope_notice)``. Jobs that are not governed DVC jobs
+    remain unaffected.
+    """
+    skills = _assigned_skill_keys(job_dir)
+    if _DVC_SKILL_KEY not in skills or not (job_dir / "dvc_datasets").is_dir():
+        return None, None
+
+    if not _EXPLORATORY_SCOPE_RE.search(description):
+        return (
+            "❌ DVC GOVERNANCE BLOCK: `execute_code` is outside governed UDWA "
+            "execution. Label its description explicitly as validation diagnostics "
+            "or exploratory work; it cannot produce governed evidence.",
+            None,
+        )
+
+    searchable = f"{description}\n{code}"
+    if (
+        _STATISTICS_OR_PLOT_RE.search(searchable)
+        and _DATA_SCIENCE_SKILL_KEY not in skills
+    ):
+        return (
+            "❌ DVC METHODOLOGY BLOCK: statistical testing, assumptions, effect "
+            "sizes, correlations, modelling, and plots outside governed UDWA require "
+            "the assigned `data-science` skill.",
+            None,
+        )
+
+    biological_time_issue = (
+        _verified_biological_time_context_issue(job_dir, searchable=searchable)
+        if _BIOLOGICAL_TIME_RE.search(searchable)
+        else None
+    )
+    if biological_time_issue:
+        return (
+            "❌ DVC SCIENTIFIC BLOCK: biological circadian modelling, phase/dark-"
+            "onset interpretation, and light/dark-aligned plots require a verified, "
+            "source-backed local light schedule and timezone for the exact dataset "
+            f"({biological_time_issue}). Placeholder assumptions are not allowed.",
+            None,
+        )
+
+    return (
+        None,
+        "⚠️ DVC GOVERNANCE SCOPE: this `execute_code` result is explicitly "
+        "ungoverned validation/exploratory output. It must not be presented as "
+        "governed scientific evidence.",
+    )
 
 
 def _ensure_data_loaded() -> str | None:
@@ -125,6 +285,14 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
     if language not in ("python", "rust", "sparql"):
         return f"❌ ERROR: Unsupported language '{language}'. Supported: 'python', 'rust', 'sparql'"
 
+    governance_blocker, governance_scope = _dvc_code_guardrail(
+        STATE.job_dir,
+        code=code,
+        description=description,
+    )
+    if governance_blocker:
+        return governance_blocker
+
     load_error = _ensure_data_loaded()
     if load_error and language not in ("rust", "sparql"):
         return f"❌ ERROR: Cannot execute code - data file failed to load.\n\n{load_error}"
@@ -198,7 +366,11 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
         success=result["success"],
         execution_time=result["execution_time"],
         plots=result.get("plots", []),
+        governance_scope=governance_scope,
     )
     ks.save_to_database_sync(STATE.job_id)
 
-    return format_execution_result(result)
+    formatted = format_execution_result(result)
+    if governance_scope:
+        return f"{governance_scope}\n\n{formatted}"
+    return formatted

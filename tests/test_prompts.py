@@ -119,6 +119,14 @@ class TestRenderChatContext:
         # The guidance itself is preserved.
         assert "execute_code" in ctx
 
+    def test_chat_context_keeps_skills_and_versioned_report_updates(self):
+        ctx = ClaudeCodeAgent.chat_doc()
+        normalized = " ".join(ctx.split())
+
+        assert "assigned skills remain mandatory during Chat" in ctx
+        assert "Do not write to `final_report.md`" not in ctx
+        assert "the host will preserve the prior report" in normalized
+
 
 class TestBuildDiscoveryPrompt:
     """Tests for discovery prompt construction."""

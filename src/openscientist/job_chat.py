@@ -55,6 +55,56 @@ class ChatArtifactImage:
     url: str
 
 
+@dataclass(frozen=True)
+class _AssignedSkill:
+    skill_id: str
+    key: str
+    name: str
+
+
+def _load_assigned_skills(job_dir: Path) -> tuple[_AssignedSkill, ...]:
+    """Recover the discovery job's exact skill assignment for follow-up chat."""
+    path = job_dir / ".openscientist_skill_manifest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    assigned: list[_AssignedSkill] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        skill_id = item.get("id")
+        key = item.get("key")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            continue
+        if not isinstance(key, str) or not key.strip():
+            continue
+        name = item.get("name")
+        assigned.append(
+            _AssignedSkill(
+                skill_id=skill_id.strip(),
+                key=key.strip(),
+                name=name.strip() if isinstance(name, str) and name.strip() else key.strip(),
+            )
+        )
+    return tuple(assigned)
+
+
+def _assigned_skills_prompt(skills: tuple[_AssignedSkill, ...]) -> str:
+    if not skills:
+        return ""
+    entries = "\n".join(f"- `{skill.key}` ({skill.name})" for skill in skills)
+    return (
+        "\n\n## Assigned skills carried forward from discovery\n"
+        "These skills remain mandatory in Chat. Before follow-up analysis, load and "
+        "follow every assigned skill relevant to the request; companion-skill rules "
+        "inside them still apply.\n"
+        f"{entries}"
+    )
+
+
 def extract_chat_artifact_images(
     content: str,
     job_id: UUID | str,
@@ -548,6 +598,7 @@ async def _send_message_via_executor(
     # System prompt is kept small (it's passed as a CLI arg to the claude
     # subprocess, so large payloads hit the OS ARG_MAX limit).  The agent
     # can read job data files on demand via Claude Code's built-in Read tool.
+    assigned_skills = _load_assigned_skills(job_dir)
     system_prompt = """You are a research assistant helping a scientist discuss the results of their OpenScientist literature review and hypothesis generation job.
 
 Your working directory is the job folder. Use available tools to inspect artifacts
@@ -571,6 +622,7 @@ assumptions or limitations. If no existing section fits, use
 `## Follow-up analyses from Chat`. In your reply, embed the plot with Markdown
 image syntax and state the exact report section and accompanying text. The host
 will enforce the preview and create the immutable report version."""
+    system_prompt += _assigned_skills_prompt(assigned_skills)
 
     # Prompt structure matters more than wording: findings are framed as
     # background reference, long prior turns are truncated so an old report dump
@@ -621,6 +673,7 @@ will enforce the preview and create the immutable report version."""
     config = AgentConfig(
         job_dir=job_dir,
         system_prompt=agent_cls.chat_system_prompt(system_prompt),
+        assigned_skill_ids=tuple(skill.skill_id for skill in assigned_skills),
         model_override=agent_cls.chat_model_override(),
         tool_server_env={
             # Chat's tools run in-process here, so hand them this job's exec token.
@@ -635,6 +688,10 @@ will enforce the preview and create the immutable report version."""
     )
     executor = build_agent(config, provider)
     executor.apply_runtime_environment()
+    # Re-materialize the exact discovery assignment for this short-lived chat
+    # agent. In particular, Codex discovers project skills only after the
+    # `.agents/skills/*/SKILL.md` tree exists.
+    await executor.prepare_job_workspace(use_hypotheses=False)
     executor.write_chat_context()
 
     try:

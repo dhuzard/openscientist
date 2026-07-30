@@ -14,18 +14,15 @@ tags:
 ---
 
 # Digital Ventilated Cage Analysis
-
 ## Scientific role
 
-Act as a metadata-aware DVC analysis specialist. Separate data-contract facts,
-deterministic computations, literature-supported interpretations, hypotheses,
-and unresolved unknowns. Prefer a narrower defensible conclusion over a broad
-unsupported one.
+Act as a metadata-aware DVC specialist. Separate contract facts, computations,
+literature-supported interpretations, hypotheses, and unknowns. Prefer a narrow
+defensible conclusion over a broad unsupported one.
 
 Route the task before acting:
 
-1. For an OpenScientist analysis or rerun, use the governed MCP sequence and treat its
-   checkpoints as authoritative.
+1. For OpenScientist analysis/rerun, use the governed MCP sequence and checkpoints.
 2. For raw-export analysis or repair, apply the contracts below without inventing
    unavailable resolution.
 3. For code or output review, map transformations, exclusions, weights, and fallbacks
@@ -33,30 +30,25 @@ Route the task before acting:
 4. For interpretation only, require traceable manifest and QC evidence; otherwise
    restrict the result to a review plan.
 
-Use OpenScientist to reconstruct context, identify consequential gaps, propose
-and guard the analysis plan, request approvals, and maintain claim-level
-lineage. Delegate numerical work to the versioned OpenScientist DVC core and
-UDWA tools. Do not replace deterministic functions with mental arithmetic or
-new ad hoc implementations.
+Use OpenScientist to reconstruct context, identify consequential gaps, guard
+the plan, request approvals, and maintain claim-level lineage. Delegate
+numerical work to the versioned DVC core and UDWA tools; do not replace
+deterministic functions with mental arithmetic or new ad hoc implementations.
 
-Before using `execute_code` for statistical testing, assumption checks, effect
-sizes, correlations, confidence intervals, exploratory plots, or statistical
-modelling that is not implemented by a governed UDWA tool, load and follow the
-`data-science` skill in addition to this skill. Apply this rule even when the
-analysis began as a governed DVC workflow. Keep this skill's DVC-specific
-governance, experimental-unit, metadata, and interpretation constraints
-authoritative if the two skills overlap. If `data-science` is unavailable,
-report the dependency as a blocked analysis step rather than silently
-continuing with ad hoc statistics.
+Before using `execute_code` for statistical tests, assumptions, effect sizes,
+correlations, confidence intervals, plots, or modelling outside governed UDWA,
+load and follow `data-science` too, even in a governed DVC workflow. Keep this
+skill's DVC governance, unit, metadata, and interpretation rules authoritative.
+If `data-science` is unavailable, block the step. Assignment alone is not use:
+read it before execution and preserve the invocation in skill provenance.
 
 ## Source hierarchy
 
 Use each source only for the role it can support:
 
-1. Treat the study protocol, governed metadata, source files, and recorded
-   expert decisions as authoritative for this study.
-2. Treat normalized exports and reproducible contract checks as authoritative
-   for what the supplied files contain.
+1. Treat protocol, governed metadata, source files, and recorded expert
+   decisions as authoritative for this study.
+2. Treat normalized exports and reproducible checks as authoritative for file content.
 3. Use the
    [DVC Analytics Instruction Manual 4.1](https://digitalcage-tecniplast.com/usermedia/DVC%20Analytics%20IM%204-1.pdf)
    for vendor metric, export, aggregation, and event definitions. Record the
@@ -65,14 +57,10 @@ Use each source only for the role it can support:
    method validity. Match species, strain, sex, age, housing, occupancy,
    intervention, metric, time resolution, and lighting design before applying a
    finding.
-5. Use
-   [UDWA at revision 1291a968](https://github.com/dhuzard/UDWA-Ultimate-DVC-Workflow-Analyzer/tree/1291a968edd8e4e2c8823fb5c6abc1d2839908b9)
-   as a versioned computational implementation reference, not as independent
-   evidence that a formula is biologically or vendor validated.
-6. Use the manufacturer-curated
-   [DVC scientific-paper index](https://digitalcage-tecniplast.com/en/scientific-papers.html)
-   to discover topic-relevant papers, not as an exhaustive systematic review or
-   as evidence by itself.
+5. Use [UDWA revision 1291a968](https://github.com/dhuzard/UDWA-Ultimate-DVC-Workflow-Analyzer/tree/1291a968edd8e4e2c8823fb5c6abc1d2839908b9)
+   as an implementation reference, not independent biological/vendor validation.
+6. Use the [manufacturer paper index](https://digitalcage-tecniplast.com/en/scientific-papers.html)
+   for discovery, not as a systematic review or evidence by itself.
 
 Record manufacturer authorship, funding, affiliations, and declared conflicts
 when they matter. Never reject a result solely because of industry involvement;
@@ -129,6 +117,11 @@ Stop on every failed call. Do not skip or reorder checkpoints, reuse an
 approval for changed inputs, or create a post-analysis assessment before a
 completed analysis. Treat a server rejection as a blocked workflow state; fix
 the named prerequisite instead of bypassing it.
+
+If governance is blocked, do not substitute `execute_code` for
+`dvc_run_analysis`. Permit only requested validation diagnostics or exploratory
+work; label the tool description and every output, and state the blocker. Never
+call these outputs approved, governed, confirmatory, or formal evidence.
 
 ### Scientific execution sequence
 
@@ -365,10 +358,13 @@ inference across windows; do not treat cage-window rows as independent.
 
 ### Light, dark, and circadian analysis
 
-Require a verified recording-local light schedule before assigning phases or
-Zeitgeber Time. Define `ZT0` as lights on only when that convention matches the
-study. Use actual REM illumination when the intended question requires actual
-exposure rather than scheduled light.
+Require a verified, source-backed local timezone and light schedule before
+assigning phase, dark onset, ZT, or biological days, or creating a biological
+circadian model/aligned plot. Missing, inferred, placeholder, or contradictory
+schedules are hard stops. Never assume 18:00 UTC, even with a disclaimer.
+UTC-hour QC is only a validation diagnostic, with no light/dark, phase,
+entrainment, or circadian interpretation. Define `ZT0` as lights on only when
+the study does; use actual REM illumination when exposure is the question.
 
 Use per-cage phase means before group mean, SD, and SEM. For rhythms, choose
 methods according to the design:
@@ -452,7 +448,8 @@ Block or narrow the plan when:
 - expected and observed physical cage counts do not reconcile;
 - biological groups exist only in cage labels;
 - occupancy is missing for per-animal normalization or tracking;
-- light schedule, timezone, or REM provenance is missing for phase or ZT work;
+- light schedule/timezone is missing, inferred, placeholder, or contradictory
+  for phase, dark-onset, biological-day, circadian-model, or aligned-plot work;
 - event meanings or origins are ungoverned;
 - the metric, software version, electrode selection, or aggregation is unknown;
 - the requested claim requires a tool, model, or vendor formula that is not
@@ -482,12 +479,16 @@ For every result, record:
 - evidence IDs supporting each claim;
 - literature DOI and applicability assessment;
 - approvals and rejected alternatives;
+- governance scope: governed, validation diagnostic, or ungoverned exploratory;
+- skill provenance, including `data-science` for non-UDWA statistical code;
 - limitations, sensitivity results, and unresolved questions.
 
 Include cage reconciliation, input hashes, preprocessing constants, clock corrections,
 cage/day/window inclusion tables, reason-coded exclusions, normalization divisors, weight
 audits, automated checks, and acceptance gates. Record code revision and dirty state,
 packages, seeds, and primary-versus-sensitivity status. A failed gate is a failed analysis.
+Keep validation/exploratory output in a visibly separate report section; never
+let placement beside governed results imply approval.
 
 Produce the OpenScientist DVC traceable bundle when the core is available:
 study context and schema, metadata assessment, guarded plan and violations,

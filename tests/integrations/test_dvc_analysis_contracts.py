@@ -84,6 +84,55 @@ def test_light_dark_reports_all_missing_context_and_approval():
     assert "Human approval is required for summarize_light_dark." in blockers
 
 
+def test_cosinor_requires_verified_light_schedule():
+    missing_schedule = context()
+    missing_schedule.environment.light_schedule = EvidenceValue()
+    blockers = evaluate_prerequisites(
+        request(
+            "summarize_circadian_cosinor",
+            study_context=missing_schedule,
+            approved=True,
+        )
+    )
+    assert "Missing required context: environment.light_schedule" in blockers
+
+    assumed_schedule = context()
+    assumed_schedule.environment.light_schedule = EvidenceValue(
+        value={"lights_on": "07:00", "lights_off": "19:00"},
+        status=EvidenceStatus.INFERRED,
+        source="placeholder",
+        confidence=0.5,
+    )
+    blockers = evaluate_prerequisites(
+        request(
+            "summarize_circadian_cosinor",
+            study_context=assumed_schedule,
+            approved=True,
+        )
+    )
+    assert (
+        "Verified recorded or computed context with a source is required: "
+        "environment.light_schedule"
+    ) in blockers
+
+
+def test_biological_time_requires_source_backed_timezone():
+    study_context = context()
+    study_context.environment.timezone = EvidenceValue(
+        value="UTC",
+        status=EvidenceStatus.RECORDED,
+    )
+
+    blockers = evaluate_prerequisites(
+        request("summarize_light_dark", study_context=study_context, approved=True)
+    )
+
+    assert (
+        "Verified recorded or computed context with a source is required: "
+        "environment.timezone"
+    ) in blockers
+
+
 def test_matching_approval_unblocks_operation():
     study_context = context()
     assert (
