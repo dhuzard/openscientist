@@ -6,6 +6,7 @@ unit testing.
 """
 
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -874,6 +875,33 @@ class TestCreateJob:
         assert not (job_dir / "knowledge_state.json").exists()
         assert (job_dir / "data").is_dir()
         assert (job_dir / "provenance").is_dir()
+
+    def test_nested_git_repo_ignores_generated_job_artifacts(self, tmp_path):
+        from openscientist.orchestrator import create_job
+
+        with patch("openscientist.orchestrator.setup.KnowledgeState.save_to_database_sync"):
+            job_dir = create_job(
+                job_id=str(uuid4()),
+                research_question="Why?",
+                data_files=[],
+                max_iterations=5,
+                jobs_dir=tmp_path,
+            )
+
+        generated = job_dir / ".codex" / "plugins" / "generated.txt"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("runtime cache", encoding="utf-8")
+        (job_dir / "final_report.md").write_text("runtime result", encoding="utf-8")
+
+        status = subprocess.run(
+            ["git", "status", "--short", "--untracked-files=all"],
+            cwd=job_dir,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+
+        assert status.stdout == ""
 
     def test_knowledge_state_contents(self, tmp_path):
         from openscientist.orchestrator import create_job

@@ -22,6 +22,31 @@ from openscientist.knowledge_state import KnowledgeState
 
 logger = logging.getLogger(__name__)
 
+_JOB_GIT_EXCLUDE_MARKER = "# OpenScientist runtime job artifacts"
+_JOB_GIT_EXCLUDE_BLOCK = f"""\
+{_JOB_GIT_EXCLUDE_MARKER}
+# This nested repository exists only to provide agent gitStatus context.
+# Job outputs and agent caches are runtime artifacts, not source changes.
+/*
+"""
+
+
+def _exclude_job_runtime_artifacts(git_dir: Path) -> None:
+    """Keep generated job contents out of nested-repository Git status."""
+    exclude_path = git_dir / "info" / "exclude"
+    try:
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        if _JOB_GIT_EXCLUDE_MARKER in existing:
+            return
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude_path.write_text(
+            f"{existing}{separator}{_JOB_GIT_EXCLUDE_BLOCK}",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Failed to configure job Git exclusions in %s: %s", git_dir, exc)
+
 
 def _persist_data_files_to_db(job_id: str, data_paths: list[Path]) -> None:
     """
@@ -117,6 +142,7 @@ def create_job(
     )
     git_dir = job_dir / ".git"
     if git_dir.exists():
+        _exclude_job_runtime_artifacts(git_dir)
         # Make world-writable so agent container (non-root UID) can use it.
         for p in git_dir.rglob("*"):
             try:
