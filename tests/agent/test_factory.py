@@ -39,6 +39,9 @@ class _FamilylessProvider(Provider):
             recent_period_hours=lookback_hours,
         )
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        return {}
+
 
 def test_registry_maps_known_ids() -> None:
     assert provider_class("anthropic") is AnthropicProvider

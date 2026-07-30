@@ -231,11 +231,17 @@ class OmpAgent(AbstractAgent[Provider]):
         logger.info("Wrote omp model catalog to %s", path)
 
     def _build_subprocess_env(self) -> dict[str, str]:
-        """omp process env: inherited env plus provider auth, the per-job overlay,
-        and the proxy base URL when active. The container env is overlaid so auth
-        works in both the runner (os.environ pre-injected) and the web/chat process
-        (not). omp reads ``ANTHROPIC_BASE_URL`` natively, OpenAI-family providers
-        get the proxy as ``OPENAI_BASE_URL``."""
+        """omp process env: inherited env, the provider's container env, then the
+        per-job overlay. The container env is overlaid so auth works both in the
+        runner (where os.environ is pre-injected) and in the web or chat process
+        (where it is not).
+
+        Routing comes last and wins, because ``Provider.harness_env`` is the only
+        place that knows how *this* harness reaches the provider. The names differ
+        from the Claude Code ones the container env publishes, and letting the
+        ambient environment win is how a provider ends up talking to the vendor
+        directly with the real credential.
+        """
         provider_settings = get_settings().provider
         env = dict(os.environ)
         env.update(provider_settings.get_container_env_vars())
@@ -251,9 +257,8 @@ class OmpAgent(AbstractAgent[Provider]):
         if omp_home.is_dir():
             env["PI_CODING_AGENT_DIR"] = str(omp_home)
 
-        # Provider-specific base-URL env for a generic harness (proxy or local).
-        for key, value in self._provider.harness_env(proxy=env.get(LLM_PROXY_URL_ENV)).items():
-            env.setdefault(key, value)
+        # Provider routing, applied last so it beats any ambient value.
+        env.update(self._provider.harness_env(proxy=env.get(LLM_PROXY_URL_ENV)))
         return env
 
     #: omp built-in tools the discovery loop may use. ``--tools`` is an enable

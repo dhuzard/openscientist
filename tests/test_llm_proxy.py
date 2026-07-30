@@ -620,3 +620,133 @@ class TestAirgapPosture:
         p = active_provider(**env)
         routed = bool(p.proxy_env_overrides(proxy_base_url="http://x", placeholder="y"))
         assert (p.airgap_egress().mode is AirgapEgress.PROXY) == routed
+
+
+class TestHarnessRouting:
+    """A provider-agnostic harness (omp) must be routed at the proxy whenever the
+    container is. Where these disagree, omp talks to the vendor directly with the
+    real credential and the key-replacement proxy is bypassed."""
+
+    @pytest.mark.parametrize(
+        ("env", "expected_key"),
+        [
+            (
+                {"OPENSCIENTIST_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"},
+                "ANTHROPIC_BASE_URL",
+            ),
+            (
+                {
+                    "OPENSCIENTIST_PROVIDER": "cborg",
+                    "ANTHROPIC_AUTH_TOKEN": "t",
+                    "ANTHROPIC_BASE_URL": "https://api.cborg.lbl.gov",
+                },
+                "ANTHROPIC_BASE_URL",
+            ),
+            (
+                {
+                    "OPENSCIENTIST_PROVIDER": "foundry",
+                    "ANTHROPIC_FOUNDRY_RESOURCE": "r",
+                    "ANTHROPIC_FOUNDRY_API_KEY": "k",
+                },
+                # omp reads FOUNDRY_BASE_URL, not the ANTHROPIC_FOUNDRY_BASE_URL
+                # the container env uses. Getting this wrong sent every turn to
+                # api.anthropic.com, which the airgap firewall drops.
+                "FOUNDRY_BASE_URL",
+            ),
+            ({"OPENSCIENTIST_PROVIDER": "openai", "OPENAI_API_KEY": "sk"}, "OPENAI_BASE_URL"),
+        ],
+    )
+    def test_proxied_provider_routes_the_harness_at_the_proxy(
+        self, active_provider, env, expected_key
+    ):
+        p = active_provider(**env)
+        assert p.airgap_egress().mode is AirgapEgress.PROXY, "recipe should be a proxied one"
+        assert p.harness_env(proxy="http://openscientist:8081")[expected_key] == (
+            "http://openscientist:8081"
+        )
+
+    #: Credential env names the shipped omp binary actually reads, from its own
+    #: envKeys resolution order: ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_OAUTH_TOKEN
+    #: then ANTHROPIC_API_KEY in Foundry mode, the latter two otherwise, plus
+    #: OPENAI_API_KEY for the OpenAI family. Notably absent are the Claude Code
+    #: names ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN, which appear zero
+    #: times in the binary.
+    _OMP_CREDENTIAL_NAMES = frozenset(
+        {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_OAUTH_TOKEN",
+            "ANTHROPIC_FOUNDRY_API_KEY",
+            "OPENAI_API_KEY",
+        }
+    )
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"OPENSCIENTIST_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"},
+            {
+                "OPENSCIENTIST_PROVIDER": "cborg",
+                "ANTHROPIC_AUTH_TOKEN": "t",
+                "ANTHROPIC_BASE_URL": "https://api.cborg.lbl.gov",
+            },
+            {
+                "OPENSCIENTIST_PROVIDER": "foundry",
+                "ANTHROPIC_FOUNDRY_RESOURCE": "r",
+                "ANTHROPIC_FOUNDRY_API_KEY": "k",
+            },
+            {"OPENSCIENTIST_PROVIDER": "openai", "OPENAI_API_KEY": "sk"},
+        ],
+    )
+    def test_proxied_provider_gives_the_harness_a_credential_it_reads(self, active_provider, env):
+        """Routing omp at the proxy is only half of reachability: it also has to
+        arrive with a credential. CBORG published its bearer solely as
+        ANTHROPIC_AUTH_TOKEN, which omp never reads, so every turn hit the proxy
+        unauthenticated. Checking the base URL alone did not catch that.
+        """
+        proxy = "http://openscientist:8081"
+        p = active_provider(**env)
+        published = set(p.proxy_env_overrides(proxy_base_url=proxy, placeholder="ph"))
+        published |= set(p.harness_env(proxy=proxy))
+        assert published & self._OMP_CREDENTIAL_NAMES, (
+            f"{env['OPENSCIENTIST_PROVIDER']} hands omp no credential it reads, so the "
+            f"turn reaches the proxy unauthenticated. Published: {sorted(published)}"
+        )
+
+    def test_vertex_routes_the_harness_with_google_names(self, active_provider, tmp_path):
+        """Vertex signs its own requests, so it is direct. omp reads the standard
+        Google names rather than the Claude Code ones we publish, so without the
+        translation omp falls back to the public Anthropic endpoint."""
+        creds = tmp_path / "sa.json"
+        creds.write_text('{"type": "service_account"}')
+        p = active_provider(
+            OPENSCIENTIST_PROVIDER="vertex",
+            ANTHROPIC_VERTEX_PROJECT_ID="proj-1",
+            GOOGLE_APPLICATION_CREDENTIALS=str(creds),
+            GCP_BILLING_ACCOUNT_ID="012345-ABCDEF",
+            CLOUD_ML_REGION="us-east5",
+        )
+        env = p.harness_env(proxy=None)
+        assert env["GOOGLE_CLOUD_PROJECT"] == "proj-1"
+        assert env["GOOGLE_CLOUD_LOCATION"] == "us-east5"
+        assert env["GOOGLE_APPLICATION_CREDENTIALS"] == str(creds)
+
+    def test_bedrock_sigv4_needs_no_harness_routing(self, active_provider):
+        """SigV4 signs its own requests and omp uses the same AWS names we do."""
+        p = active_provider(
+            OPENSCIENTIST_PROVIDER="bedrock",
+            AWS_REGION="us-east-1",
+            AWS_ACCESS_KEY_ID="ak",
+            AWS_SECRET_ACCESS_KEY="sk",
+        )
+        assert p.harness_env(proxy=None) == {}
+
+    def test_bedrock_bearer_refuses_to_be_proxied_under_a_generic_harness(self, active_provider):
+        """omp exposes no Bedrock base-URL override, so a proxied bearer setup
+        cannot be expressed. Refusing beats reaching AWS with the real token."""
+        p = active_provider(
+            OPENSCIENTIST_PROVIDER="bedrock",
+            AWS_REGION="us-east-1",
+            AWS_BEARER_TOKEN_BEDROCK="tok",
+        )
+        with pytest.raises(ValueError, match="cannot be routed through the LLM proxy"):
+            p.harness_env(proxy="http://openscientist:8081")

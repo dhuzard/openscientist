@@ -43,6 +43,9 @@ class _StubClaude(ClaudeCompatible):
     def claude_model_name(self) -> str:
         return "claude-test-model"
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        return {}
+
 
 class _StubCodex(CodexCompatible):
     @property

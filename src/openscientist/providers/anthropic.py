@@ -88,6 +88,28 @@ class AnthropicProvider(ClaudeCompatible):
             return {"ANTHROPIC_BASE_URL": proxy_base_url, "CLAUDE_CODE_OAUTH_TOKEN": placeholder}
         return {}
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Route omp at Anthropic.
+
+        ``ANTHROPIC_BASE_URL`` is spelled the same as Claude Code uses, so the
+        endpoint needs no translation, but the subscription token does: omp reads
+        ``ANTHROPIC_OAUTH_TOKEN`` where Claude Code reads
+        ``CLAUDE_CODE_OAUTH_TOKEN``. Both the real token and the proxy placeholder
+        are published under the Claude Code name, so without this omp sees no
+        credential at all on the OAuth path.
+        """
+        p = get_settings().provider
+        env = {}
+        if proxy:
+            env["ANTHROPIC_BASE_URL"] = proxy
+        # Under the proxy the runner has replaced the token with the job
+        # placeholder in the container env, so read it from there rather than
+        # from settings, which still holds the real one.
+        oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") if proxy else p.claude_code_oauth_token
+        if oauth and not p.anthropic_api_key:
+            env["ANTHROPIC_OAUTH_TOKEN"] = oauth
+        return env
+
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
         return get_settings().provider.model or "claude-sonnet-4-20250514"

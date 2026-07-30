@@ -123,6 +123,29 @@ class BedrockProvider(ClaudeCompatible):
                 env.pop(key, None)
         return env
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Route omp at Bedrock.
+
+        omp drives Bedrock through the AWS SDK using the standard ``AWS_*``
+        names, which match ours, so SigV4 needs no translation and no proxy: it
+        signs its own requests and ``airgap_egress`` already reports DIRECT.
+
+        Bearer mode is the gap. Our proxy override sets
+        ``ANTHROPIC_BEDROCK_BASE_URL``, a Claude Code name omp does not read, and
+        omp exposes no Bedrock base-URL override, so a proxied bearer setup
+        cannot be expressed. Refuse rather than let omp reach AWS directly with
+        the real token.
+        """
+        if not proxy:
+            return {}
+        raise ValueError(
+            "Bedrock bearer-token auth cannot be routed through the LLM proxy under "
+            "the omp harness: omp has no Bedrock base-URL override, so omp would "
+            "reach AWS directly with the real token. Use SigV4 credentials "
+            "(AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE), which omp "
+            "signs itself, or run this provider under the claude_code harness."
+        )
+
     def airgap_egress(self) -> AirgapPosture:
         p = get_settings().provider
         if p.aws_bearer_token_bedrock:

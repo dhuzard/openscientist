@@ -46,6 +46,9 @@ class StubClaudeProvider(ClaudeCompatible):
     def claude_model_name(self) -> str:
         return "stub-model"
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        return {}
+
 
 class StubCodexProvider(CodexCompatible):
     """Minimal concrete `CodexCompatible` for tests that need a Codex-family

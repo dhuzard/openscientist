@@ -51,6 +51,9 @@ class StubProvider(Provider):
             raise ProviderError("No cost info configured")
         return self._cost_info
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        return {}
+
 
 # ─── Tests ────────────────────────────────────────────────────────────
 

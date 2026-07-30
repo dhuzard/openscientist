@@ -89,6 +89,9 @@ def test_base_provider_model_profile_delegates_to_default():
         def effective_model_name(self) -> str | None:
             return "claude-sonnet-4-6"
 
+        def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+            return {}
+
     provider = _FakeProvider()
     with patch(
         "openscientist.providers.base.get_settings",

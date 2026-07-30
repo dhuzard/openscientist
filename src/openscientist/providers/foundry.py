@@ -139,6 +139,26 @@ class FoundryProvider(ClaudeCompatible):
             env.pop("ANTHROPIC_FOUNDRY_RESOURCE", None)
         return env
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Route omp at Foundry.
+
+        This is the case that failed in review. omp keys Foundry mode off
+        ``CLAUDE_CODE_USE_FOUNDRY`` and then reads ``FOUNDRY_BASE_URL``, not the
+        ``ANTHROPIC_FOUNDRY_BASE_URL`` that Claude Code and our container env
+        use. With the name unset omp fell through its chain to
+        ``https://api.anthropic.com``, which the air-gap firewall drops, so every
+        turn hung until it timed out. Foundry mode sends the credential as
+        ``Authorization: Bearer``, which the proxy already accepts, so the
+        placeholder needs no special handling.
+        """
+        p = get_settings().provider
+        if not (p.anthropic_foundry_base_url or p.anthropic_foundry_resource):
+            return {}
+        return {
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "FOUNDRY_BASE_URL": proxy or self._resolve_base_url(),
+        }
+
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
         return get_settings().provider.model or "claude-sonnet-4-5"

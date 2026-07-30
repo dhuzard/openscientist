@@ -290,3 +290,22 @@ class TestAuthProvisioning:
     def test_no_provisioning_leaves_agent_dir_unset(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path)
         assert "PI_CODING_AGENT_DIR" not in agent._build_subprocess_env()
+
+
+class TestRoutingPrecedence:
+    def test_provider_routing_beats_ambient_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """harness_env is the only place that knows how omp reaches the provider,
+        so an inherited value of the same name must not win. Deferring to the
+        ambient env is how a job ends up at the vendor with a real credential."""
+
+        class _Routed(_Provider):
+            def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+                return {"OPENAI_API_KEY": "routed", "OPENAI_BASE_URL": "http://local:1234"}
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-ambient-key")
+        agent = OmpAgent(AgentConfig(job_dir=tmp_path), _Routed())
+        env = agent._build_subprocess_env()
+        assert env["OPENAI_API_KEY"] == "routed"
+        assert env["OPENAI_BASE_URL"] == "http://local:1234"

@@ -5,6 +5,7 @@ Uses CBORG API for model access and cost tracking.
 """
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -88,6 +89,31 @@ class CborgProvider(ClaudeCompatible):
         if s.anthropic_base_url and s.anthropic_auth_token:
             return {"ANTHROPIC_BASE_URL": proxy_base_url, "ANTHROPIC_AUTH_TOKEN": placeholder}
         return {}
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Route omp at the CBORG gateway.
+
+        omp never reads ``ANTHROPIC_AUTH_TOKEN``, the name Claude Code uses for a
+        gateway bearer and the one both our container env and proxy override
+        publish, so untranslated it reaches the gateway with no credential at all.
+
+        Mapped to ``ANTHROPIC_API_KEY`` rather than ``ANTHROPIC_OAUTH_TOKEN``
+        because omp's OAuth path also attaches Anthropic's OAuth beta header,
+        which a gateway has no reason to accept. Proxied, the proxy takes either
+        header and substitutes the real bearer upstream, so this only decides the
+        unproxied header form.
+        """
+        s = get_settings().provider
+        base = proxy or s.anthropic_base_url
+        env = {}
+        if base:
+            env["ANTHROPIC_BASE_URL"] = base
+        # Proxied, the runner has already swapped in the job placeholder, so the
+        # container env holds it and settings still hold the real token.
+        token = os.environ.get("ANTHROPIC_AUTH_TOKEN") if proxy else s.anthropic_auth_token
+        if token:
+            env["ANTHROPIC_API_KEY"] = token
+        return env
 
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""

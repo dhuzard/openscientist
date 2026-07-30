@@ -90,6 +90,24 @@ class VertexProvider(ClaudeCompatible):
         """Vertex routing/auth env for the claude-agent-sdk CLI (its container env)."""
         return type(self).container_env(get_settings().provider)
 
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        """Route omp at Vertex.
+
+        Vertex signs its own requests with application-default credentials, so it
+        is never proxied and ``airgap_egress`` reports DIRECT. omp reads the
+        standard Google names rather than the Claude Code ones we publish, so the
+        project and region have to be translated or omp falls back to the public
+        Anthropic endpoint.
+        """
+        p = get_settings().provider
+        return env_from_pairs(
+            [
+                ("GOOGLE_CLOUD_PROJECT", p.anthropic_vertex_project_id),
+                ("GOOGLE_CLOUD_LOCATION", p.cloud_ml_region),
+                ("GOOGLE_APPLICATION_CREDENTIALS", p.google_application_credentials),
+            ]
+        )
+
     def claude_model_name(self) -> str:
         """Model name for ClaudeAgentOptions.model."""
         return get_settings().provider.model or "claude-sonnet-4-5@20250929"

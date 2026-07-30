@@ -351,11 +351,19 @@ class Provider(abc.ABC):
         composes without instantiating the provider. Base: none."""
         return {}
 
+    @abc.abstractmethod
     def harness_env(self, *, proxy: str | None) -> dict[str, str]:
-        """Extra env a provider-agnostic harness (omp) needs to reach this
-        provider's endpoint. ``proxy`` is the in-container LLM proxy URL when
-        active. Base: none (the harness reads the provider's own base-URL env)."""
-        return {}
+        """Env a provider-agnostic harness (omp) needs to reach this provider.
+
+        ``proxy`` is the in-container LLM proxy URL when active, in which case
+        the returned env MUST route the harness at it. Abstract on purpose: this
+        used to default to ``{}``, which meant an unwired provider silently sent
+        the harness to the vendor with the real credential, bypassing the
+        key-replacement proxy. A provider nobody has wired must fail loudly, so
+        every concrete provider answers for itself. Returning ``{}`` is still a
+        valid answer for a provider that signs its own requests and is reached
+        directly, but it now has to be stated rather than inherited.
+        """
 
     def omp_model_catalog(self) -> OmpModelCatalog | None:
         """``models.yml`` declaring this provider's model to the omp harness, or
