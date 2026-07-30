@@ -58,3 +58,51 @@ def test_backend_skill_prescribes_exact_fail_closed_dvc_sequence(render):
     assert "status: completed" in rendered
     assert "humanReadableId" in rendered
     assert "does not accept the cage UUID" in rendered
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(claude_skill_markdown, id="claude"),
+        pytest.param(codex_skill_markdown, id="codex"),
+    ],
+)
+def test_backend_skill_requires_data_science_for_ungoverned_statistics(render):
+    rendered = render(_dvc_skill())
+    normalized = " ".join(rendered.split())
+
+    assert (
+        "Before using `execute_code` for statistical testing" in rendered
+    )
+    assert "load and follow the `data-science` skill" in normalized
+    assert "If `data-science` is unavailable" in rendered
+    assert "blocked analysis step" in normalized
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(claude_skill_markdown, id="claude"),
+        pytest.param(codex_skill_markdown, id="codex"),
+    ],
+)
+def test_backend_skill_prescribes_professional_cage_first_analysis_contract(render):
+    rendered = render(_dvc_skill())
+    normalized = " ".join(rendered.split())
+
+    assert "Freeze a cage reconciliation table" in rendered
+    assert "declared common time grid" in normalized
+    assert "Never smooth across a gap" in rendered
+    assert "from local lights-on to the next lights-on" in normalized
+    assert "half-open `[start, end)` intervals" in normalized
+    assert "leave-one-site-out reference" in normalized
+    assert "failed gate is a failed analysis" in normalized
+
+
+def test_skill_stays_discoverable_and_context_efficient() -> None:
+    source = SKILL_PATH.read_text(encoding="utf-8")
+    skill = _dvc_skill()
+
+    assert len(source.splitlines()) < 500
+    assert "audit, repair, or interpret" in (skill.description or "")
+    assert "review of an existing DVC pipeline" in (skill.description or "")

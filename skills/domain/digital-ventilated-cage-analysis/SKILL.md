@@ -1,6 +1,6 @@
 ---
 name: Digital Ventilated Cage Analysis
-description: Analyze Tecniplast Digital Ventilated Cage (DVC) exports with metadata-aware quality control, cage-level statistics, circadian and event-aware interpretation, and literature-grounded scientific restraint. Use for DVC Analytics Type 1, Type 2, Type 3, event, ALI, ALI-smoothed, bedding, rest-wake, RDI, running-wheel, REM, or cage-monitoring questions.
+description: Analyze, audit, repair, or interpret Tecniplast Digital Ventilated Cage (DVC) data with governed imports, cage-first quality control, sampling-aware preprocessing, light-cycle-aligned circadian methods, explicit weighting, and traceable scientific reporting. Use for DVC Analytics Type 1, Type 2, Type 3, event, ALI, ALI-smoothed, bedding, rest-wake, RDI, running-wheel, REM, exact 24/72-hour windows, multi-site references, or review of an existing DVC pipeline.
 category: domain
 slug: digital-ventilated-cage-analysis
 tags:
@@ -13,7 +13,7 @@ tags:
   - tecniplast
 ---
 
-# Digital Ventilated Cage analysis
+# Digital Ventilated Cage Analysis
 
 ## Scientific role
 
@@ -22,11 +22,32 @@ deterministic computations, literature-supported interpretations, hypotheses,
 and unresolved unknowns. Prefer a narrower defensible conclusion over a broad
 unsupported one.
 
+Route the task before acting:
+
+1. For an OpenScientist analysis or rerun, use the governed MCP sequence and treat its
+   checkpoints as authoritative.
+2. For raw-export analysis or repair, apply the contracts below without inventing
+   unavailable resolution.
+3. For code or output review, map transformations, exclusions, weights, and fallbacks
+   to these contracts before trusting results.
+4. For interpretation only, require traceable manifest and QC evidence; otherwise
+   restrict the result to a review plan.
+
 Use OpenScientist to reconstruct context, identify consequential gaps, propose
 and guard the analysis plan, request approvals, and maintain claim-level
 lineage. Delegate numerical work to the versioned OpenScientist DVC core and
 UDWA tools. Do not replace deterministic functions with mental arithmetic or
 new ad hoc implementations.
+
+Before using `execute_code` for statistical testing, assumption checks, effect
+sizes, correlations, confidence intervals, exploratory plots, or statistical
+modelling that is not implemented by a governed UDWA tool, load and follow the
+`data-science` skill in addition to this skill. Apply this rule even when the
+analysis began as a governed DVC workflow. Keep this skill's DVC-specific
+governance, experimental-unit, metadata, and interpretation constraints
+authoritative if the two skills overlap. If `data-science` is unavailable,
+report the dependency as a blocked analysis step rather than silently
+continuing with ad hoc statistics.
 
 ## Source hierarchy
 
@@ -63,8 +84,10 @@ Before biological analysis, establish or ask for:
 
 - the scientific or operational objective and exploratory, confirmatory, or
   monitoring mode;
+- the primary estimand, reference population, normalization, comparison, and sensitivities;
 - assignment, experimental, observational, and analysis units;
 - cage-to-biological-group assignments from governed metadata;
+- expected physical-cage counts and a key linking source trace, cage, cohort, site, and file;
 - time-valid cage occupancy and any additions, moves, culls, or removals;
 - metric name, definition, Analytics/software version, export type, electrode
   selection, and temporal aggregation;
@@ -82,6 +105,8 @@ every known value a source. Give every inferred value a confidence and require
 review before it controls an analysis.
 
 ## Workflow
+
+### Governed OpenScientist sequence
 
 Follow this governed MCP sequence exactly:
 
@@ -105,35 +130,42 @@ approval for changed inputs, or create a post-analysis assessment before a
 completed analysis. Treat a server rejection as a blocked workflow state; fix
 the named prerequisite instead of bypassing it.
 
+### Scientific execution sequence
+
 1. Inspect each file and identify Type 1, Type 1-bis, Type 2, Type 3, event,
    metadata, or REM content from structure rather than filename alone.
-2. Preserve the original timestamp text, parse a derived UTC timestamp, and
+2. Freeze a cage reconciliation table. Select traces by schema, exclude summary
+   columns by name, and fail when observed and expected cage counts differ.
+3. Preserve the original timestamp text, parse a derived UTC timestamp, and
    retain the recording-local time or offset. Never overwrite source time.
-3. Normalize identifiers and values without interpreting cage or group labels.
-4. Run coverage, missingness, duplicate-time, cadence, gap, zero-variance,
+4. Normalize identifiers and values without interpreting cage or group labels.
+5. Run coverage, missingness, duplicate-time, cadence, gap, zero-variance,
    negative-value, and event-overlap checks per cage and metric.
-5. For matching Type 1 and Type 2 exports, reproduce each Type 2 cage value from
+6. When differing raw or sub-hour cadences require smoothing or pooling, aggregate each cage
+   independently to one declared common time grid, then smooth within contiguous observed
+   segments. Never smooth across a gap or reconstruct resolution lost through vendor aggregation.
+7. For matching Type 1 and Type 2 exports, reproduce each Type 2 cage value from
    the Type 1 electrode values and report matched rows, unmatched rows, maximum
    difference, and tolerance.
-6. Recompute Type 2 group mean, sample SD, and conventional SEM independently.
+8. Recompute Type 2 group mean, sample SD, and conventional SEM independently.
    Preserve the vendor field as `vendor_group_sem`; never silently rename or
    reinterpret it when it matches another statistic.
-7. Resolve each requested metric to a versioned contract. When the vendor
+9. Resolve each requested metric to a versioned contract. When the vendor
    documentation is incomplete or conflicts with an implementation, keep the
    values separately named and prepare focused clarification questions for
    Tecniplast.
-8. Assess metadata by scientific consequence. Ask a small number of prioritized
+10. Assess metadata by scientific consequence. Ask a small number of prioritized
    questions that would change the plan; do not summarize readiness with a
    generic completeness percentage alone.
-9. Propose a guarded plan. Mark blocked steps and the metadata or approval that
+11. Propose a guarded plan. Mark blocked steps and the metadata or approval that
    would unblock each one.
-10. Execute only supported deterministic tools with explicit parameters and
+12. Execute only supported deterministic tools with explicit parameters and
    versions. Capture warnings and failures as evidence.
-11. Replan after QC. If an event overlaps missing or low-coverage intervals,
+13. Replan after QC. If an event overlaps missing or low-coverage intervals,
     propose a retain-versus-approved-mask sensitivity analysis.
-12. Select literature for the exact scientific claim, record applicability and
+14. Select literature for the exact scientific claim, record applicability and
     conflicts, and distinguish prior evidence from the current result.
-13. Report evidence-linked results, sensitivity analyses, limitations,
+15. Report evidence-linked results, sensitivity analyses, limitations,
     unresolved questions, and negative or inconclusive findings.
 
 ## Export contracts
@@ -310,6 +342,27 @@ Summarize within cage first, then across independent cages. Show cage traces,
 coverage, distributions, and heterogeneity. Report the number of cages,
 animals-per-cage metadata, time bins, and observations separately.
 
+### Cage-first profiles, normalization, and references
+
+Treat one physical cage trace as one replicate. Keep cage, cohort, site, source file, and
+animal concepts separate. Average days within cage before averaging cages; never let native
+row count, cadence, recording duration, or animals-per-cage determine statistical weight.
+
+For circadian profiles, define a biological day from local lights-on to the next lights-on,
+not by calendar date. Require complete days on the declared grid. For daily shape
+normalization, smooth first and divide each complete cage-day by that day's smoothed
+full-24-hour maximum. Record each divisor, require a maximum of 1 within tolerance, keep
+dark-phase normalization as a named sensitivity, and never borrow another divisor.
+
+For multi-site references, average cages within site and use explicit site weights; use
+equal site weights only when they match the estimand. Export effective weights and use a
+leave-one-site-out reference for site deviation. Pair normalized-activity RMSE for magnitude
+with Pearson correlation for shape; never describe correlation alone as agreement.
+
+Construct exact windows as half-open `[start, end)` intervals anchored at local lights-on.
+Require complete consecutive biological days and expected bins. Use paired or repeated-cage
+inference across windows; do not treat cage-window rows as independent.
+
 ### Light, dark, and circadian analysis
 
 Require a verified recording-local light schedule before assigning phases or
@@ -396,6 +449,7 @@ mechanism, or clinical translation from locomotor association alone.
 Block or narrow the plan when:
 
 - the objective or experimental unit is unresolved;
+- expected and observed physical cage counts do not reconcile;
 - biological groups exist only in cage labels;
 - occupancy is missing for per-animal normalization or tracking;
 - light schedule, timezone, or REM provenance is missing for phase or ZT work;
@@ -407,7 +461,9 @@ Block or narrow the plan when:
 - a candidate or legacy proxy is presented as equivalent to a vendor metric
   without a versioned contract and conformance evidence;
 - exclusions, baseline overrides, group-mean imputation, or causal conclusions
-  lack approval.
+  lack approval;
+- a primary grid, day, window, normalization, or weight acceptance gate fails;
+- undefined metrics become zero, or figures lack code, input, and manifest lineage.
 
 Do not invent missing metadata, silently exclude observations, attribute
 group-housed signals to individuals, or convert exploratory associations into
@@ -427,6 +483,11 @@ For every result, record:
 - literature DOI and applicability assessment;
 - approvals and rejected alternatives;
 - limitations, sensitivity results, and unresolved questions.
+
+Include cage reconciliation, input hashes, preprocessing constants, clock corrections,
+cage/day/window inclusion tables, reason-coded exclusions, normalization divisors, weight
+audits, automated checks, and acceptance gates. Record code revision and dirty state,
+packages, seeds, and primary-versus-sensitivity status. A failed gate is a failed analysis.
 
 Produce the OpenScientist DVC traceable bundle when the core is available:
 study context and schema, metadata assessment, guarded plan and violations,
