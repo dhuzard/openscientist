@@ -10,10 +10,12 @@ treats as its root: a ``--system-prompt`` file, the tools MCP server in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -346,8 +348,61 @@ class OmpAgent(AbstractAgent[Provider]):
                 )
         return count
 
+    @staticmethod
+    async def _pump(stream: asyncio.StreamReader | None, sink: bytearray) -> None:
+        """Accumulate a pipe into ``sink`` so a timeout still leaves what arrived."""
+        if stream is None:
+            return
+        while chunk := await stream.read(65536):
+            sink.extend(chunk)
+
+    @staticmethod
+    def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> bool:
+        """Signal omp's whole process group. False when it could not be done.
+
+        Refuses to signal our own group. The safety of the group kill rests
+        entirely on ``start_new_session=True`` at spawn, which makes omp a group
+        leader. Were that ever dropped, omp would inherit our group and a SIGKILL
+        here would take down the runner and the web app with it, so the
+        relationship is checked rather than trusted.
+        """
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            return False
+        if pgid == os.getpgid(0):
+            logger.error("omp pid %s shares our process group, signalling it alone", proc.pid)
+            with contextlib.suppress(ProcessLookupError):
+                proc.send_signal(sig)
+            return False
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, sig)
+        return True
+
+    @staticmethod
+    async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+        """Terminate the omp process group, then kill what has not exited.
+
+        omp spawns MCP server children, so signalling the direct child leaves them
+        running: a timed-out 3 iteration run otherwise left two omp processes and
+        two MCP children competing for the same job directory and database rows.
+        """
+        for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+            if proc.returncode is not None:
+                return
+            OmpAgent._signal_group(proc, sig)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=grace)
+        if proc.returncode is None:
+            logger.error("omp process %s survived SIGKILL", proc.pid)
+
     async def _run_omp(self, prompt: str) -> IterationResult:
-        """Spawn omp for one turn, parse its JSON stream, build the result."""
+        """Spawn omp for one turn, parse its JSON stream, build the result.
+
+        Owns the turn timeout rather than leaving it to a ``wait_for`` around this
+        coroutine: cancelling the await would abandon the process instead of
+        stopping it, and would discard the output already received.
+        """
         system_prompt_path = self._write_system_prompt()
         self._write_mcp_config()
         config_path = self._write_omp_config()
@@ -360,8 +415,40 @@ class OmpAgent(AbstractAgent[Provider]):
             env=self._build_subprocess_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout_buf, stderr_buf = bytearray(), bytearray()
+        pump = asyncio.gather(
+            self._pump(proc.stdout, stdout_buf), self._pump(proc.stderr, stderr_buf)
+        )
+        timed_out = False
+        try:
+            # One deadline over both awaits. Bounding only the pipe reads would
+            # leave proc.wait() unbounded, so a process that closes its pipes
+            # without exiting would hang the turn forever, which is the failure
+            # this method exists to prevent. The pump is shielded so expiry
+            # cancels the waiting, not the reader, leaving the bytes that already
+            # arrived available for the partial parse below.
+            async with asyncio.timeout(_TURN_TIMEOUT_SECONDS):
+                await asyncio.shield(pump)
+                await proc.wait()
+        except TimeoutError:
+            timed_out = True
+            logger.warning("omp turn exceeded %ds, cutting the turn", _TURN_TIMEOUT_SECONDS)
+            await self._kill_tree(proc)
+        except asyncio.CancelledError:
+            # Stopping a job cancels this turn, and abandoning it here would leak
+            # the tree exactly as the timeout used to. Signalled synchronously
+            # because awaiting a graceful stop inside a cancelled task is not
+            # dependable, so there is no reliable window for SIGTERM.
+            self._signal_group(proc, signal.SIGKILL)
+            raise
+        finally:
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+
+        stdout_bytes, stderr_bytes = bytes(stdout_buf), bytes(stderr_buf)
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
 
         messages: list[dict[str, Any]] = []
@@ -395,6 +482,19 @@ class OmpAgent(AbstractAgent[Provider]):
                 if isinstance(msg, str):
                     stream_error = msg
 
+        # Usage is accounted before any early return: the model consumed those
+        # tokens whether the turn completed, failed, or was cut short, and the
+        # partial stream is what makes a timed-out turn's usage recoverable.
+        self._token_usage += usage
+
+        if timed_out:
+            # Shape unchanged from before: only the usage accounting above is new,
+            # which is what the review asked for. Surfacing the partial transcript
+            # here would change what a timed-out turn persists, so it is left out.
+            return IterationResult(
+                outcome=TurnOutcome.TIMED_OUT, output="", tool_calls=0, transcript=[], error=""
+            )
+
         if proc.returncode != 0 and not messages:
             error = stream_error or stderr_text.strip() or f"omp exited with code {proc.returncode}"
             logger.error("omp run failed (exit %s): %s", proc.returncode, error)
@@ -402,7 +502,6 @@ class OmpAgent(AbstractAgent[Provider]):
                 outcome=TurnOutcome.FAILED, output="", tool_calls=0, transcript=[], error=error
             )
 
-        self._token_usage += usage
         transcript: list[TranscriptEntry] = OMP.deserialize(messages)
         return IterationResult(
             outcome=TurnOutcome.COMPLETED,
@@ -417,12 +516,9 @@ class OmpAgent(AbstractAgent[Provider]):
         if reset_session:
             self._session_id = None
         try:
-            return await asyncio.wait_for(self._run_omp(prompt), timeout=_TURN_TIMEOUT_SECONDS)
-        except TimeoutError:
-            logger.warning("omp turn exceeded %ds, cutting the turn", _TURN_TIMEOUT_SECONDS)
-            return IterationResult(
-                outcome=TurnOutcome.TIMED_OUT, output="", tool_calls=0, transcript=[], error=""
-            )
+            # No wait_for here: _run_omp owns the timeout so it can stop the
+            # process tree and keep the output that already arrived.
+            return await self._run_omp(prompt)
         except Exception as e:
             logger.error("omp run failed: %s", e, exc_info=True)
             return IterationResult(

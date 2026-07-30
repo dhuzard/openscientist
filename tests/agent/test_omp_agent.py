@@ -6,7 +6,9 @@ canned ``--mode=json`` stream, so no real binary or network is needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -79,21 +81,39 @@ def _write_stub(path: Path, stream: list[dict[str, object]]) -> None:
     """Write a fake-omp that records argv and emits ``stream``.
 
     Env knobs: ``OMP_STUB_ARGV_OUT``, ``OMP_STUB_SLEEP``, ``OMP_STUB_EXIT``,
-    ``OMP_STUB_EMIT``.
+    ``OMP_STUB_EMIT``, ``OMP_STUB_EMIT_FIRST`` (emit before sleeping, so a
+    timeout still has a partial stream to parse), and ``OMP_STUB_CHILD_PID_OUT``
+    (spawn a long-lived grandchild and record its pid, standing in for the MCP
+    server children real omp starts).
     """
     payload = json.dumps(stream)
     script = f"""#!/usr/bin/env python3
-import os, sys, json, time
+import os, sys, json, time, subprocess
 argv_out = os.environ.get("OMP_STUB_ARGV_OUT")
 if argv_out:
     with open(argv_out, "w") as fh:
         fh.write("\\n".join(sys.argv))
+child_out = os.environ.get("OMP_STUB_CHILD_PID_OUT")
+if child_out:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    with open(child_out, "w") as fh:
+        fh.write(str(child.pid))
+
+
+def emit():
+    if os.environ.get("OMP_STUB_EMIT", "1") == "1":
+        for event in json.loads({payload!r}):
+            print(json.dumps(event), flush=True)
+
+
+emit_first = os.environ.get("OMP_STUB_EMIT_FIRST") == "1"
+if emit_first:
+    emit()
 sleep = float(os.environ.get("OMP_STUB_SLEEP", "0"))
 if sleep:
     time.sleep(sleep)
-if os.environ.get("OMP_STUB_EMIT", "1") == "1":
-    for event in json.loads({payload!r}):
-        print(json.dumps(event))
+if not emit_first:
+    emit()
 sys.exit(int(os.environ.get("OMP_STUB_EXIT", "0")))
 """
     path.write_text(script, encoding="utf-8")
@@ -255,6 +275,140 @@ class TestRunIteration:
         agent = _agent(tmp_path, system_prompt="SYS")
         result = await agent.run_iteration("go")
         assert result.outcome is TurnOutcome.TIMED_OUT
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_the_process_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """omp spawns MCP children, so signalling only the direct child leaves
+        them running and competing for the same job dir and database rows."""
+        bin_path = tmp_path / "fake_omp"
+        pid_file = tmp_path / "child.pid"
+        _write_stub(bin_path, _STREAM)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_SLEEP", "120")
+        monkeypatch.setenv("OMP_STUB_CHILD_PID_OUT", str(pid_file))
+        monkeypatch.setattr("openscientist.agent.omp_agent._TURN_TIMEOUT_SECONDS", 1)
+        agent = _agent(tmp_path, system_prompt="SYS")
+
+        result = await agent.run_iteration("go")
+        assert result.outcome is TurnOutcome.TIMED_OUT
+
+        assert pid_file.exists(), "stub never recorded its child pid"
+        child_pid = int(pid_file.read_text())
+        # The grandchild is reparented to init and reaped asynchronously, so poll
+        # rather than assume a fixed settling time. Signal 0 probes liveness
+        # without delivering anything.
+        for _ in range(100):
+            try:
+                os.kill(child_pid, 0)
+            except OSError:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"grandchild {child_pid} survived the turn timeout")
+
+    @pytest.mark.asyncio
+    async def test_timeout_still_records_token_usage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The model consumed those tokens even though the turn was cut short, so
+        the partial stream has to be parsed rather than discarded."""
+        bin_path = tmp_path / "fake_omp"
+        _write_stub(bin_path, _STREAM)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_EMIT_FIRST", "1")
+        monkeypatch.setenv("OMP_STUB_SLEEP", "120")
+        monkeypatch.setattr("openscientist.agent.omp_agent._TURN_TIMEOUT_SECONDS", 1)
+        agent = _agent(tmp_path, system_prompt="SYS")
+
+        result = await agent.run_iteration("go")
+        assert result.outcome is TurnOutcome.TIMED_OUT
+        assert agent._token_usage.input_tokens > 0
+
+    @pytest.mark.asyncio
+    async def test_closed_pipes_without_exit_still_time_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A process that closes its pipes but does not exit must still be cut.
+        Bounding only the pipe reads leaves the reap unbounded and hangs forever."""
+        bin_path = tmp_path / "fake_omp"
+        bin_path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "os.close(1)\n"
+            "os.close(2)\n"
+            "time.sleep(120)\n"
+        )
+        bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setattr("openscientist.agent.omp_agent._TURN_TIMEOUT_SECONDS", 1)
+        agent = _agent(tmp_path, system_prompt="SYS")
+
+        result = await asyncio.wait_for(agent.run_iteration("go"), timeout=30)
+        assert result.outcome is TurnOutcome.TIMED_OUT
+
+    @pytest.mark.asyncio
+    async def test_cancellation_kills_the_process_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stopping a job cancels the turn, which must not leak the tree either.
+        The timeout path is not the only way a turn ends early."""
+        bin_path = tmp_path / "fake_omp"
+        pid_file = tmp_path / "child.pid"
+        _write_stub(bin_path, _STREAM)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_SLEEP", "120")
+        monkeypatch.setenv("OMP_STUB_CHILD_PID_OUT", str(pid_file))
+        agent = _agent(tmp_path, system_prompt="SYS")
+
+        task = asyncio.create_task(agent.run_iteration("go"))
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        child_pid = int(pid_file.read_text())
+        for _ in range(100):
+            try:
+                os.kill(child_pid, 0)
+            except OSError:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"grandchild {child_pid} survived cancellation")
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_signal_its_own_process_group(self) -> None:
+        """The group kill is only safe because omp is spawned as a group leader.
+        Signal 0 is used so this stays harmless even if the guard were broken,
+        which would otherwise deliver SIGKILL to the test runner itself."""
+        proc = await asyncio.create_subprocess_exec(
+            "sleep", "30", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            assert OmpAgent._signal_group(proc, 0) is False
+        finally:
+            proc.kill()
+            await proc.wait()
+
+    @pytest.mark.asyncio
+    async def test_signals_the_group_when_session_leader(self) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "sleep",
+            "30",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            assert OmpAgent._signal_group(proc, 0) is True
+        finally:
+            proc.kill()
+            await proc.wait()
 
 
 class TestAuthProvisioning:
