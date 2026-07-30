@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,6 +82,28 @@ def test_load_job_skill_usage_distinguishes_assignment_snapshot(tmp_path: Path) 
     with_snapshot = job_detail._load_job_skill_usage(tmp_path)
     assert with_snapshot["assignment_snapshot_available"] is True
     assert with_snapshot["assigned_skills"] == manifest
+
+
+def test_agentic_and_scientific_reporting_have_separate_tabs() -> None:
+    tabs_source = inspect.getsource(job_detail._render_job_tabs)
+    agentic_source = inspect.getsource(job_detail._render_agentic_info_tab)
+    report_source = inspect.getsource(job_detail._render_report_tab)
+
+    assert 'ui.tab("Agentic Info"' in tabs_source
+    assert 'ui.tab("Scientific Report"' in tabs_source
+    assert "_render_agentic_info_tab(context)" in tabs_source
+    assert "_render_report_tab(context)" in tabs_source
+
+    for renderer in (
+        "_render_job_agent_task_trace",
+        "_render_job_skill_usage",
+        "_render_job_agent_usage",
+    ):
+        assert renderer in agentic_source
+        assert renderer not in report_source
+
+    assert "final_report.md" not in agentic_source
+    assert "final_report.md" in report_source
 
 
 @pytest.mark.parametrize(

@@ -2109,7 +2109,8 @@ def _render_job_skill_usage(usage: dict[str, Any]) -> None:
                         )
 
 
-def _render_report_tab(context: _JobDetailContext) -> None:
+def _render_agentic_info_tab(context: _JobDetailContext) -> None:
+    """Render per-job model, token, subagent, and skill provenance."""
     skill_usage = {"value": _load_job_skill_usage(context.job_dir)}
     agent_task_usage = {"value": build_job_agent_task_provenance(context.job_dir)}
 
@@ -2141,6 +2142,9 @@ def _render_report_tab(context: _JobDetailContext) -> None:
     if context.job_info.status in _polling_statuses():
         context.active_timers.append(ui.timer(5.0, refresh_agent_transparency))
 
+
+def _render_report_tab(context: _JobDetailContext) -> None:
+    """Render only the scientific report and its artifact actions."""
     report_path = context.job_dir / "final_report.md"
     html_path = context.job_dir / "final_report.html"
     pdf_path = context.job_dir / "final_report.pdf"
@@ -2554,13 +2558,16 @@ def _render_chat_tab(context: _JobDetailContext) -> None:
 
 def _render_job_tabs(context: _JobDetailContext) -> None:
     with ui.tabs().classes("w-full") as tabs:
-        timeline_tab = ui.tab("Research Log")
-        report_tab = ui.tab("Report")
-        chat_tab = ui.tab("Chat")
+        timeline_tab = ui.tab("Research Log", icon="timeline")
+        agentic_info_tab = ui.tab("Agentic Info", icon="smart_toy")
+        report_tab = ui.tab("Scientific Report", icon="science")
+        chat_tab = ui.tab("Chat", icon="chat")
 
     with ui.tab_panels(tabs, value=timeline_tab).classes("w-full"):
         with ui.tab_panel(timeline_tab):
             _render_timeline_tab(context)
+        with ui.tab_panel(agentic_info_tab):
+            _render_agentic_info_tab(context)
         with ui.tab_panel(report_tab):
             _render_report_tab(context)
         with ui.tab_panel(chat_tab):
