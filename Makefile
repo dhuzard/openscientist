@@ -71,7 +71,9 @@ build:
 		--build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	$(MAKE) build-executor
 	@echo "Building agent image as $(AGENT_IMAGE)..."
-	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -f Dockerfile.agent -t $(AGENT_IMAGE) .
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build \
+		--secret id=github_token,env=GITHUB_TOKEN \
+		-f Dockerfile.agent -t $(AGENT_IMAGE) .
 	@echo "All images built: $(BASE_IMAGE), openscientist, $(EXECUTOR_IMAGE), $(AGENT_IMAGE)"
 
 build-executor:

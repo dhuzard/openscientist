@@ -124,9 +124,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.agent
+      secrets:
+        - github_token
     image: openscientist-agent:latest
     profiles: ["build-only"]  # Excluded from `docker compose up`
     entrypoint: ["echo", "openscientist-agent image built"]
 
 volumes:
   postgres_data:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

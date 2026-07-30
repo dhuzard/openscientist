@@ -227,6 +227,11 @@ repository. Building `Dockerfile.agent` therefore requires a BuildKit
 `github_token` secret with read access to that repository; the secret is used
 only during installation and is not retained in the image.
 
+Export `GITHUB_TOKEN` before `make build` or
+`docker compose --profile build-only build openscientist-agent`. For a direct
+build, pass it with
+`--secret id=github_token,env=GITHUB_TOKEN`.
+
 ### Job Manager Settings
 
 - `OPENSCIENTIST_MAX_CONCURRENT_JOBS`: Maximum concurrent jobs (default: `1`)
