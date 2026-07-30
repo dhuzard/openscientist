@@ -32,8 +32,8 @@ from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session_ctx, get_thread_safe_session_ctx
 from openscientist.job.types import JobInfo, JobStatus
 from openscientist.job_chat import (
+    extract_chat_artifact_images,
     get_chat_history,
-    normalize_chat_artifact_links,
     send_chat_message,
 )
 from openscientist.job_guidance import (
@@ -2161,6 +2161,7 @@ def _render_report_tab(context: _JobDetailContext) -> None:
 
     if report_path.exists():
         _render_report_actions(context, report_path, pdf_path)
+        _render_report_version_history(context)
         # Prefer HTML report (with embedded figures) over raw markdown
         if html_path.exists():
             _render_report_html_iframe(context.job_dir)
@@ -2169,6 +2170,47 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         return
 
     _render_missing_report_state(context)
+
+
+def _render_report_version_history(context: _JobDetailContext) -> None:
+    """Show the latest report version and its immutable revision history."""
+    from openscientist.report.revisions import load_report_version_manifest
+
+    manifest = load_report_version_manifest(context.job_dir)
+    if not manifest:
+        return
+    versions = manifest.get("versions", [])
+    if not versions:
+        return
+
+    current = int(manifest.get("current_version", versions[-1].get("version", 1)))
+    latest = versions[-1]
+    with ui.card().classes("w-full mb-4"):
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.icon("history", size="sm").classes("text-indigo-600")
+            ui.label(f"Scientific Report v{current}").classes("font-semibold")
+            if latest.get("source") == "job-chat":
+                ui.label("Updated from Chat").classes(
+                    "text-xs text-indigo-700 bg-indigo-50 rounded px-2 py-1"
+                )
+        section = latest.get("section")
+        if section:
+            ui.label(f"Latest addition: {section}").classes("text-sm text-gray-600")
+
+        with ui.expansion("Version history", icon="history").classes("w-full"):
+            for item in reversed(versions):
+                version = int(item.get("version", 0))
+                with ui.row().classes("w-full items-center gap-3 py-1"):
+                    ui.label(f"v{version}").classes("font-medium w-10")
+                    ui.label(str(item.get("summary", "Report revision"))).classes(
+                        "text-sm text-gray-600 flex-grow"
+                    )
+                    version_base = f"/jobs/{context.job_id}/report_versions/v{version}"
+                    files = item.get("files", [])
+                    if "final_report.md" in files:
+                        ui.link("Markdown", f"{version_base}/final_report.md", new_tab=True)
+                    if "final_report.pdf" in files:
+                        ui.link("PDF", f"{version_base}/final_report.pdf", new_tab=True)
 
 
 _CHAT_STYLES = """
@@ -2406,9 +2448,14 @@ class _ChatTabController:
         with ui.row().classes("items-start gap-2 mb-3"):
             ui.html(_CHAT_AVATAR_HTML)
             with ui.element("div").classes("chat-bubble-assistant"):
-                ui.markdown(normalize_chat_artifact_links(content, self.context.job_id)).classes(
-                    "text-sm"
-                )
+                text, images = extract_chat_artifact_images(content, self.context.job_id)
+                if text:
+                    ui.markdown(text).classes("text-sm")
+                for artifact in images:
+                    ui.image(artifact.url).classes(
+                        "w-full rounded-lg border border-cyan-200 mt-2"
+                    ).props("fit=contain")
+                    ui.label(artifact.alt).classes("text-xs text-gray-600 italic mt-1")
 
     def _render_empty_state(self) -> None:
         with ui.column().classes("w-full items-center py-8"):

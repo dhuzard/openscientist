@@ -6,8 +6,11 @@ analysis process. Uses ClaudeCodeAgent for responses, giving the agent
 access to tools (execute_code, search_pubmed, etc.) for follow-up analysis.
 """
 
+import hashlib
+import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -18,6 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openscientist.database.models import Job, JobChatMessage
 from openscientist.database.session import AsyncSessionLocal
 from openscientist.knowledge_state import KnowledgeState
+from openscientist.report.revisions import (
+    ReportFigure,
+    ReportRevision,
+    capture_report_snapshot,
+    record_report_revision,
+    update_report_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +35,193 @@ _RELATIVE_ARTIFACT_LINK_RE = re.compile(
     r"(?P<prefix>\]\(|\bsrc=[\"'])"
     r"(?P<path>(?:\./)?(?:plots|provenance)/[^)\"'\s]+)"
 )
+_MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)"
+)
+_PLOT_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".svg"})
+
+
+@dataclass(frozen=True)
+class _ArtifactSignature:
+    size: int
+    modified_ns: int
+
+
+@dataclass(frozen=True)
+class ChatArtifactImage:
+    """A local job image extracted for explicit inline rendering."""
+
+    alt: str
+    url: str
+
+
+def extract_chat_artifact_images(
+    content: str,
+    job_id: UUID | str,
+) -> tuple[str, tuple[ChatArtifactImage, ...]]:
+    """Extract safe local image links so the UI can render them explicitly."""
+    normalized = normalize_chat_artifact_links(content, job_id)
+    allowed_prefix = f"/jobs/{job_id}/"
+    images: list[ChatArtifactImage] = []
+    seen: set[str] = set()
+
+    def _extract(match: re.Match[str]) -> str:
+        url = match.group("url")
+        if not url.startswith(allowed_prefix):
+            return match.group(0)
+        relative = url.removeprefix(allowed_prefix)
+        if not relative.startswith(("plots/", "provenance/")):
+            return match.group(0)
+        if Path(relative).suffix.lower() not in _PLOT_SUFFIXES:
+            return match.group(0)
+        if url not in seen:
+            seen.add(url)
+            alt = match.group("alt").strip() or Path(relative).stem.replace("_", " ").title()
+            images.append(ChatArtifactImage(alt=alt, url=url))
+        return ""
+
+    remaining = _MARKDOWN_IMAGE_RE.sub(_extract, normalized)
+    return remaining.strip(), tuple(images)
+
+
+def _snapshot_plot_artifacts(job_dir: Path) -> dict[str, _ArtifactSignature]:
+    snapshot: dict[str, _ArtifactSignature] = {}
+    for dirname in ("plots", "provenance"):
+        directory = job_dir / dirname
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _PLOT_SUFFIXES:
+                continue
+            stat = path.stat()
+            snapshot[path.relative_to(job_dir).as_posix()] = _ArtifactSignature(
+                size=stat.st_size,
+                modified_ns=stat.st_mtime_ns,
+            )
+    return snapshot
+
+
+def _load_plot_metadata(job_dir: Path, relative_path: str) -> dict[str, Any]:
+    path = Path(relative_path)
+    direct_metadata = job_dir / path.with_suffix(".json")
+    candidates = [direct_metadata]
+    provenance_dir = job_dir / "provenance"
+    if path.parts and path.parts[0] == "plots" and provenance_dir.is_dir():
+        candidates.extend(provenance_dir.glob("*.json"))
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if candidate == direct_metadata:
+            return payload
+        also_saved_as = str(payload.get("also_saved_as", "")).replace("\\", "/")
+        if also_saved_as == relative_path:
+            return payload
+    return {}
+
+
+def _plot_title(relative_path: str, metadata: dict[str, Any]) -> str:
+    explicit = metadata.get("title")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    return Path(relative_path).stem.replace("_", " ").replace("-", " ").title()
+
+
+def _plot_caption(title: str, metadata: dict[str, Any]) -> str:
+    for key in ("description", "caption"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return f"{title}, generated during a follow-up analysis in job chat."
+
+
+def _changed_report_figures(
+    job_dir: Path,
+    before: dict[str, _ArtifactSignature],
+) -> tuple[ReportFigure, ...]:
+    after = _snapshot_plot_artifacts(job_dir)
+    changed = [path for path, signature in after.items() if before.get(path) != signature]
+    # Prefer descriptive plots/ names. Provenance copies are included only when
+    # they are the sole location for their bytes.
+    changed.sort(key=lambda path: (not path.startswith("plots/"), path))
+    selected: list[ReportFigure] = []
+    seen_content: dict[bytes, int] = {}
+    for relative_path in changed:
+        source = job_dir / relative_path
+        try:
+            digest = hashlib.sha256(source.read_bytes()).digest()
+        except OSError:
+            continue
+        existing_index = seen_content.get(digest)
+        if existing_index is not None:
+            existing = selected[existing_index]
+            selected[existing_index] = ReportFigure(
+                relative_path=existing.relative_path,
+                title=existing.title,
+                caption=existing.caption,
+                aliases=(*existing.aliases, relative_path),
+            )
+            continue
+        seen_content[digest] = len(selected)
+        metadata = _load_plot_metadata(job_dir, relative_path)
+        title = _plot_title(relative_path, metadata)
+        selected.append(
+            ReportFigure(
+                relative_path=relative_path,
+                title=title,
+                caption=_plot_caption(title, metadata),
+            )
+        )
+    return tuple(selected)
+
+
+def _contains_inline_image(content: str, relative_path: str) -> bool:
+    filename = re.escape(Path(relative_path).name)
+    return bool(re.search(rf"!\[[^\]]*\]\([^)]*{filename}[^)]*\)", content))
+
+
+def _append_chat_update_summary(
+    content: str,
+    job_id: UUID,
+    figures: tuple[ReportFigure, ...],
+    revision: ReportRevision | None,
+) -> str:
+    additions: list[str] = []
+    for figure in figures:
+        if not _contains_inline_image(content, figure.relative_path):
+            additions.append(f"![{figure.title}](/jobs/{job_id}/{figure.relative_path})")
+
+    if revision is not None:
+        additions.extend(
+            [
+                f"**Scientific Report updated — version v{revision.version}.**",
+                f"Location: **Scientific Report → {revision.section}**",
+            ]
+        )
+        if revision.figures:
+            additions.append(
+                "Accompanying text: "
+                + " ".join(figure.caption for figure in revision.figures)
+            )
+    if not additions:
+        return content
+    return content.rstrip() + "\n\n" + "\n\n".join(additions)
+
+
+async def _render_report_outputs(job_dir: Path) -> None:
+    """Refresh HTML/PDF without failing the chat if an optional renderer fails."""
+    try:
+        from openscientist.orchestrator.discovery import _try_generate_report_pdf
+
+        await _try_generate_report_pdf(job_dir / "final_report.md")
+    except Exception:
+        logger.exception("Failed to render updated chat report outputs in %s", job_dir)
 
 
 def normalize_chat_artifact_links(content: str, job_id: UUID | str) -> str:
@@ -242,9 +439,41 @@ async def send_chat_message(
     Raises:
         Exception: If executor call fails
     """
-    # Use executor (context is read on-demand by the agent from job_dir files)
+    # Capture filesystem state before the executor runs. The postprocessor then
+    # enforces inline previews and a versioned report revision independently of
+    # how the model happens to phrase its response.
+    before_artifacts = _snapshot_plot_artifacts(job_dir)
+    before_report = capture_report_snapshot(job_dir)
+    raw_assistant_message = await _send_message_via_executor(
+        session,
+        job_id,
+        message,
+        job_dir,
+    )
+    figures = _changed_report_figures(job_dir, before_artifacts)
+    section = update_report_markdown(job_dir, figures)
+
+    revision = None
+    report_path = job_dir / "final_report.md"
+    if report_path.is_file() and before_report.markdown != report_path.read_text(
+        encoding="utf-8"
+    ):
+        await _render_report_outputs(job_dir)
+        revision = record_report_revision(
+            job_dir,
+            before_report,
+            user_message=message,
+            figures=figures,
+            section=section or "Scientific Report",
+        )
+
     assistant_message = normalize_chat_artifact_links(
-        await _send_message_via_executor(session, job_id, message, job_dir),
+        _append_chat_update_summary(
+            raw_assistant_message,
+            job_id,
+            figures,
+            revision,
+        ),
         job_id,
     )
 
@@ -332,7 +561,16 @@ Your role is to:
 
 Important: You are discussing published research and scientific literature. You are not providing personal advice — you are helping analyze what the scientific literature says.
 
-Be concise, accurate, and cite specific papers or findings when relevant. Focus on what the research literature indicates."""
+Be concise, accurate, and cite specific papers or findings when relevant. Focus on what the research literature indicates.
+
+When a user asks you to create or revise a plot, treat it as a scientific-report
+revision: save the readable plot under `plots/`, retain provenance, and update
+`final_report.md` in the most relevant existing section. Include the figure,
+its caption, the interpretation that belongs with it, and any material
+assumptions or limitations. If no existing section fits, use
+`## Follow-up analyses from Chat`. In your reply, embed the plot with Markdown
+image syntax and state the exact report section and accompanying text. The host
+will enforce the preview and create the immutable report version."""
 
     # Prompt structure matters more than wording: findings are framed as
     # background reference, long prior turns are truncated so an old report dump

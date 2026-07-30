@@ -5,6 +5,7 @@ Tests chat message creation, conversation history, context loading,
 and executor error handling.
 """
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from openscientist.agent.base import AbstractAgent, AgentConfig, IterationResult
 from openscientist.database.models import Job, JobChatMessage, User
 from openscientist.database.rls import set_current_user
 from openscientist.job_chat import (
+    extract_chat_artifact_images,
     get_chat_history,
     load_job_context,
     normalize_chat_artifact_links,
@@ -515,6 +517,93 @@ async def test_send_chat_message_success(
     assert history[1].content == "The main findings indicate..."
 
 
+@pytest.mark.asyncio
+async def test_new_chat_plot_is_embedded_and_creates_report_revision(
+    db_session: AsyncSession,
+    test_user: User,
+    test_job: Job,
+    temp_jobs_dir: Path,
+):
+    """A generated plot is previewed, inserted, and versioned by the host."""
+    _ = test_user
+    job_dir = temp_jobs_dir / str(test_job.id)
+    (job_dir / "plots").mkdir(parents=True)
+    (job_dir / "provenance").mkdir()
+    (job_dir / "final_report.md").write_text("# Original report\n", encoding="utf-8")
+    (job_dir / "final_report.html").write_text("<p>original</p>", encoding="utf-8")
+    (job_dir / "final_report.pdf").write_bytes(b"original pdf")
+
+    async def _generate_plot(*_args: object, **_kwargs: object) -> str:
+        (job_dir / "plots" / "mean_circadian.png").write_bytes(b"plot bytes")
+        (job_dir / "provenance" / "plot_5.png").write_bytes(b"plot bytes")
+        (job_dir / "provenance" / "plot_5.json").write_text(
+            json.dumps(
+                {
+                    "also_saved_as": "plots/mean_circadian.png",
+                    "description": (
+                        "Mean circadian activity centered on the assumed "
+                        "18:00 UTC dark onset."
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return "Added the mean circadian plot.\n\nFiles created: plots/mean_circadian.png"
+
+    async def _render_outputs(path: Path) -> None:
+        markdown = (path / "final_report.md").read_text(encoding="utf-8")
+        (path / "final_report.html").write_text(markdown, encoding="utf-8")
+        (path / "final_report.pdf").write_bytes(b"updated pdf")
+
+    with (
+        patch(
+            "openscientist.job_chat._send_message_via_executor",
+            side_effect=_generate_plot,
+        ),
+        patch(
+            "openscientist.job_chat._render_report_outputs",
+            side_effect=_render_outputs,
+        ),
+    ):
+        response = await send_chat_message(
+            db_session,
+            test_job.id,
+            "Add a mean circadian plot.",
+            job_dir,
+        )
+
+    assert f"![Mean Circadian](/jobs/{test_job.id}/plots/mean_circadian.png)" in response
+    assert "Scientific Report updated — version v2" in response
+    assert "Scientific Report → Follow-up analyses from Chat" in response
+    assert "assumed 18:00 UTC dark onset" in response
+
+    report = (job_dir / "final_report.md").read_text(encoding="utf-8")
+    assert "## Follow-up analyses from Chat" in report
+    assert "{{figure:plots/mean_circadian.png" in report
+    assert "assumed 18:00 UTC dark onset" in report
+
+    manifest = json.loads(
+        (job_dir / "provenance" / "report_versions.json").read_text(encoding="utf-8")
+    )
+    assert manifest["current_version"] == 2
+    assert [item["version"] for item in manifest["versions"]] == [1, 2]
+    assert manifest["versions"][1]["section"] == "Follow-up analyses from Chat"
+    assert (
+        job_dir / "report_versions" / "v1" / "final_report.md"
+    ).read_text(encoding="utf-8") == "# Original report\n"
+    assert "Follow-up analyses from Chat" in (
+        job_dir / "report_versions" / "v2" / "final_report.md"
+    ).read_text(encoding="utf-8")
+    assert (
+        job_dir
+        / "report_versions"
+        / "v2"
+        / "artifacts"
+        / "plots"
+        / "mean_circadian.png"
+    ).is_file()
+
+
 def test_normalize_chat_artifact_links_translates_container_path() -> None:
     job_id = UUID("1db3e835-d47a-4cef-967a-a3131ca5c55e")
     content = "![Profile](/app/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png)"
@@ -529,6 +618,21 @@ def test_normalize_chat_artifact_links_makes_relative_plot_absolute() -> None:
 
     assert normalize_chat_artifact_links("![Profile](plots/reference.png)", job_id) == (
         "![Profile](/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png)"
+    )
+
+
+def test_extract_chat_artifact_images_for_explicit_inline_rendering() -> None:
+    job_id = UUID("1db3e835-d47a-4cef-967a-a3131ca5c55e")
+    text, images = extract_chat_artifact_images(
+        "Created this plot:\n\n![Circadian profile](plots/reference.png)",
+        job_id,
+    )
+
+    assert text == "Created this plot:"
+    assert len(images) == 1
+    assert images[0].alt == "Circadian profile"
+    assert images[0].url == (
+        "/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png"
     )
 
 
