@@ -30,6 +30,11 @@ from openscientist.auth import (
 from openscientist.database.models import CostRecord
 from openscientist.database.rls import set_current_user
 from openscientist.database.session import get_session_ctx, get_thread_safe_session_ctx
+from openscientist.dvc.governance_status import (
+    DVCGovernanceEvidence,
+    DVCGovernanceStatus,
+    derive_dvc_governance_status,
+)
 from openscientist.job.types import JobInfo, JobStatus
 from openscientist.job_chat import (
     extract_chat_artifact_images,
@@ -2159,6 +2164,10 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         _render_missing_report_state(context)
         return
 
+    dvc_governance = derive_dvc_governance_status(context.job_dir)
+    if dvc_governance is not None:
+        _render_dvc_governance_status(dvc_governance)
+
     if report_path.exists():
         _render_report_actions(context, report_path, pdf_path)
         _render_report_version_history(context)
@@ -2170,6 +2179,86 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         return
 
     _render_missing_report_state(context)
+
+
+def _render_dvc_governance_status(status: DVCGovernanceStatus) -> None:
+    """Render evidence-derived DVC scope without trusting report prose."""
+    palette = {
+        "approved": (
+            "border-green-500 bg-green-50",
+            "verified_user",
+            "Verified governed DVC analysis",
+        ),
+        "diagnostic": ("border-blue-500 bg-blue-50", "fact_check", "DVC validation evidence"),
+        "exploratory": (
+            "border-orange-500 bg-orange-50",
+            "science",
+            "Unapproved exploratory DVC computation",
+        ),
+        "blocked": ("border-red-500 bg-red-50", "gpp_bad", "Governed DVC analysis blocked"),
+        "mixed": ("border-orange-500 bg-orange-50", "rule", "Mixed DVC governance scope"),
+    }
+    classes, icon, title = palette[status.primary_state]
+    with ui.card().classes(f"w-full mb-4 border-l-4 {classes}").props("flat bordered"):
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon(icon, size="sm")
+            ui.label(title).classes("font-semibold")
+        ui.label(status.summary).classes("text-sm")
+
+        with ui.row().classes("items-center gap-2 flex-wrap"):
+            if status.datasets:
+                ui.badge("DVC dataset imported", color="gray").props("outline")
+            if status.validation_diagnostics:
+                ui.badge("Validation diagnostics", color="blue").props("outline")
+            if status.exploratory_computations:
+                ui.badge("Exploratory — not approved", color="orange")
+            if status.governance_blocks:
+                ui.badge("Governance blocked", color="red")
+            if status.approved_governed_analyses:
+                ui.badge("Approved governed analysis", color="green")
+            if status.unverified_analyses:
+                ui.badge("Unverified analysis artifacts", color="red").props("outline")
+
+        with ui.expansion("Machine-readable evidence", icon="policy").classes("w-full"):
+            if status.datasets:
+                ui.label("Imported datasets").classes("font-medium")
+                for dataset_id in status.datasets:
+                    ui.label(dataset_id).classes("text-sm font-mono")
+            _render_dvc_governance_evidence(
+                "Validation diagnostics",
+                status.validation_diagnostics,
+            )
+            _render_dvc_governance_evidence(
+                "Exploratory computations (not approval evidence)",
+                status.exploratory_computations,
+            )
+            _render_dvc_governance_evidence(
+                "Governance blockers",
+                status.governance_blocks,
+            )
+            _render_dvc_governance_evidence(
+                "Approved governed analyses",
+                status.approved_governed_analyses,
+            )
+            _render_dvc_governance_evidence(
+                "Unverified analysis artifacts",
+                status.unverified_analyses,
+            )
+
+
+def _render_dvc_governance_evidence(
+    title: str,
+    evidence: tuple[DVCGovernanceEvidence, ...],
+) -> None:
+    if not evidence:
+        return
+    ui.label(title).classes("font-medium mt-2")
+    for item in evidence:
+        identity = f" — {item.identifier}" if item.identifier else ""
+        ui.label(f"{item.operation}{identity}").classes("text-sm font-mono")
+        ui.label(f"Evidence: {item.source}").classes("text-xs text-gray-600")
+        if item.detail:
+            ui.label(item.detail).classes("text-xs text-gray-700 whitespace-pre-wrap")
 
 
 def _render_report_version_history(context: _JobDetailContext) -> None:

@@ -106,6 +106,19 @@ def test_agentic_and_scientific_reporting_have_separate_tabs() -> None:
     assert "final_report.md" in report_source
 
 
+def test_scientific_report_surfaces_evidence_derived_dvc_governance() -> None:
+    report_source = inspect.getsource(job_detail._render_report_tab)
+    banner_source = inspect.getsource(job_detail._render_dvc_governance_status)
+
+    assert "derive_dvc_governance_status(context.job_dir)" in report_source
+    assert "_render_dvc_governance_status(dvc_governance)" in report_source
+    assert "Validation diagnostics" in banner_source
+    assert "Exploratory — not approved" in banner_source
+    assert "Governance blocked" in banner_source
+    assert "Approved governed analysis" in banner_source
+    assert "final_report.md" not in banner_source
+
+
 @pytest.mark.parametrize(
     "is_admin,status,expected",
     [
