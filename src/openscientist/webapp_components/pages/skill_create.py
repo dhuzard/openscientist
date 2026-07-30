@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from uuid import UUID
 
+import yaml  # type: ignore[import-untyped]
 from nicegui import ui
+from sqlalchemy import String, cast, select
 
-from openscientist.auth import require_auth
+from openscientist.auth import get_current_user_id, require_auth
+from openscientist.database.models import Job, Skill
+from openscientist.database.rls import set_current_user
+from openscientist.database.session import get_session_ctx
 from openscientist.skill_authoring import (
     SkillAuthoringBrief,
     SkillDraftRequest,
+    SkillQualityFinding,
+    SkillReviewRequest,
     SkillValidationFinding,
+    collect_skill_run_evidence,
     generate_skill_draft,
+    generate_skill_review,
     starter_skill_markdown,
     validate_skill_markdown,
 )
@@ -24,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _SEVERITY_ICON = {"error": "error", "warning": "warning", "info": "info"}
 _SEVERITY_COLOR = {"error": "negative", "warning": "warning", "info": "info"}
+_JOB_REFERENCE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
 
 
 @dataclass(frozen=True)
@@ -76,7 +90,95 @@ _GOOD_SKILL_PRINCIPLES = (
         "Normal, near-miss, and edge cases make behavior observable; real use and review traces "
         "then drive focused revisions.",
     ),
+    (
+        "hub",
+        "Composable and trace-aware",
+        "It defines companion-skill handoffs and uses assigned-versus-observed run evidence to "
+        "find reusable routing gaps without forcing irrelevant skills.",
+    ),
 )
+
+
+def _skill_markdown_for_review(
+    *,
+    name: str,
+    description: str,
+    category: str,
+    slug: str,
+    tags: list[str] | None,
+    content: str,
+) -> str:
+    """Reconstruct an editable complete SKILL.md from the ingested skill row."""
+
+    frontmatter: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "category": category,
+        "slug": slug,
+    }
+    if tags:
+        frontmatter["tags"] = tags
+    yaml_text = yaml.safe_dump(
+        frontmatter,
+        allow_unicode=True,
+        sort_keys=False,
+    ).strip()
+    return f"---\n{yaml_text}\n---\n\n{content.strip()}\n"
+
+
+async def _load_review_skill(category: str, slug: str) -> dict[str, Any] | None:
+    """Load one enabled skill through the current user's RLS context."""
+
+    user_id = get_current_user_id()
+    async with get_session_ctx() as session:
+        await set_current_user(session, UUID(user_id))
+        skill = (
+            await session.execute(
+                select(Skill).where(
+                    Skill.category == category,
+                    Skill.slug == slug,
+                    Skill.is_enabled.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if skill is None:
+            return None
+        return {
+            "name": skill.name,
+            "description": skill.description or "",
+            "category": skill.category,
+            "slug": skill.slug,
+            "tags": list(skill.tags or []),
+            "content": skill.content,
+            "version": skill.version,
+        }
+
+
+async def _load_authorized_run_evidence(job_reference: str) -> dict[str, Any]:
+    """Resolve a full or short job ID under RLS, then read its bounded artifacts."""
+
+    reference = job_reference.strip()
+    if not _JOB_REFERENCE.fullmatch(reference):
+        raise ValueError("Enter a full job UUID or at least its last 8 hexadecimal characters.")
+
+    user_id = get_current_user_id()
+    async with get_session_ctx() as session:
+        await set_current_user(session, UUID(user_id))
+        stmt = select(Job).where(cast(Job.id, String).ilike(f"%{reference}")).limit(2)
+        jobs = list((await session.execute(stmt)).scalars().all())
+
+    if not jobs:
+        raise ValueError(f"No accessible job matches {reference}.")
+    if len(jobs) > 1:
+        raise ValueError(f"Job reference {reference} is ambiguous; enter the full UUID.")
+
+    job = jobs[0]
+    jobs_dir = Path(os.getenv("OPENSCIENTIST_JOBS_DIR", "jobs"))
+    return collect_skill_run_evidence(
+        jobs_dir / str(job.id),
+        job_id=str(job.id),
+        research_question=job.research_question,
+    )
 
 
 def _dvc_help(
@@ -169,18 +271,21 @@ _FIELD_HELP = {
         theory=(
             "Match specificity to fragility: use flexible heuristics when several approaches "
             "are valid, but prescribe ordered checks or deterministic scripts when mistakes "
-            "would be costly or hard to detect."
+            "would be costly or hard to detect. Define explicit handoffs where work crosses "
+            "into a companion skill."
         ),
         approaches=(
             "Ordered procedure for fragile, repeatable operations.",
             "Decision tree for workflows whose next step depends on evidence.",
             "Phase-based guidance with checkpoints for open-ended investigation.",
+            "Companion-skill handoff with precedence and unavailable-dependency behavior.",
         ),
         example=(
             "Identify each export from its structure; preserve source time while deriving "
             "UTC; normalize without interpreting labels; run coverage, missingness, cadence, "
             "variance, and event-overlap checks; reconcile matching Type 1 and Type 2 data; "
-            "propose a guarded plan; then replan after quality control."
+            "propose a guarded plan; then replan after quality control. Before non-UDWA "
+            "statistical code, load data-science while keeping DVC governance authoritative."
         ),
     ),
     "outputs": _dvc_help(
@@ -222,7 +327,8 @@ _FIELD_HELP = {
         theory=(
             "Use examples as behavioral tests, not decoration. Cover an ordinary success, a "
             "near miss that should narrow or avoid triggering, and an edge case that exercises "
-            "a guardrail."
+            "a guardrail. State expected skill activations when collaboration is part of the "
+            "workflow so a later run trace can verify routing."
         ),
         approaches=(
             "Scenario → expected behavior pairs.",
@@ -326,14 +432,64 @@ def _can_export(
 
 @ui.page("/skills/create")
 @require_auth
-async def skill_create_page() -> None:
-    """Guide a user from a task contract to an explicitly accepted SKILL.md."""
+async def skill_create_page(
+    mode: str = "create",
+    category: str = "",
+    slug: str = "",
+    job_id: str = "",
+) -> None:
+    """Create a new skill or review an existing one against optional run evidence."""
 
-    ui.page_title("Create Skill - OpenScientist")
-    render_navigator(active_page="skills")
+    review_mode = mode == "review" and bool(category and slug)
+    review_source = await _load_review_skill(category, slug) if review_mode else None
+    if review_mode and review_source is None:
+        ui.page_title("Skill not found - OpenScientist")
+        render_navigator(active_page="skills")
+        with ui.card().classes("w-full max-w-3xl mx-auto bg-red-50"):
+            ui.label("Skill not found").classes("text-h6 font-semibold text-red-900")
+            ui.label(f"The enabled skill {category}/{slug} is not accessible.").classes(
+                "text-red-800"
+            )
+            ui.button(
+                "Back to Skills",
+                icon="arrow_back",
+                on_click=lambda: ui.navigate.to("/skills"),
+            ).props("flat color=primary")
+        return
 
-    state: dict[str, Any] = {
-        "brief": {
+    if review_source:
+        initial_draft = _skill_markdown_for_review(
+            name=review_source["name"],
+            description=review_source["description"],
+            category=review_source["category"],
+            slug=review_source["slug"],
+            tags=review_source["tags"],
+            content=review_source["content"],
+        )
+        initial_brief = {
+            "purpose": (
+                f"Review and improve {review_source['name']} while preserving its "
+                "intended scientific scope."
+            ),
+            "triggers": (
+                review_source["description"]
+                or "Review the existing skill's trigger and non-trigger coverage."
+            ),
+            "inputs": "",
+            "workflow": "",
+            "outputs": "",
+            "guardrails": "",
+            "examples": "",
+            "proposed_name": review_source["name"],
+            "category": review_source["category"],
+        }
+        initial_message = (
+            f"Loaded {review_source['name']} version {review_source['version']}. "
+            "Run a quality check with or without evidence from a job."
+        )
+    else:
+        initial_draft = starter_skill_markdown()
+        initial_brief = {
             "purpose": "",
             "triggers": "",
             "inputs": "",
@@ -343,26 +499,47 @@ async def skill_create_page() -> None:
             "examples": "",
             "proposed_name": "",
             "category": "domain",
-        },
-        "draft": starter_skill_markdown(),
-        "feedback": "",
-        "assistant_message": (
+        }
+        initial_message = (
             "Start with the task contract. You can edit the starter directly or ask the "
             "configured model to create a first draft."
-        ),
+        )
+
+    ui.page_title(
+        "Skill Quality Check - OpenScientist" if review_mode else "Create Skill - OpenScientist"
+    )
+    render_navigator(active_page="skills")
+
+    state: dict[str, Any] = {
+        "brief": initial_brief,
+        "draft": initial_draft,
+        "feedback": "",
+        "assistant_message": initial_message,
         "questions": (),
-        "findings": validate_skill_markdown(starter_skill_markdown()),
+        "findings": validate_skill_markdown(initial_draft),
+        "quality_findings": (),
         "accepted": False,
         "busy": False,
+        "review_mode": review_mode,
+        "job_id": job_id.strip(),
     }
 
     with ui.column().classes("w-full max-w-screen-xl mx-auto gap-4"):
         with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
             with ui.column().classes("gap-1"):
-                ui.label("Skill Creator").classes("text-h4 font-bold")
+                ui.label("Skill Quality Check" if review_mode else "Skill Creator").classes(
+                    "text-h4 font-bold"
+                )
                 ui.label(
-                    "Define the task, collaborate with the model, review the evidence checks, "
-                    "then explicitly accept and download SKILL.md."
+                    (
+                        "Review the current skill, optionally compare it with an observed run, "
+                        "then inspect and accept only the justified revisions."
+                    )
+                    if review_mode
+                    else (
+                        "Define the task, collaborate with the model, review the evidence "
+                        "checks, then explicitly accept and download SKILL.md."
+                    )
                 ).classes("text-gray-600 max-w-3xl")
             ui.button(
                 "Back to Skills",
@@ -372,9 +549,9 @@ async def skill_create_page() -> None:
 
         with ui.expansion(
             "What makes a good skill?",
-            caption="Six principles to use before drafting",
+            caption="Seven principles for creation and run-based review",
             icon="school",
-            value=True,
+            value=not review_mode,
         ).classes("w-full border rounded-lg bg-slate-50"):
             ui.label(
                 "A skill is a compact onboarding guide for another capable agent. It should "
@@ -393,9 +570,33 @@ async def skill_create_page() -> None:
             with ui.row().classes("items-start gap-3 no-wrap"):
                 ui.icon("verified_user").classes("text-primary text-xl")
                 ui.label(
-                    "Nothing is installed or published from this page. Model output is a "
-                    "proposal; deterministic checks and your scientific review remain required."
+                    (
+                        "This review is read-only. It can inspect an accessible run and propose "
+                        "a revised SKILL.md, but nothing is installed or published."
+                    )
+                    if review_mode
+                    else (
+                        "Nothing is installed or published from this page. Model output is a "
+                        "proposal; deterministic checks and your scientific review remain "
+                        "required."
+                    )
                 ).classes("text-sm text-gray-700")
+
+        run_id_input = None
+        if review_mode:
+            with ui.card().classes("w-full bg-slate-50"):
+                ui.label("Observed run evidence").classes("font-semibold")
+                ui.label(
+                    "Optional. Enter a job UUID or its final 8+ characters. The reviewer will "
+                    "compare assigned skills, observed invocations, tool activity, and the "
+                    "scientific report. Access remains subject to job permissions."
+                ).classes("text-sm text-gray-600")
+                run_id_input = ui.input(
+                    "Run job ID",
+                    value=state["job_id"],
+                    placeholder="199f6962",
+                ).classes("w-full")
+                run_id_input.props("outlined clearable")
 
         with ui.stepper().props("horizontal alternative-labels").classes("w-full") as stepper:
             with ui.step("Define", icon="assignment"):
@@ -408,42 +609,49 @@ async def skill_create_page() -> None:
                 with ui.grid(columns=2).classes("w-full gap-4"):
                     name_input = ui.input(
                         "Proposed name",
+                        value=state["brief"]["proposed_name"],
                         placeholder="Replicate-aware differential expression",
                     ).classes("w-full")
                     _add_real_skill_example(name_input, "proposed_name")
                     category_input = ui.select(
                         {"domain": "Domain-specific", "workflow": "Cross-domain workflow"},
-                        value="domain",
+                        value=state["brief"]["category"],
                         label="Category",
                     ).classes("w-full")
 
                 purpose_input = ui.textarea(
                     "Purpose *",
+                    value=state["brief"]["purpose"],
                     placeholder="What repeated scientific decision or result should improve?",
                 ).classes("w-full")
                 _add_real_skill_example(purpose_input, "purpose")
                 triggers_input = ui.textarea(
                     "Triggers and non-triggers *",
+                    value=state["brief"]["triggers"],
                     placeholder=("Use when... Include two concrete examples. Do not use when..."),
                 ).classes("w-full")
                 _add_real_skill_example(triggers_input, "triggers")
                 inputs_input = ui.textarea(
                     "Inputs and prerequisites",
+                    value=state["brief"]["inputs"],
                     placeholder="Required data, metadata, tools, assumptions, and missing-input behavior",
                 ).classes("w-full")
                 _add_real_skill_example(inputs_input, "inputs")
                 workflow_input = ui.textarea(
                     "Required workflow",
+                    value=state["brief"]["workflow"],
                     placeholder="Ordered decisions, checks, methods, and completion criteria",
                 ).classes("w-full")
                 _add_real_skill_example(workflow_input, "workflow")
                 outputs_input = ui.textarea(
                     "Output contract",
+                    value=state["brief"]["outputs"],
                     placeholder="Evidence, provenance, uncertainty, and deliverables to record",
                 ).classes("w-full")
                 _add_real_skill_example(outputs_input, "outputs")
                 guardrails_input = ui.textarea(
                     "Guardrails and human checkpoints",
+                    value=state["brief"]["guardrails"],
                     placeholder=(
                         "Unsupported claims, failure behavior, and actions requiring confirmation"
                     ),
@@ -451,6 +659,7 @@ async def skill_create_page() -> None:
                 _add_real_skill_example(guardrails_input, "guardrails")
                 examples_input = ui.textarea(
                     "Examples and evaluation cases",
+                    value=state["brief"]["examples"],
                     placeholder="A normal case, a near miss, an edge case, and the expected behavior",
                 ).classes("w-full")
                 _add_real_skill_example(examples_input, "examples")
@@ -504,17 +713,31 @@ async def skill_create_page() -> None:
                         draft_input.props("outlined autogrow input-style='min-height: 34rem'")
 
                         feedback_input = ui.textarea(
-                            "Feedback for the next model revision",
+                            (
+                                "Quality-check question or review focus"
+                                if review_mode
+                                else "Feedback for the next model revision"
+                            ),
                             placeholder=(
-                                "Tell the assistant what is wrong, missing, too strict, or "
-                                "scientifically unsupported."
+                                (
+                                    "Ask about triggering, companion skills, a run failure, "
+                                    "guardrails, or another quality concern."
+                                )
+                                if review_mode
+                                else (
+                                    "Tell the assistant what is wrong, missing, too strict, or "
+                                    "scientifically unsupported."
+                                )
                             ),
                         ).classes("w-full")
                         _add_real_skill_example(feedback_input, "feedback")
                         feedback_input.props("outlined autogrow")
 
                         with ui.row().classes("gap-2 flex-wrap"):
-                            generate_button = ui.button("Generate with AI", icon="auto_awesome")
+                            generate_button = ui.button(
+                                "Run quality check" if review_mode else "Generate with AI",
+                                icon="fact_check" if review_mode else "auto_awesome",
+                            )
                             validate_button = ui.button("Run checks", icon="fact_check").props(
                                 "outline"
                             )
@@ -567,6 +790,32 @@ async def skill_create_page() -> None:
                                             )
                                             ui.label(finding.message).classes("text-sm")
 
+                            if state["quality_findings"]:
+                                ui.label("Run-based quality findings").classes(
+                                    "font-semibold text-gray-700 mt-2"
+                                )
+                                for quality_finding in state["quality_findings"]:
+                                    with ui.card().classes("w-full"):
+                                        with ui.row().classes("items-start gap-2 no-wrap"):
+                                            ui.icon(
+                                                _SEVERITY_ICON[quality_finding.severity]
+                                            ).classes(
+                                                f"text-{_SEVERITY_COLOR[quality_finding.severity]}"
+                                            )
+                                            with ui.column().classes("gap-1"):
+                                                ui.label(quality_finding.category).classes(
+                                                    "font-mono text-xs text-gray-500"
+                                                )
+                                                if quality_finding.evidence:
+                                                    ui.label(
+                                                        f"Evidence: {quality_finding.evidence}"
+                                                    ).classes("text-sm")
+                                                if quality_finding.recommendation:
+                                                    ui.label(
+                                                        "Recommendation: "
+                                                        f"{quality_finding.recommendation}"
+                                                    ).classes("text-sm font-medium")
+
                             with ui.expansion("Rendered preview", icon="preview").classes("w-full"):
                                 ui.markdown(state["draft"]).classes("w-full skill-content")
 
@@ -577,6 +826,7 @@ async def skill_create_page() -> None:
                     state["findings"] = validate_skill_markdown(state["draft"])
                     state["accepted"] = False
                     state["questions"] = ()
+                    state["quality_findings"] = ()
                     state["assistant_message"] = (
                         "Manual edits checked. Review each finding before accepting the draft."
                     )
@@ -584,7 +834,9 @@ async def skill_create_page() -> None:
 
                 async def generate() -> None:
                     sync_brief()
-                    if not state["brief"]["purpose"] or not state["brief"]["triggers"]:
+                    if not review_mode and (
+                        not state["brief"]["purpose"] or not state["brief"]["triggers"]
+                    ):
                         ui.notify(
                             "Add a purpose and concrete triggers before generating.",
                             type="warning",
@@ -596,23 +848,73 @@ async def skill_create_page() -> None:
                     generate_button.disable()
                     generate_button.props("loading")
                     try:
-                        request = SkillDraftRequest(
-                            brief=SkillAuthoringBrief(**state["brief"]),
-                            current_draft=str(draft_input.value or ""),
-                            feedback=str(feedback_input.value or ""),
-                        )
-                        result = await generate_skill_draft(request)
+                        if review_mode:
+                            run_reference = (
+                                str(run_id_input.value or "").strip()
+                                if run_id_input is not None
+                                else ""
+                            )
+                            run_evidence = (
+                                await _load_authorized_run_evidence(run_reference)
+                                if run_reference
+                                else None
+                            )
+                            review_result = await generate_skill_review(
+                                SkillReviewRequest(
+                                    skill_markdown=str(draft_input.value or ""),
+                                    focus=str(feedback_input.value or ""),
+                                    run_evidence=run_evidence,
+                                    category=category,
+                                    slug=slug,
+                                    version=(
+                                        int(review_source["version"]) if review_source else None
+                                    ),
+                                )
+                            )
+                            draft_markdown = review_result.draft_markdown
+                            assistant_message = review_result.assistant_message
+                            questions = review_result.questions
+                            findings = review_result.validation_findings
+                            quality_findings: tuple[SkillQualityFinding, ...] = (
+                                review_result.quality_findings
+                            )
+                        else:
+                            draft_result = await generate_skill_draft(
+                                SkillDraftRequest(
+                                    brief=SkillAuthoringBrief(**state["brief"]),
+                                    current_draft=str(draft_input.value or ""),
+                                    feedback=str(feedback_input.value or ""),
+                                )
+                            )
+                            draft_markdown = draft_result.draft_markdown
+                            assistant_message = draft_result.assistant_message
+                            questions = draft_result.questions
+                            findings = draft_result.findings
+                            quality_findings = ()
                         if not guard.is_connected:
                             return
-                        state["draft"] = result.draft_markdown
-                        state["assistant_message"] = result.assistant_message
-                        state["questions"] = result.questions
-                        state["findings"] = result.findings
+                        state["draft"] = draft_markdown
+                        state["assistant_message"] = assistant_message
+                        state["questions"] = questions
+                        state["findings"] = findings
+                        state["quality_findings"] = quality_findings
                         state["accepted"] = False
-                        draft_input.value = result.draft_markdown
+                        state["job_id"] = (
+                            str(run_id_input.value or "").strip()
+                            if run_id_input is not None
+                            else ""
+                        )
+                        draft_input.value = draft_markdown
                         feedback_input.value = ""
                         render_review.refresh()
-                        ui.notify("Draft updated. Review it before accepting.", type="positive")
+                        ui.notify(
+                            (
+                                "Quality check complete. Review the evidence and proposed draft."
+                                if review_mode
+                                else "Draft updated. Review it before accepting."
+                            ),
+                            type="positive",
+                        )
                     except Exception as exc:
                         logger.error("Skill generation failed: %s", exc, exc_info=True)
                         if guard.is_connected:
@@ -634,6 +936,7 @@ async def skill_create_page() -> None:
                     state["draft"] = str(get_event_value(event) or "")
                     state["accepted"] = False
                     state["findings"] = validate_skill_markdown(state["draft"])
+                    state["quality_findings"] = ()
                     render_review.refresh()
 
                 draft_input.on("change", on_draft_change)

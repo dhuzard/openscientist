@@ -1,6 +1,7 @@
 """Skill detail page."""
 
 import logging
+from urllib.parse import quote
 from uuid import UUID
 
 from nicegui import ui
@@ -109,6 +110,16 @@ async def skill_detail_page(category: str, slug: str) -> None:
 
                         # Metadata sidebar
                         with ui.column().classes("gap-2 ml-4"):
+                            ui.button(
+                                "Quality check",
+                                icon="fact_check",
+                                on_click=lambda: ui.navigate.to(
+                                    "/skills/create?mode=review"
+                                    f"&category={quote(skill.category)}"
+                                    f"&slug={quote(skill.slug)}"
+                                ),
+                            ).props("outline color=primary")
+
                             # Version
                             with ui.row().classes("items-center gap-2"):
                                 ui.icon("tag", size="sm").classes("text-gray-400")
