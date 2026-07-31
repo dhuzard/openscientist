@@ -4,8 +4,13 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from openscientist.job_brief_assistant import JobBriefSuggestion
 from openscientist.webapp_components.pages import new_job
-from openscientist.webapp_components.pages.new_job import _build_upload_session_id, _submit_job
+from openscientist.webapp_components.pages.new_job import (
+    _apply_job_brief_suggestion,
+    _build_upload_session_id,
+    _submit_job,
+)
 
 
 def test_build_upload_session_id_uses_user_and_client_id():
@@ -38,6 +43,26 @@ def test_submit_job_has_description_parameter():
     """The optional study context field must be wired into submission."""
     sig = inspect.signature(_submit_job)
     assert "description" in sig.parameters
+
+
+def test_apply_job_brief_suggestion_updates_both_controls():
+    """AI suggestions remain inert until explicitly applied to both fields."""
+    question = SimpleNamespace(value="Old question", update=MagicMock())
+    description = SimpleNamespace(value="Old context", update=MagicMock())
+
+    _apply_job_brief_suggestion(
+        question,
+        description,
+        JobBriefSuggestion(
+            research_question="Improved question",
+            description="Improved context",
+        ),
+    )
+
+    assert question.value == "Improved question"
+    assert description.value == "Improved context"
+    question.update.assert_called_once_with()
+    description.update.assert_called_once_with()
 
 
 def test_submit_job_passes_trimmed_description_to_job_manager():

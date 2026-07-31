@@ -17,13 +17,14 @@ from openscientist.evidence_librarian import (
     evidence_plan_to_dict,
     select_plan_skills,
 )
+from openscientist.job_brief_assistant import JobBriefSuggestion, generate_job_brief_suggestion
 from openscientist.providers import check_provider_config
 from openscientist.webapp_components.ui_components import (
     render_config_error_banner,
     render_navigator,
     render_pending_approval_notice,
 )
-from openscientist.webapp_components.utils import get_event_value
+from openscientist.webapp_components.utils import ClientGuard, get_event_value
 from openscientist.webapp_components.utils.session import (
     add_uploaded_file,
     clear_uploaded_files,
@@ -58,6 +59,19 @@ def _notify_creation_error(error: Exception) -> None:
         ui.notify("Internal server error. Please try again or contact support.", type="negative")
         return
     ui.notify("Error creating job. Please try again or contact support.", type="negative")
+
+
+def _apply_job_brief_suggestion(
+    research_question: Any,
+    description: Any,
+    suggestion: JobBriefSuggestion,
+) -> None:
+    """Apply an explicitly reviewed suggestion to the two form controls."""
+
+    research_question.value = suggestion.research_question
+    description.value = suggestion.description
+    research_question.update()
+    description.update()
 
 
 def _submit_job(
@@ -179,7 +193,15 @@ def new_job_page() -> None:
         await _handle_upload(event, session_id)
 
     with ui.card().classes("w-full max-w-2xl mx-auto mt-8"):
-        ui.label("Submit Discovery Job").classes("text-h5 mb-4")
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            ui.label("Submit Discovery Job").classes("text-h5")
+            improve_brief_button = ui.button(
+                "Improve Job Brief",
+                icon="auto_awesome",
+            ).props("outline color=primary")
+            improve_brief_button.tooltip(
+                "Ask the configured model and create-job-brief skill for an editable suggestion"
+            )
 
         research_question = ui.textarea(
             label="Research Question",
@@ -200,6 +222,9 @@ def new_job_page() -> None:
         )
         ui.label(
             "This context is included in every analysis iteration and in the final report."
+        ).classes("text-caption text-grey-6")
+        ui.label(
+            "AI assistance sends these two fields and uploaded filenames to the configured model."
         ).classes("text-caption text-grey-6")
 
         ui.upload(
@@ -246,6 +271,106 @@ def new_job_page() -> None:
             "approved_plan": None,
             "busy": False,
         }
+
+        with ui.dialog() as brief_suggestion_dialog, ui.card().classes("w-full max-w-3xl"):
+            ui.label("Review suggested job brief").classes("text-h6 font-semibold")
+            suggestion_summary = ui.label().classes("text-sm text-gray-700")
+            suggested_question = ui.textarea(label="Suggested Research Question").classes("w-full")
+            suggested_description = (
+                ui.textarea(label="Suggested Study Context / Description")
+                .props("autogrow")
+                .classes("w-full")
+            )
+            ui.label("Open items and blockers").classes("font-semibold mt-2")
+            open_items_container = ui.column().classes("w-full gap-1")
+
+            def apply_suggestion() -> None:
+                question = str(suggested_question.value or "").strip()
+                context = str(suggested_description.value or "").strip()
+                if not question or not context:
+                    ui.notify(
+                        "Keep both suggested fields non-empty before applying.", type="warning"
+                    )
+                    return
+                _apply_job_brief_suggestion(
+                    research_question,
+                    description,
+                    JobBriefSuggestion(research_question=question, description=context),
+                )
+                had_plan = librarian_state["plan"] is not None
+                librarian_state.update(
+                    plan=None,
+                    selected_keys=set(),
+                    approved_plan=None,
+                )
+                render_evidence_plan.refresh()
+                brief_suggestion_dialog.close()
+                ui.notify(
+                    (
+                        "Suggestion applied. Rebuild and approve the Evidence Librarian plan."
+                        if had_plan
+                        else "Suggestion applied. Review both fields before starting."
+                    ),
+                    type="positive",
+                )
+
+            with ui.row().classes("w-full justify-end gap-2 mt-3"):
+                ui.button("Keep current", on_click=brief_suggestion_dialog.close).props("flat")
+                ui.button("Apply suggestion", icon="check", on_click=apply_suggestion).props(
+                    "color=primary"
+                )
+
+        async def improve_job_brief() -> None:
+            question = str(research_question.value or "").strip()
+            context = str(description.value or "").strip()
+            if not question and not context:
+                ui.notify(
+                    "Enter a research question or study context before asking for help.",
+                    type="warning",
+                )
+                return
+
+            guard = ClientGuard()
+            improve_brief_button.disable()
+            improve_brief_button.props("loading")
+            try:
+                files = _persist_uploaded_files(session_id)
+                suggestion = await generate_job_brief_suggestion(
+                    question,
+                    context,
+                    [path.name for path in files],
+                )
+                if not guard.is_connected:
+                    return
+                suggested_question.value = suggestion.research_question
+                suggested_description.value = suggestion.description
+                suggested_question.update()
+                suggested_description.update()
+                suggestion_summary.text = (
+                    suggestion.changes_summary
+                    or "Review the proposed wording and unresolved items before applying it."
+                )
+                open_items_container.clear()
+                with open_items_container:
+                    if suggestion.open_items:
+                        for item in suggestion.open_items:
+                            ui.label(f"• {item}").classes("text-sm text-orange-900")
+                    else:
+                        ui.label("No consequential open items identified.").classes(
+                            "text-sm text-green-800"
+                        )
+                brief_suggestion_dialog.open()
+            except Exception as exc:
+                logger.error("Job brief assistance failed: %s", exc, exc_info=True)
+                if guard.is_connected:
+                    detail = str(exc).strip() or "The configured model returned an unknown error."
+                    ui.notify(f"Current text preserved: {detail[:240]}", type="negative")
+            finally:
+                if guard.is_connected:
+                    improve_brief_button.enable()
+                    improve_brief_button.props(remove="loading")
+
+        improve_brief_button.on_click(improve_job_brief)
 
         def _toggle_candidate(key: str, selected: bool) -> None:
             if selected:
