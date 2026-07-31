@@ -189,16 +189,43 @@ def test_agentic_activity_groups_attempt_states(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    save_transcript(
+        provenance / "iter2_attempt1_transcript.json",
+        [
+            ToolCall(id="exec-2", tool="execute_code", arguments={"code": "raise OSError"}),
+            ToolResult(
+                call_id="exec-2",
+                output="",
+                success=False,
+                status="failed",
+                error_message="broker HTTP 500",
+            ),
+        ],
+    )
+    (provenance / "iter2_attempt1_status.json").write_text(
+        json.dumps(
+            {
+                "logical_iteration": 2,
+                "attempt": 1,
+                "state": "failed",
+                "outcome": "failed",
+                "tool_calls": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     trace = job_detail._load_job_agent_activity(tmp_path)
 
     assert [attempt["state"] for attempt in trace["attempts"]] == [
         "retrying",
         "accepted",
+        "failed",
     ]
     assert trace["attempt_states"]["timed_out"] == 1
     assert trace["attempt_states"]["retrying"] == 1
     assert trace["attempt_states"]["accepted"] == 1
+    assert trace["attempt_states"]["failed"] == 1
     assert trace["actions"][0]["location"] == "Iteration 1 · Attempt 1"
 
 

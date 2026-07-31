@@ -449,6 +449,15 @@ async def _run_primary_discovery_loop(
             ks,
             description=runtime.get("description"),
         )
+        prepared_dvc = runtime.get("prepared_dvc")
+        if prepared_dvc:
+            initial_prompt += (
+                "\n\nSTRICT DVC PREPARATION COMPLETED BEFORE ITERATION 1. "
+                f"Use prepared dataset asset {prepared_dvc['measurement_asset_id']} "
+                f"(dataset {prepared_dvc['dataset_id']}) through the preloaded `data` "
+                "DataFrame. Do not reopen or heuristically reparse raw uploaded DVC CSVs. "
+                "The immutable manifest and cage reconciliation are listed in data_files."
+            )
 
         logger.info("Iteration 1/%d: Starting session", current_limit)
         result = await _run_discovery_attempts(
@@ -459,15 +468,6 @@ async def _run_primary_discovery_loop(
             prompt=initial_prompt,
             reset_session=True,
         )
-        prepared_dvc = runtime.get("prepared_dvc")
-        if prepared_dvc:
-            initial_prompt += (
-                "\n\nSTRICT DVC PREPARATION COMPLETED BEFORE ITERATION 1. "
-                f"Use prepared dataset asset {prepared_dvc['measurement_asset_id']} "
-                f"(dataset {prepared_dvc['dataset_id']}) through the preloaded `data` "
-                "DataFrame. Do not reopen or heuristically reparse raw uploaded DVC CSVs. "
-                "The immutable manifest and cage reconciliation are listed in data_files."
-            )
 
         _sync_version_metadata_if_available(job_id)
         _append_iteration_artifacts(

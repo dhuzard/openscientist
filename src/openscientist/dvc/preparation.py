@@ -110,7 +110,7 @@ def _key_lock(
             if time.monotonic() >= deadline:
                 raise DVCIngestionError(
                     f"Timed out waiting for concurrent DVC preparation {cache_key}"
-                )
+                ) from None
             time.sleep(0.05)
     try:
         os.close(descriptor)

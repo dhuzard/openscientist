@@ -295,7 +295,9 @@ class TestDiscoveryCancellationAndFailure:
                 IterationResult(
                     outcome=TurnOutcome.COMPLETED,
                     output="iteration 1 complete",
-                    tool_calls=0,
+                    # Aggregate adapters may report a count without exposing
+                    # the canonical transcript; this is an accepted product.
+                    tool_calls=1,
                     transcript=[],
                 ),
                 AssertionError("second iteration should not run after cancellation"),
@@ -513,7 +515,7 @@ class TestDiscoveryResumeAndLimitControls:
             return_value=IterationResult(
                 outcome=TurnOutcome.COMPLETED,
                 output="first iteration complete",
-                tool_calls=0,
+                tool_calls=1,
                 transcript=[],
             )
         )
@@ -556,6 +558,66 @@ class TestDiscoveryResumeAndLimitControls:
 
         assert executor.run_iteration.await_count == 1
         increment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prepared_dvc_asset_instruction_is_in_iteration_one_prompt(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        ks = KnowledgeState(job_id, "Question?", 1)
+        attempts = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="prepared analysis complete",
+                tool_calls=1,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 1,
+            "resume_iteration": 1,
+            "investigation_mode": "autonomous",
+            "data_files": [str(job_dir / "dvc_datasets" / "dvc-fixture" / "measurements.parquet")],
+            "prepared_dvc": {
+                "dataset_id": "dvc-fixture",
+                "measurement_asset_id": "asset-prepared123",
+            },
+        }
+
+        with (
+            patch.object(
+                discovery,
+                "_job_control_checkpoint",
+                new=AsyncMock(side_effect=[1, 1]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            patch.object(discovery, "_run_discovery_attempts", new=attempts),
+            patch.object(discovery, "_sync_version_metadata_if_available"),
+            patch.object(discovery, "_append_iteration_artifacts"),
+        ):
+            await discovery._run_primary_discovery_loop(
+                executor=MagicMock(),
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        prompt = attempts.await_args.kwargs["prompt"]
+        assert "STRICT DVC PREPARATION COMPLETED BEFORE ITERATION 1" in prompt
+        assert "asset-prepared123" in prompt
+        assert "Do not reopen or heuristically reparse raw uploaded DVC CSVs" in prompt
 
     @pytest.mark.asyncio
     async def test_queued_ideas_are_acknowledged_after_iteration_artifacts(self, tmp_path):
@@ -2049,6 +2111,149 @@ class TestDiscoveryAttemptPolicy:
         assert second["state"] == "accepted"
         assert (provenance / "iter1_transcript.json").is_file()
         assert run.call_args_list[1].kwargs["reset_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_repeated_timeouts_stop_and_preserve_each_partial_attempt(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript import load_transcript
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+
+        def timed_out(call_id: str, tool_calls: int) -> IterationResult:
+            return IterationResult(
+                outcome=TurnOutcome.TIMED_OUT,
+                output="partial provider output",
+                tool_calls=tool_calls,
+                transcript=[
+                    ToolCall(
+                        id=call_id,
+                        tool="execute_code",
+                        arguments={"code": "print('started')"},
+                    ),
+                    ToolResult(
+                        call_id=call_id,
+                        output="started",
+                        success=False,
+                        status="timed_out",
+                        error_message="900 second timeout",
+                    ),
+                ],
+                error="900 second timeout",
+            )
+
+        provenance = tmp_path / "provenance"
+        run = AsyncMock(side_effect=[timed_out("timeout-1", 7), timed_out("timeout-2", 18)])
+        with (
+            patch.object(discovery, "_run_cost_tracked_iteration", new=run),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="failed after 2 attempt"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        first_status = json.loads((provenance / "iter1_attempt1_status.json").read_text())
+        second_status = json.loads((provenance / "iter1_attempt2_status.json").read_text())
+        assert (first_status["state"], first_status["tool_calls"]) == ("retrying", 7)
+        assert (second_status["state"], second_status["tool_calls"]) == ("failed", 18)
+        assert [
+            entry.id
+            for entry in load_transcript(provenance / "iter1_attempt1_transcript.json")
+            if isinstance(entry, ToolCall)
+        ] == ["timeout-1"]
+        assert [
+            entry.id
+            for entry in load_transcript(provenance / "iter1_attempt2_transcript.json")
+            if isinstance(entry, ToolCall)
+        ] == ["timeout-2"]
+        assert not (provenance / "iter1_transcript.json").exists()
+        assert run.call_args_list[1].kwargs["reset_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_http_500_failed_transcripts_are_durable_before_stop(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript import load_transcript
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+
+        def failed(call_id: str) -> IterationResult:
+            return IterationResult(
+                outcome=TurnOutcome.FAILED,
+                output="broker attempt failed",
+                tool_calls=1,
+                transcript=[
+                    ToolCall(
+                        id=call_id,
+                        tool="execute_code",
+                        arguments={"asset_id": "asset-csv"},
+                    ),
+                    ToolResult(
+                        call_id=call_id,
+                        output="",
+                        success=False,
+                        status="failed",
+                        error_message="execute_code returned HTTP 500",
+                    ),
+                ],
+                error="execute_code returned HTTP 500",
+            )
+
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(
+                discovery,
+                "_run_cost_tracked_iteration",
+                new=AsyncMock(side_effect=[failed("http-1"), failed("http-2")]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="HTTP 500"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        for attempt, call_id in ((1, "http-1"), (2, "http-2")):
+            transcript = load_transcript(provenance / f"iter1_attempt{attempt}_transcript.json")
+            assert any(isinstance(entry, ToolCall) and entry.id == call_id for entry in transcript)
+            assert any(
+                isinstance(entry, ToolResult)
+                and entry.call_id == call_id
+                and entry.error_message == "execute_code returned HTTP 500"
+                for entry in transcript
+            )
+        statuses = [
+            json.loads((provenance / f"iter1_attempt{attempt}_status.json").read_text())
+            for attempt in (1, 2)
+        ]
+        assert [status["state"] for status in statuses] == ["retrying", "failed"]
+        assert all(status["failure_signature"] == "http_500" for status in statuses)
+        assert not (provenance / "iter1_transcript.json").exists()
 
     @pytest.mark.asyncio
     async def test_empty_attempts_stop_without_canonical_iteration(self, tmp_path: Path):

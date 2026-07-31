@@ -75,6 +75,7 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 .pytest-tmp-*/
+.codex-test-tmp/
 
 # uv
 .ini
