@@ -46,6 +46,7 @@ codex-local-bin
 
 # Deployment-specific configs (keep private)
 docker-compose.*.yml
+!docker-compose.fair-vcg.yml
 DEPLOY_*.md
 
 # Logs
@@ -73,6 +74,8 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest-tmp-*/
+.codex-test-tmp/
 
 # uv
 .ini

@@ -7,8 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
-from openscientist.providers.base import CodexCompatible
+from openscientist.providers.base import CodexCompatible, CostInfo
 from openscientist.providers.openai import OpenAIDirectProvider
+from openscientist.settings import clear_settings_cache
 
 
 @pytest.fixture(autouse=True)
@@ -78,12 +79,66 @@ def test_get_cost_info_unavailable() -> None:
     info = OpenAIDirectProvider().get_cost_info()
     assert info.total_spend_usd is None
     assert info.recent_spend_usd is None
+    assert "Admin API key" in (info.data_lag_note or "")
+
+
+def test_budget_cost_info_uses_recorded_costs() -> None:
+    recorded = CostInfo(
+        provider_name="OpenAI API",
+        total_spend_usd=12.5,
+        recent_spend_usd=2.25,
+        recent_period_hours=24,
+        data_lag_note="Estimated from completed OpenScientist jobs",
+    )
+    with patch(
+        "openscientist.cost_tracker.get_recorded_cost_info_sync",
+        return_value=recorded,
+    ):
+        info = OpenAIDirectProvider().get_budget_cost_info()
+
+    assert info is recorded
+    assert info.total_spend_usd == 12.5
+    assert info.recent_spend_usd == 2.25
+
+
+def test_budget_cost_info_retains_unavailable_state_when_database_fails() -> None:
+    with patch(
+        "openscientist.cost_tracker.get_recorded_cost_info_sync",
+        side_effect=OSError("database offline"),
+    ):
+        info = OpenAIDirectProvider().get_budget_cost_info()
+
+    assert info.total_spend_usd is None
+    assert info.recent_spend_usd is None
+
+
+def test_recorded_costs_enforce_budget_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = CostInfo(
+        provider_name="OpenAI API",
+        total_spend_usd=12.5,
+        recent_spend_usd=2.25,
+        recent_period_hours=24,
+    )
+    monkeypatch.setenv("MAX_PROJECT_SPEND_TOTAL_USD", "10")
+    clear_settings_cache()
+    try:
+        with patch(
+            "openscientist.cost_tracker.get_recorded_cost_info_sync",
+            return_value=recorded,
+        ):
+            budget_check = OpenAIDirectProvider().check_budget_limits()
+    finally:
+        clear_settings_cache()
+
+    assert budget_check["can_proceed"] is False
+    assert any(
+        "Total spend $12.50 exceeds limit $10.00" in error for error in budget_check["errors"]
+    )
 
 
 def test_get_provider_selects_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     """`provider_id="openai"` resolves to OpenAIDirectProvider via the factory."""
     from openscientist.providers import get_provider
-    from openscientist.settings import clear_settings_cache
 
     monkeypatch.setenv("OPENSCIENTIST_PROVIDER", "openai")
     clear_settings_cache()

@@ -86,27 +86,38 @@ async def create_api_key(
     # Set RLS context
     await set_current_user(session, user.id)
 
-    # Check if name already exists for this user
+    # Check if an active key already uses this name. Revoked keys are
+    # replaceable because their secrets can never authenticate again.
     stmt = select(APIKey).where(
         APIKey.user_id == user.id,
         APIKey.name == key_data.name,
     )
     result = await session.execute(stmt)
-    if result.scalar_one_or_none():
+    existing_key = result.scalar_one_or_none()
+    if existing_key and existing_key.is_active:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"API key with name '{key_data.name}' already exists",
         )
 
-    # Check key count limit
+    # Only active credentials consume the user's key allowance.
     count_result = await session.execute(
-        select(func.count(APIKey.id)).where(APIKey.user_id == user.id)
+        select(func.count(APIKey.id)).where(
+            APIKey.user_id == user.id,
+            APIKey.is_active.is_(True),
+        )
     )
     if count_result.scalar_one() >= 10:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Maximum of 10 API keys per user",
         )
+
+    # The schema keeps names unique per user. Remove an inactive tombstone
+    # before creating the replacement credential with a fresh identity/secret.
+    if existing_key:
+        await session.delete(existing_key)
+        await session.flush()
 
     # Generate secret and hash it
     secret = generate_api_key_secret()

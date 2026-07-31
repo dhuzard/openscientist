@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 from nicegui import ui
@@ -29,6 +30,7 @@ _SKILL_COLUMNS: list[dict[str, Any]] = [
     {"name": "category", "label": "Category", "field": "category", "align": "center"},
     {"name": "source", "label": "Source", "field": "source", "align": "left"},
     {"name": "last_synced", "label": "Last Synced", "field": "last_synced", "align": "left"},
+    {"name": "actions", "label": "Quality", "field": "actions", "align": "center"},
 ]
 
 
@@ -207,9 +209,31 @@ async def skills_page() -> None:
             </q-td>
             """,
         )
+        skills_table.add_slot(
+            "body-cell-actions",
+            r"""
+            <q-td :props="props">
+                <q-btn
+                    flat dense no-caps
+                    icon="fact_check"
+                    label="Quality check"
+                    color="primary"
+                    @click="$parent.$emit('quality-check', {category: props.row.category, slug: props.row.slug})"
+                />
+            </q-td>
+            """,
+        )
         skills_table.on(
             "view-skill",
             lambda e: ui.navigate.to(f"/skill/{e.args['category']}/{e.args['slug']}"),
+        )
+        skills_table.on(
+            "quality-check",
+            lambda e: ui.navigate.to(
+                "/skills/create?mode=review"
+                f"&category={quote(e.args['category'])}"
+                f"&slug={quote(e.args['slug'])}"
+            ),
         )
         empty_container = ui.column().classes("w-full hidden")
 

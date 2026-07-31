@@ -54,5 +54,10 @@ class CollabAgentToolCall(BaseModel):
     id: str
     prompt: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
+    receiver_thread_ids: list[str] | None = None
+    sender_thread_id: str | None = None
+    tool: str | None = None
+    status: str | None = None
     agents_states: dict[str, dict[str, Any]] | None = None
     raw: dict[str, Any] = Field(default_factory=dict)

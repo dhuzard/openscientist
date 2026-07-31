@@ -115,6 +115,37 @@ class Provider(abc.ABC):
             CostInfo with total and recent spend
         """
 
+    @property
+    def use_recorded_cost_fallback(self) -> bool:
+        """Whether app-recorded estimates may replace unavailable provider costs."""
+        return False
+
+    def get_budget_cost_info(self, lookback_hours: int = 24) -> CostInfo:
+        """Return the best cost data available for application budget checks.
+
+        Provider billing data remains authoritative when available. Providers
+        that explicitly opt in can fall back to OpenScientist's per-job cost
+        ledger when their credential has no billing endpoint.
+        """
+        cost_info = self.get_cost_info(lookback_hours=lookback_hours)
+        provider_costs_available = (
+            cost_info.total_spend_usd is not None and cost_info.recent_spend_usd is not None
+        )
+        if provider_costs_available or not self.use_recorded_cost_fallback:
+            return cost_info
+
+        try:
+            from openscientist.cost_tracker import get_recorded_cost_info_sync
+
+            return get_recorded_cost_info_sync(self, lookback_hours)
+        except Exception as e:
+            logger.warning(
+                "Could not aggregate recorded %s costs; using provider response: %s",
+                self.display_name,
+                e,
+            )
+            return cost_info
+
     def check_budget_limits(self, lookback_hours: int = 24) -> dict[str, Any]:
         """Check if budget limits are exceeded.
 
@@ -122,7 +153,7 @@ class Provider(abc.ABC):
             {"can_proceed": bool, "warnings": List[str], "errors": List[str]}
         """
         try:
-            cost_info = self.get_cost_info(lookback_hours=lookback_hours)
+            cost_info = self.get_budget_cost_info(lookback_hours=lookback_hours)
         except (ProviderError, ValueError, OSError) as e:
             logger.error("Could not fetch cost info for budget check: %s", e)
             # If we can't check costs, allow job to proceed but warn

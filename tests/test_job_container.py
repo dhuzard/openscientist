@@ -11,7 +11,9 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from docker import errors as docker_errors
+from openscientist.dvc_gateway_client import DVC_CAPABILITY_ENV, DVC_GATEWAY_URL_ENV
 from openscientist.exec_broker_client import EXEC_BROKER_URL_ENV, EXEC_TOKEN_ENV
+from openscientist.integrations.fair_prepare import FairPrepareError
 from openscientist.job_container.runner import AGENT_APP_DIR, JobContainerRunner
 from openscientist.job_container.secrets import derive_job_secret, make_exec_placeholder
 from openscientist.settings import Settings
@@ -81,6 +83,7 @@ class TestJobContainerRunner:
         mock_container.short_id = "abc123"
         mock_client.containers.run.return_value = mock_container
         settings = self._make_settings(host_project_dir="/host/project")
+        host_job_dir = Path("/host/project/jobs/job-123")
 
         original_exists = Path.exists
 
@@ -95,7 +98,7 @@ class TestJobContainerRunner:
             patch.object(JobContainerRunner, "_get_network", return_value="bridge"),
             patch(
                 "openscientist.job_container.runner.to_host_path",
-                return_value=Path("/host/project/jobs/job-123"),
+                return_value=host_job_dir,
             ),
             patch.object(Path, "exists", autospec=True, side_effect=fake_exists),
         ):
@@ -107,7 +110,7 @@ class TestJobContainerRunner:
         assert environment["JOB_DIR"] == f"{AGENT_APP_DIR}/jobs/job-123"
         assert environment["OPENSCIENTIST_HOST_PROJECT_DIR"] == "/host/project"
         assert environment["OPENSCIENTIST_CONTAINER_APP_DIR"] == AGENT_APP_DIR
-        assert run_kwargs["volumes"]["/host/project/jobs/job-123"]["bind"] == environment["JOB_DIR"]
+        assert run_kwargs["volumes"][str(host_job_dir)]["bind"] == environment["JOB_DIR"]
 
     def test_launch_omits_docker_socket_and_group_add(self):
         """The job container no longer mounts the Docker socket or joins its group."""
@@ -378,8 +381,9 @@ class TestPhenixMount:
         volumes = call_kwargs.kwargs.get("volumes") or call_kwargs[1].get("volumes")
         env = call_kwargs.kwargs.get("environment") or call_kwargs[1].get("environment")
 
-        assert "/Applications/phenix-1.21.2" in volumes
-        assert volumes["/Applications/phenix-1.21.2"] == {"bind": "/opt/phenix", "mode": "ro"}
+        phenix_host = str(Path("/Applications/phenix-1.21.2").resolve())
+        assert phenix_host in volumes
+        assert volumes[phenix_host] == {"bind": "/opt/phenix", "mode": "ro"}
         assert env["PHENIX_PATH"] == "/opt/phenix"
 
     @patch("openscientist.job_container.runner.os.stat")
@@ -456,8 +460,11 @@ class TestCodexAuthProvisioning:
 
         dest = job_dir / ".codex" / "auth.json"
         assert dest.read_text() == '{"tokens": {}}'
-        assert (dest.stat().st_mode & 0o777) == 0o644  # agent (uid 1001) can read
-        assert (dest.parent.stat().st_mode & 0o777) == 0o777  # agent can write config.toml
+        assert os.access(dest, os.R_OK)
+        assert os.access(dest.parent, os.W_OK)
+        if os.name != "nt":
+            assert (dest.stat().st_mode & 0o777) == 0o644  # agent (uid 1001) can read
+            assert (dest.parent.stat().st_mode & 0o777) == 0o777  # agent can write config.toml
 
     def test_noop_when_unset(self, tmp_path: Path) -> None:
         from openscientist.agent.codex_agent import CodexAgent
@@ -546,6 +553,63 @@ class TestJobSecretInjection:
         assert env["OPENSCIENTIST_EXEC_TOKEN"] == make_exec_placeholder("master-key", "job-x")
         assert env["OPENSCIENTIST_EXEC_TOKEN"].startswith("job-x.")
         assert env["OPENSCIENTIST_EXEC_BROKER_URL"].endswith(":8082")
+
+    def test_env_injects_only_dvc_gateway_capability_not_direct_credentials(self) -> None:
+        settings = self._settings(master="master-key")
+        env = JobContainerRunner._build_container_environment(
+            cast(Settings, settings),
+            job_id="job-x",
+            job_mount="/agent/jobs/job-x",
+            provider_env={
+                "DVC_API_KEY": "must-never-leak",
+                "DVC_BASE_URL": "https://credentialed-vendor.example",
+                "DVC_CONNECTION_LAB_API_KEY": "also-secret",
+            },
+        )
+
+        assert not any(key.startswith("DVC_") for key in env)
+        assert "must-never-leak" not in env.values()
+        assert "also-secret" not in env.values()
+        assert DVC_CAPABILITY_ENV in env
+        assert env[DVC_CAPABILITY_ENV].startswith("job-x.")
+        assert env[DVC_GATEWAY_URL_ENV].endswith(":8083")
+
+    def test_env_forwards_only_validated_fair_service_url(self) -> None:
+        settings = self._settings()
+        with patch.dict(
+            os.environ,
+            {
+                "FAIR_PREPARE_URL": "http://fair-vcg-mentor:8000/",
+                "FAIR_PREPARE_API_KEY": "must-not-be-forwarded",
+            },
+            clear=False,
+        ):
+            env = JobContainerRunner._build_container_environment(
+                cast(Settings, settings),
+                job_id="job-fair",
+                job_mount="/agent/jobs/job-fair",
+                provider_env={},
+            )
+
+        assert env["FAIR_PREPARE_URL"] == "http://fair-vcg-mentor:8000"
+        assert "FAIR_PREPARE_API_KEY" not in env
+
+    def test_env_rejects_credential_bearing_fair_url(self) -> None:
+        settings = self._settings()
+        with (
+            patch.dict(
+                os.environ,
+                {"FAIR_PREPARE_URL": "http://user:secret@fair-vcg-mentor:8000"},
+                clear=False,
+            ),
+            pytest.raises(FairPrepareError, match="must not contain credentials"),
+        ):
+            JobContainerRunner._build_container_environment(
+                cast(Settings, settings),
+                job_id="job-fair",
+                job_mount="/agent/jobs/job-fair",
+                provider_env={},
+            )
 
 
 class TestAirgapFirewallLaunch:

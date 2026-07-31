@@ -37,6 +37,7 @@ _KNOWN_CONTEXT_TOKENS: dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4.1": 1_047_576,
     "gpt-5": 400_000,
+    "gpt-5.5": 1_050_000,
 }
 
 

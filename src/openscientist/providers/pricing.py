@@ -54,7 +54,24 @@ def normalize_model_name(model: str) -> str:
     return model
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def _rate(entry: dict[str, Any], *keys: str, fallback: float = 0.0) -> float:
+    """Return the first catalog rate present, including an explicit zero."""
+    for key in keys:
+        value = entry.get(key)
+        if value is not None:
+            return float(value)
+    return fallback
+
+
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> float:
     """
     Estimate cost in USD using the litellm pricing database.
 
@@ -62,19 +79,80 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
     Returns 0.0 if no pricing entry is found.
     """
     pricing = _get_litellm_pricing()
-    entry = pricing.get(model) or pricing.get(normalize_model_name(model))
+    normalized = normalize_model_name(model)
+    entry = (
+        pricing.get(model)
+        or pricing.get(normalized)
+        or _FALLBACK_PRICING.get(model)
+        or _FALLBACK_PRICING.get(normalized)
+    )
     if not entry:
         return 0.0
-    in_rate = float(entry.get("input_cost_per_token", 0.0))
-    out_rate = float(entry.get("output_cost_per_token", 0.0))
-    return in_rate * input_tokens + out_rate * output_tokens
+    in_rate = _rate(entry, "input_cost_per_token")
+    out_rate = _rate(entry, "output_cost_per_token")
+    cache_read_rate = _rate(
+        entry,
+        "cache_read_input_token_cost",
+        "cache_read_input_cost_per_token",
+        fallback=in_rate,
+    )
+    cache_write_rate = _rate(
+        entry,
+        "cache_creation_input_token_cost",
+        "cache_write_input_token_cost",
+        "cache_write_input_cost_per_token",
+        fallback=in_rate,
+    )
+    reasoning_rate = _rate(
+        entry,
+        "output_cost_per_reasoning_token",
+        "reasoning_cost_per_token",
+        fallback=out_rate,
+    )
+    return (
+        in_rate * input_tokens
+        + out_rate * output_tokens
+        + cache_read_rate * cache_read_tokens
+        + cache_write_rate * cache_write_tokens
+        + reasoning_rate * reasoning_tokens
+    )
 
 
 # Fallback used only when the remote fetch fails and the cache is empty.
 _FALLBACK_PRICING: dict[str, Any] = {
-    "claude-opus-4-6": {"input_cost_per_token": 15e-6, "output_cost_per_token": 75e-6},
-    "claude-sonnet-4-6": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
-    "claude-sonnet-4-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
-    "claude-sonnet-4-20250514": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
-    "claude-haiku-4-5": {"input_cost_per_token": 0.8e-6, "output_cost_per_token": 4e-6},
+    "gpt-5.5": {
+        "input_cost_per_token": 5e-6,
+        "cache_read_input_token_cost": 0.5e-6,
+        "output_cost_per_token": 30e-6,
+    },
+    "claude-opus-4-6": {
+        "input_cost_per_token": 15e-6,
+        "cache_creation_input_token_cost": 18.75e-6,
+        "cache_read_input_token_cost": 1.5e-6,
+        "output_cost_per_token": 75e-6,
+    },
+    "claude-sonnet-4-6": {
+        "input_cost_per_token": 3e-6,
+        "cache_creation_input_token_cost": 3.75e-6,
+        "cache_read_input_token_cost": 0.3e-6,
+        "output_cost_per_token": 15e-6,
+    },
+    "claude-sonnet-4-5": {
+        "input_cost_per_token": 3e-6,
+        "cache_creation_input_token_cost": 3.75e-6,
+        "cache_read_input_token_cost": 0.3e-6,
+        "output_cost_per_token": 15e-6,
+    },
+    "claude-sonnet-4-20250514": {
+        "input_cost_per_token": 3e-6,
+        "cache_creation_input_token_cost": 3.75e-6,
+        "cache_read_input_token_cost": 0.3e-6,
+        "output_cost_per_token": 15e-6,
+    },
+    "claude-haiku-4-5": {
+        "input_cost_per_token": 0.8e-6,
+        "cache_creation_input_token_cost": 1e-6,
+        "cache_read_input_token_cost": 0.08e-6,
+        "output_cost_per_token": 4e-6,
+    },
 }

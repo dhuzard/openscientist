@@ -32,6 +32,7 @@ from .iteration_summary import IterationSummary
 from .job import Job
 from .job_chat_message import JobChatMessage
 from .job_data_file import JobDataFile
+from .job_guidance import JobGuidance
 from .job_share import JobShare
 from .literature import Literature
 from .oauth_account import OAuthAccount
@@ -61,6 +62,7 @@ __all__ = [
     "Job",
     "JobChatMessage",
     "JobDataFile",
+    "JobGuidance",
     "JobShare",
     "Literature",
     "OAuthAccount",

@@ -214,3 +214,36 @@ class TestExecBrokerClient:
             execute_code_via_broker(
                 code="x", language="python", job_id="j", output_dir="/o", timeout=1
             )
+
+    def test_structured_failure_preserves_code_and_retryability(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Resp:
+            status_code = 500
+            text = "internal"
+
+            @staticmethod
+            def json() -> dict[str, Any]:
+                return {
+                    "error": {
+                        "code": "executor_internal_error",
+                        "message": "executor failed",
+                        "retryable": True,
+                        "details": {"stage": "spawn"},
+                    }
+                }
+
+        monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _Resp())
+        with pytest.raises(BrokerError) as caught:
+            execute_code_via_broker(
+                code="x",
+                language="python",
+                job_id="j",
+                output_dir={"job_relpath": "provenance"},
+                timeout=1,
+            )
+
+        assert caught.value.code == "executor_internal_error"
+        assert caught.value.retryable is True
+        assert caught.value.status_code == 500
+        assert caught.value.details == {"stage": "spawn"}

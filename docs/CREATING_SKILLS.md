@@ -32,6 +32,28 @@ The page never installs or publishes the draft. Editing invalidates acceptance,
 and blocking syntax or secret checks prevent export. Repository review or an
 administrator-managed source remains a separate publication decision.
 
+### Review an existing skill
+
+From **Skills**, choose **Quality check** for any enabled skill. The same
+authoring workspace opens with the current version preloaded. A reviewer can
+optionally provide a full job UUID or its final eight or more characters.
+OpenScientist then reviews:
+
+- the current skill's trigger and non-trigger coverage;
+- prerequisites, workflow precision, outputs, stopping behavior, and safety;
+- boundaries and precedence between the skill and companion skills;
+- the job's assigned skills versus observed skill invocations;
+- tool activity and the scientific report for behavior that should have
+  triggered another skill; and
+- version differences between the skill captured by the run and the current
+  reviewed version.
+
+An assigned but unused skill is not automatically a defect. The quality check
+reports a routing gap only when the task or observed behavior matched that
+skill's trigger or a required handoff rule. It proposes the smallest reusable
+revision and evaluation cases rather than overfitting a single run. Job
+evidence remains subject to the current user's access permissions.
+
 Generation uses the configured provider's direct text-completion API and does
 not expose agent tools. Direct Claude-compatible API configurations and
 OpenAI-compatible API-key/proxy configurations are supported. Anthropic
@@ -269,6 +291,10 @@ support. Parser success only proves that the file can be ingested.
 - [ ] The description says what the skill does and when it applies.
 - [ ] The category matches current discovery behavior.
 - [ ] The procedure is ordered, testable, and self-contained.
+- [ ] Boundaries with companion skills define the handoff trigger, which skill
+      remains authoritative, and safe behavior when a dependency is unavailable.
+- [ ] Evaluation cases state the expected skill activations so run provenance
+      can expose missed or unnecessary routing.
 - [ ] Consequential scientific claims and thresholds have sources.
 - [ ] Observations, associations, hypotheses, proxies, and causal claims remain
       distinct.

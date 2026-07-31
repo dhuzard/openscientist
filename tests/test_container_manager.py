@@ -5,6 +5,7 @@ Contains both unit tests (mocked Docker) and integration tests (real Docker).
 """
 
 import json
+import sys
 import tempfile
 from datetime import UTC
 from pathlib import Path
@@ -725,6 +726,36 @@ class TestContainerManagerIntegration:
 
         assert result["success"] is True
         assert "(3, 1)" in result["output"]
+
+    def test_windows_docker_desktop_executes_host_csv(self, tmp_path: Path):
+        """Exercise native Windows bind paths and executor-local CSV remapping."""
+        if sys.platform != "win32":
+            pytest.skip("Windows Docker Desktop regression")
+
+        from openscientist.container_manager import ContainerManager
+
+        csv_path = tmp_path / "uploaded activity.csv"
+        csv_path.write_text("cage,activity\nA,1.25\nB,2.75\n", encoding="utf-8")
+        manager = ContainerManager(timeout=30)
+        result = manager.execute_code(
+            code=(
+                "import os\n"
+                "csv_path = data_files[0]['path']\n"
+                "print('CSV_PATH', csv_path)\n"
+                "print('CSV_EXISTS', os.path.isfile(csv_path))\n"
+                "print('ACTIVITY_SUM', data['activity'].sum())"
+            ),
+            job_id="windows-docker-csv-regression",
+            data_path=str(csv_path),
+            data_files=[{"path": str(csv_path), "name": csv_path.name}],
+            output_dir=tmp_path / "outputs",
+            timeout=30,
+        )
+
+        assert result["success"] is True, result
+        assert "CSV_PATH /data/uploaded activity.csv" in result["output"]
+        assert "CSV_EXISTS True" in result["output"]
+        assert "ACTIVITY_SUM 4.0" in result["output"]
 
     def test_network_enabled(self):
         """Test that network access is available (needed for requests, SPARQL, cargo, etc.)."""

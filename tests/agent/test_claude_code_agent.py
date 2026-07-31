@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from claude_agent_sdk.types import TaskStartedMessage
 
 from openscientist.agent.base import AgentConfig
-from openscientist.agent.claude_code_agent import ClaudeCodeAgent
+from openscientist.agent.claude_code_agent import ClaudeCodeAgent, _IterationState
 from openscientist.providers.base import ClaudeCompatible
+from openscientist.transcript import CLAUDE, TaskStarted
 from tests.helpers import StubClaudeProvider
 
 
@@ -64,6 +66,29 @@ def test_build_options_uses_stdio_spec_for_openscientist_tools(tmp_path: Path) -
     assert cfg["env"]["OPENSCIENTIST_JOB_DIR"] == str(tmp_path)
 
 
+def test_stream_handler_preserves_subagent_task_lifecycle(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    state = _IterationState()
+    message = TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="task-1",
+        description="Analyze a subproblem",
+        uuid="message-1",
+        session_id="session-1",
+        tool_use_id="tool-parent",
+        task_type="analysis",
+    )
+
+    agent._handle_stream_message(message, state)
+    translated = CLAUDE.deserialize(state.transcript)
+
+    task = next(entry for entry in translated if isinstance(entry, TaskStarted))
+    assert task.task_id == "task-1"
+    assert task.description == "Analyze a subproblem"
+    assert task.parent_tool_use_id == "tool-parent"
+
+
 def test_subprocess_env_passes_through_unrelated_openscientist_vars(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -98,6 +123,27 @@ def test_subprocess_env_merges_tool_server_env(tmp_path: Path) -> None:
     )._build_subprocess_env()
     assert env["OPENSCIENTIST_EXEC_TOKEN"] == "job-9.tok"
     assert env["X_EXTRA"] == "1"
+
+
+def test_subprocess_env_never_inherits_dvc_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DVC_API_KEY", "must-never-reach-mcp")
+    monkeypatch.setenv("DVC_BASE_URL", "https://vendor.example")
+    monkeypatch.setenv("DVC_CONNECTION_LAB_API_KEY", "named-secret")
+
+    env = _make_agent(
+        tmp_path,
+        tool_server_env={
+            "OPENSCIENTIST_DVC_CAPABILITY": "job-1.capability",
+            "OPENSCIENTIST_DVC_GATEWAY_URL": "http://web:8083",
+        },
+    )._build_subprocess_env()
+
+    assert not any(key.startswith("DVC_") for key in env)
+    assert "must-never-reach-mcp" not in env.values()
+    assert "named-secret" not in env.values()
+    assert env["OPENSCIENTIST_DVC_CAPABILITY"] == "job-1.capability"
 
 
 def test_subprocess_env_inherits_critical_parent_vars(

@@ -423,6 +423,16 @@ async def _start_background_tasks(engine: Any) -> None:
     except Exception as e:
         logger.warning("Failed to start execution broker: %s", e)
 
+    # DVC credentials are resolved only in this trusted web process. Agents
+    # authenticate to this listener with a short-lived job capability.
+    try:
+        from openscientist.dvc_gateway import start_dvc_gateway
+
+        await start_dvc_gateway()
+        logger.info("DVC acquisition gateway started")
+    except Exception as e:
+        logger.warning("Failed to start DVC acquisition gateway: %s", e)
+
 
 def _initialize_job_manager_runtime(jobs_dir: Path) -> None:
     if _state.job_manager is not None:
@@ -606,7 +616,7 @@ def main(
 
     from openscientist.settings import get_settings
 
-    reload = get_settings().dev.dev_mode
+    reload = get_settings().dev.reload_enabled
     os.environ[JOBS_DIR_ENV] = str(jobs_dir)
 
     logger.info("Starting NiceGUI server on %s:%s (reload=%s)", host, port, reload)

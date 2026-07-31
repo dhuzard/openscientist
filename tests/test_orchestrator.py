@@ -5,7 +5,9 @@ the full agent loop. The run_discovery integration is too heavyweight for
 unit testing.
 """
 
+import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -207,6 +209,11 @@ class TestDiscoveryCancellationAndFailure:
                 new_callable=AsyncMock,
                 return_value=wait_outcome,
             ),
+            patch(
+                "openscientist.orchestrator.discovery.has_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             result = await _wait_for_coinvestigate_feedback(
                 job_dir=job_dir,
@@ -219,6 +226,39 @@ class TestDiscoveryCancellationAndFailure:
         # Should enter awaiting_feedback but must not flip back to running when cancelled.
         assert mock_update.await_count == 1
         assert mock_update.await_args.args == (job_dir, "awaiting_feedback")
+
+    @pytest.mark.asyncio
+    async def test_queued_idea_skips_coinvestigate_feedback_wait(self, tmp_path):
+        from openscientist.orchestrator.discovery import _wait_for_coinvestigate_feedback
+
+        job_dir = tmp_path / str(uuid4())
+        job_dir.mkdir(parents=True)
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery.has_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.update_job_status",
+                new_callable=AsyncMock,
+            ) as mock_update,
+            patch(
+                "openscientist.orchestrator.discovery.wait_for_feedback_or_timeout",
+                new_callable=AsyncMock,
+            ) as mock_wait,
+        ):
+            result = await _wait_for_coinvestigate_feedback(
+                job_dir=job_dir,
+                investigation_mode="coinvestigate",
+                current_iteration=2,
+                max_iterations=4,
+            )
+
+        assert result == {"outcome": "continued", "feedback_text": None}
+        mock_update.assert_not_awaited()
+        mock_wait.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_run_discovery_stops_when_cancelled_before_next_iteration(self, tmp_path):
@@ -255,7 +295,9 @@ class TestDiscoveryCancellationAndFailure:
                 IterationResult(
                     outcome=TurnOutcome.COMPLETED,
                     output="iteration 1 complete",
-                    tool_calls=0,
+                    # Aggregate adapters may report a count without exposing
+                    # the canonical transcript; this is an accepted product.
+                    tool_calls=1,
                     transcript=[],
                 ),
                 AssertionError("second iteration should not run after cancellation"),
@@ -413,7 +455,7 @@ class TestDiscoveryResumeAndLimitControls:
             return_value=IterationResult(
                 outcome=TurnOutcome.COMPLETED,
                 output="resumed iteration complete",
-                tool_calls=0,
+                tool_calls=1,
                 transcript=[],
             )
         )
@@ -439,6 +481,11 @@ class TestDiscoveryResumeAndLimitControls:
             ),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await _run_primary_discovery_loop(
                 executor=executor,
@@ -468,7 +515,7 @@ class TestDiscoveryResumeAndLimitControls:
             return_value=IterationResult(
                 outcome=TurnOutcome.COMPLETED,
                 output="first iteration complete",
-                tool_calls=0,
+                tool_calls=1,
                 transcript=[],
             )
         )
@@ -495,6 +542,11 @@ class TestDiscoveryResumeAndLimitControls:
             patch("openscientist.orchestrator.discovery._sync_version_metadata_if_available"),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
             patch("openscientist.orchestrator.discovery.increment_ks_iteration") as increment,
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await _run_primary_discovery_loop(
                 executor=executor,
@@ -506,6 +558,146 @@ class TestDiscoveryResumeAndLimitControls:
 
         assert executor.run_iteration.await_count == 1
         increment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prepared_dvc_asset_instruction_is_in_iteration_one_prompt(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        ks = KnowledgeState(job_id, "Question?", 1)
+        attempts = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="prepared analysis complete",
+                tool_calls=1,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 1,
+            "resume_iteration": 1,
+            "investigation_mode": "autonomous",
+            "data_files": [str(job_dir / "dvc_datasets" / "dvc-fixture" / "measurements.parquet")],
+            "prepared_dvc": {
+                "dataset_id": "dvc-fixture",
+                "measurement_asset_id": "asset-prepared123",
+            },
+        }
+
+        with (
+            patch.object(
+                discovery,
+                "_job_control_checkpoint",
+                new=AsyncMock(side_effect=[1, 1]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            patch.object(discovery, "_run_discovery_attempts", new=attempts),
+            patch.object(discovery, "_sync_version_metadata_if_available"),
+            patch.object(discovery, "_append_iteration_artifacts"),
+        ):
+            await discovery._run_primary_discovery_loop(
+                executor=MagicMock(),
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        prompt = attempts.await_args.kwargs["prompt"]
+        assert "STRICT DVC PREPARATION COMPLETED BEFORE ITERATION 1" in prompt
+        assert "asset-prepared123" in prompt
+        assert "Do not reopen or heuristically reparse raw uploaded DVC CSVs" in prompt
+
+    @pytest.mark.asyncio
+    async def test_queued_ideas_are_acknowledged_after_iteration_artifacts(self, tmp_path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.discovery import _run_primary_discovery_loop
+
+        job_id = str(uuid4())
+        job_dir = tmp_path / job_id
+        job_dir.mkdir()
+        guidance_id = uuid4()
+        guidance = SimpleNamespace(
+            id=guidance_id,
+            content="Compare the activity traces before and after feeding.",
+        )
+        ks = KnowledgeState(job_id, "Question?", 3)
+        ks.data["iteration"] = 3
+        executor = MagicMock()
+        executor.run_iteration = AsyncMock(
+            return_value=IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output="done",
+                tool_calls=1,
+                transcript=[],
+            )
+        )
+        runtime = {
+            "job_id": job_id,
+            "research_question": "Question?",
+            "description": None,
+            "max_iterations": 3,
+            "resume_iteration": 3,
+            "investigation_mode": "autonomous",
+            "data_files": [],
+        }
+        events: list[str] = []
+
+        def record_artifacts(**_kwargs):
+            events.append("artifacts")
+
+        async def record_delivery(*_args):
+            events.append("delivery")
+
+        with (
+            patch(
+                "openscientist.orchestrator.discovery._job_control_checkpoint",
+                new_callable=AsyncMock,
+                side_effect=[3, 3],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
+                return_value=ks,
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.list_pending_job_guidance",
+                new_callable=AsyncMock,
+                return_value=[guidance],
+            ),
+            patch(
+                "openscientist.orchestrator.discovery.mark_job_guidance_delivered",
+                new=AsyncMock(side_effect=record_delivery),
+            ) as mark_delivered,
+            patch(
+                "openscientist.orchestrator.discovery._append_iteration_artifacts",
+                side_effect=record_artifacts,
+            ),
+            patch("openscientist.orchestrator.discovery.increment_ks_iteration"),
+        ):
+            await _run_primary_discovery_loop(
+                executor=executor,
+                job_dir=job_dir,
+                runtime=runtime,
+                provenance_dir=job_dir / "provenance",
+                log_file=job_dir / "iterations.log",
+            )
+
+        prompt = executor.run_iteration.await_args.args[0]
+        assert "Compare the activity traces before and after feeding." in prompt
+        mark_delivered.assert_awaited_once_with(job_id, [guidance_id], 3)
+        assert events == ["artifacts", "delivery"]
 
 
 # ─── increment_ks_iteration ──────────────────────────────────────────
@@ -746,6 +938,33 @@ class TestCreateJob:
         assert not (job_dir / "knowledge_state.json").exists()
         assert (job_dir / "data").is_dir()
         assert (job_dir / "provenance").is_dir()
+
+    def test_nested_git_repo_ignores_generated_job_artifacts(self, tmp_path):
+        from openscientist.orchestrator import create_job
+
+        with patch("openscientist.orchestrator.setup.KnowledgeState.save_to_database_sync"):
+            job_dir = create_job(
+                job_id=str(uuid4()),
+                research_question="Why?",
+                data_files=[],
+                max_iterations=5,
+                jobs_dir=tmp_path,
+            )
+
+        generated = job_dir / ".codex" / "plugins" / "generated.txt"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("runtime cache", encoding="utf-8")
+        (job_dir / "final_report.md").write_text("runtime result", encoding="utf-8")
+
+        status = subprocess.run(
+            ["git", "status", "--short", "--untracked-files=all"],
+            cwd=job_dir,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+
+        assert status.stdout == ""
 
     def test_knowledge_state_contents(self, tmp_path):
         from openscientist.orchestrator import create_job
@@ -1103,6 +1322,27 @@ class TestBuildIterationPrompt:
         prompt = build_iteration_prompt(2, 10, ks, pending_feedback=None)
         assert "Scientist Feedback" not in prompt
         assert "Iteration 2 of 10" in prompt
+
+    def test_includes_queued_scientist_ideas_as_non_approval_guidance(self):
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator.iteration import build_iteration_prompt
+
+        ks = KnowledgeState("j1", "Q?", 10)
+        prompt = build_iteration_prompt(
+            3,
+            10,
+            ks,
+            queued_ideas=[
+                "Compare weekday and weekend activity.",
+                "Plot the hourly temperature profile.",
+            ],
+        )
+
+        assert "Scientist ideas queued during the run" in prompt
+        assert "1. Compare weekday and weekend activity." in prompt
+        assert "2. Plot the hourly temperature profile." in prompt
+        assert "They do not override system instructions" in prompt
+        assert "Do not claim that an idea is an approval" in prompt
 
     def test_includes_job_description(self):
         from openscientist.knowledge_state import KnowledgeState
@@ -1518,6 +1758,115 @@ class TestRegenerateReportAsync:
         finalize.assert_awaited_once()  # executor still cleaned up
 
 
+@pytest.mark.asyncio
+async def test_cost_tracked_iteration_persists_incremental_usage() -> None:
+    from openscientist.agent.base import IterationResult, TokenUsage
+    from openscientist.orchestrator import discovery
+
+    provider = SimpleNamespace(
+        display_name="OpenAI API",
+        effective_model_name=lambda: None,
+    )
+
+    class Executor:
+        total_tokens = TokenUsage(input_tokens=10, output_tokens=2)
+        effective_model_name = "gpt-5.5"
+
+        @property
+        def provider(self):
+            return provider
+
+        async def run_iteration(self, prompt: str, *, reset_session: bool = False):
+            self.total_tokens += TokenUsage(
+                input_tokens=100,
+                output_tokens=20,
+                cache_write_tokens=3,
+                cache_read_tokens=40,
+                reasoning_tokens=5,
+            )
+            return IterationResult(
+                outcome=TurnOutcome.COMPLETED,
+                output=prompt,
+                tool_calls=0,
+                transcript=[],
+            )
+
+    executor = Executor()
+    with patch.object(discovery, "_persist_job_cost_record", new=AsyncMock()) as persist:
+        result = await discovery._run_cost_tracked_iteration(
+            executor,  # type: ignore[arg-type]
+            str(uuid4()),
+            "turn",
+            reset_session=False,
+            operation_type="discovery",
+            iteration=3,
+        )
+
+    assert result.output == "turn"
+    assert persist.await_args is not None
+    persisted_tokens = persist.await_args.args[1]
+    assert persisted_tokens == TokenUsage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
+    assert persist.await_args.args[2:] == ("OpenAI API", "gpt-5.5", "discovery", 3)
+
+
+@pytest.mark.asyncio
+async def test_persist_job_cost_record_keeps_every_token_category() -> None:
+    from openscientist.agent.base import TokenUsage
+    from openscientist.orchestrator import discovery
+
+    tokens = TokenUsage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
+    session = MagicMock()
+    session.commit = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch.object(discovery, "AsyncSessionLocal", return_value=session_context),
+        patch(
+            "openscientist.providers.pricing.estimate_cost_usd",
+            return_value=0.0123,
+        ) as estimate,
+    ):
+        await discovery._persist_job_cost_record(
+            str(uuid4()),
+            tokens,
+            "OpenAI API",
+            "gpt-5.5",
+            "report",
+            None,
+        )
+
+    estimate.assert_called_once_with(
+        "gpt-5.5",
+        100,
+        20,
+        cache_write_tokens=3,
+        cache_read_tokens=40,
+        reasoning_tokens=5,
+    )
+    record = session.add.call_args.args[0]
+    assert record.input_tokens == 100
+    assert record.output_tokens == 20
+    assert record.cache_write_tokens == 3
+    assert record.cache_read_tokens == 40
+    assert record.reasoning_tokens == 5
+    assert record.cost_usd == 0.0123
+    session.commit.assert_awaited_once()
+
+
 class TestEnsureReportWritten:
     """Freshness check: a stale report from a prior run must not be mistaken
     for fresh output (the bug that made report regeneration a silent no-op)."""
@@ -1686,17 +2035,266 @@ class TestTurnOutcomePolicy:
         with pytest.raises(RuntimeError, match="Iteration 3 failed"):
             _check_turn_outcome(self._result(TurnOutcome.FAILED), 3)
 
-    def test_timed_out_turn_advances(self):
+    def test_timed_out_turn_does_not_advance(self):
         from openscientist.orchestrator.discovery import _check_turn_outcome
 
-        # Must NOT raise: a wall-clock timeout advances the loop (work before the
-        # cut is persisted), unlike a failure.
-        _check_turn_outcome(self._result(TurnOutcome.TIMED_OUT, tool_calls=2), 2)
+        with pytest.raises(RuntimeError, match="timed out"):
+            _check_turn_outcome(self._result(TurnOutcome.TIMED_OUT, tool_calls=2), 2)
 
     def test_completed_turn_advances(self):
         from openscientist.orchestrator.discovery import _check_turn_outcome
 
         _check_turn_outcome(self._result(TurnOutcome.COMPLETED), 1)
+
+
+class TestDiscoveryAttemptPolicy:
+    @staticmethod
+    def _result(outcome: TurnOutcome, tool_calls: int = 0):
+        from openscientist.agent.base import IterationResult
+
+        return IterationResult(
+            outcome=outcome,
+            output="",
+            tool_calls=tool_calls,
+            transcript=[],
+            error="boom" if outcome is TurnOutcome.FAILED else "",
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_attempt_is_persisted_then_accepted_retry(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+        timed_out = IterationResult(
+            outcome=TurnOutcome.TIMED_OUT,
+            output="",
+            tool_calls=2,
+            transcript=[],
+            error="900 second timeout",
+        )
+        accepted = IterationResult(
+            outcome=TurnOutcome.COMPLETED,
+            output="Prepared a validated result.",
+            tool_calls=1,
+            transcript=[
+                ToolCall(id="c1", tool="execute_code", arguments={"code": "pass"}),
+                ToolResult(call_id="c1", output="ok", success=True),
+            ],
+        )
+        run = AsyncMock(side_effect=[timed_out, accepted])
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(discovery, "_run_cost_tracked_iteration", new=run),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+        ):
+            result = await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        assert result is accepted
+        first = json.loads((provenance / "iter1_attempt1_status.json").read_text())
+        second = json.loads((provenance / "iter1_attempt2_status.json").read_text())
+        assert (first["state"], first["outcome"]) == ("retrying", "timed_out")
+        assert second["state"] == "accepted"
+        assert (provenance / "iter1_transcript.json").is_file()
+        assert run.call_args_list[1].kwargs["reset_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_repeated_timeouts_stop_and_preserve_each_partial_attempt(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript import load_transcript
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+
+        def timed_out(call_id: str, tool_calls: int) -> IterationResult:
+            return IterationResult(
+                outcome=TurnOutcome.TIMED_OUT,
+                output="partial provider output",
+                tool_calls=tool_calls,
+                transcript=[
+                    ToolCall(
+                        id=call_id,
+                        tool="execute_code",
+                        arguments={"code": "print('started')"},
+                    ),
+                    ToolResult(
+                        call_id=call_id,
+                        output="started",
+                        success=False,
+                        status="timed_out",
+                        error_message="900 second timeout",
+                    ),
+                ],
+                error="900 second timeout",
+            )
+
+        provenance = tmp_path / "provenance"
+        run = AsyncMock(side_effect=[timed_out("timeout-1", 7), timed_out("timeout-2", 18)])
+        with (
+            patch.object(discovery, "_run_cost_tracked_iteration", new=run),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="failed after 2 attempt"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        first_status = json.loads((provenance / "iter1_attempt1_status.json").read_text())
+        second_status = json.loads((provenance / "iter1_attempt2_status.json").read_text())
+        assert (first_status["state"], first_status["tool_calls"]) == ("retrying", 7)
+        assert (second_status["state"], second_status["tool_calls"]) == ("failed", 18)
+        assert [
+            entry.id
+            for entry in load_transcript(provenance / "iter1_attempt1_transcript.json")
+            if isinstance(entry, ToolCall)
+        ] == ["timeout-1"]
+        assert [
+            entry.id
+            for entry in load_transcript(provenance / "iter1_attempt2_transcript.json")
+            if isinstance(entry, ToolCall)
+        ] == ["timeout-2"]
+        assert not (provenance / "iter1_transcript.json").exists()
+        assert run.call_args_list[1].kwargs["reset_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_http_500_failed_transcripts_are_durable_before_stop(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript import load_transcript
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+
+        def failed(call_id: str) -> IterationResult:
+            return IterationResult(
+                outcome=TurnOutcome.FAILED,
+                output="broker attempt failed",
+                tool_calls=1,
+                transcript=[
+                    ToolCall(
+                        id=call_id,
+                        tool="execute_code",
+                        arguments={"asset_id": "asset-csv"},
+                    ),
+                    ToolResult(
+                        call_id=call_id,
+                        output="",
+                        success=False,
+                        status="failed",
+                        error_message="execute_code returned HTTP 500",
+                    ),
+                ],
+                error="execute_code returned HTTP 500",
+            )
+
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(
+                discovery,
+                "_run_cost_tracked_iteration",
+                new=AsyncMock(side_effect=[failed("http-1"), failed("http-2")]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="HTTP 500"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        for attempt, call_id in ((1, "http-1"), (2, "http-2")):
+            transcript = load_transcript(provenance / f"iter1_attempt{attempt}_transcript.json")
+            assert any(isinstance(entry, ToolCall) and entry.id == call_id for entry in transcript)
+            assert any(
+                isinstance(entry, ToolResult)
+                and entry.call_id == call_id
+                and entry.error_message == "execute_code returned HTTP 500"
+                for entry in transcript
+            )
+        statuses = [
+            json.loads((provenance / f"iter1_attempt{attempt}_status.json").read_text())
+            for attempt in (1, 2)
+        ]
+        assert [status["state"] for status in statuses] == ["retrying", "failed"]
+        assert all(status["failure_signature"] == "http_500" for status in statuses)
+        assert not (provenance / "iter1_transcript.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_empty_attempts_stop_without_canonical_iteration(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+        empty = IterationResult(
+            outcome=TurnOutcome.COMPLETED,
+            output="",
+            tool_calls=0,
+            transcript=[],
+        )
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(
+                discovery,
+                "_run_cost_tracked_iteration",
+                new=AsyncMock(side_effect=[empty, empty, empty]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="failed after 3 attempt"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        assert not (provenance / "iter1_transcript.json").exists()
+        final = json.loads((provenance / "iter1_attempt3_status.json").read_text())
+        assert final["state"] == "failed"
 
     def test_append_log_records_timeout(self, tmp_path: Path):
         from openscientist.orchestrator.discovery import _append_log
@@ -1717,6 +2315,8 @@ class TestTurnOutcomePolicy:
 
         provenance = tmp_path / "prov"
         provenance.mkdir()
+        live_transcript = provenance / "current_turn_transcript.json"
+        live_transcript.write_text("[]", encoding="utf-8")
         log = tmp_path / "log.txt"
         _append_iteration_artifacts(
             provenance_dir=provenance,
@@ -1727,3 +2327,4 @@ class TestTurnOutcomePolicy:
             overwrite_log=True,
         )
         assert "Timed out: yes" in log.read_text()
+        assert not live_transcript.exists()

@@ -20,6 +20,10 @@ def _fixed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
         "openscientist.job_container.egress.container_broker_base_url",
         lambda: "http://openscientist:8082",
     )
+    monkeypatch.setattr(
+        "openscientist.job_container.egress.container_dvc_gateway_base_url",
+        lambda: "http://openscientist:8083",
+    )
 
 
 def _settings(
@@ -53,6 +57,7 @@ def test_postgres_and_broker_always_present() -> None:
     entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
     assert ("postgres", 5432) in entries
     assert ("openscientist", 8082) in entries
+    assert ("openscientist", 8083) in entries
 
 
 def test_postgres_default_port_when_absent() -> None:
@@ -65,6 +70,15 @@ def test_postgres_default_port_when_absent() -> None:
 def test_anthropic_default_endpoint() -> None:
     entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
     assert ("api.anthropic.com", 443) in entries
+
+
+def test_configured_fair_vcg_endpoint() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("FAIR_PREPARE_URL", "http://fair-vcg-mentor:8000")
+        monkeypatch.setenv("FAIR_PREPARE_API_KEY", "must-not-affect-egress")
+        entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
+
+    assert ("fair-vcg-mentor", 8000) in entries
 
 
 def test_anthropic_custom_base_url() -> None:

@@ -26,6 +26,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import (
     McpStdioServerConfig,
     PermissionResultAllow,
+    SystemMessage,
     TextBlock,
     ToolPermissionContext,
     ToolUseBlock,
@@ -40,6 +41,7 @@ from openscientist.agent.base import (
     TurnOutcome,
 )
 from openscientist.agent.mcp_specs import StdioMcpServerSpec
+from openscientist.dvc_gateway_client import without_dvc_credentials
 from openscientist.providers.base import ClaudeCompatible
 from openscientist.transcript import CLAUDE
 
@@ -153,7 +155,11 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
         from openscientist.agent.skills import write_skills_to_claude_dir
 
-        await write_skills_to_claude_dir(self._config.job_dir, use_hypotheses=use_hypotheses)
+        await write_skills_to_claude_dir(
+            self._config.job_dir,
+            use_hypotheses=use_hypotheses,
+            skill_ids=self._config.assigned_skill_ids,
+        )
 
     def apply_runtime_environment(self) -> None:
         # Auth/routing flags for the Claude CLI and the tools subprocess.
@@ -208,7 +214,7 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         from the agent container plus the per-job overlays).
         """
         config = self._config
-        env = dict(os.environ)
+        env = without_dvc_credentials(dict(os.environ))
         env["OPENSCIENTIST_JOB_ID"] = config.job_dir.name
         env["OPENSCIENTIST_JOB_DIR"] = str(config.job_dir)
         env["OPENSCIENTIST_USE_HYPOTHESES"] = "1" if config.use_hypotheses else "0"
@@ -319,7 +325,12 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
             "input": getattr(block, "input", {}),
         }
 
-    def _handle_content_list(self, raw_content: list[object], state: _IterationState) -> None:
+    def _handle_content_list(
+        self,
+        raw_content: list[object],
+        state: _IterationState,
+        message: object,
+    ) -> None:
         """Convert SDK content blocks into transcript items."""
         content_items: list[dict[str, object]] = []
         for block in raw_content:
@@ -332,7 +343,18 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
                 logger.debug("Tool call: %s", block.name)
                 content_items.append(self._tool_use_item(block, state.tool_call_count))
         if content_items:
-            state.transcript.append({"type": "assistant", "message": {"content": content_items}})
+            wrapper: dict[str, Any] = {
+                "type": "assistant",
+                "message": {
+                    "content": content_items,
+                    "model": getattr(message, "model", None),
+                    "error": getattr(message, "error", None),
+                },
+            }
+            parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
+            if parent_tool_use_id:
+                wrapper["parent_tool_use_id"] = parent_tool_use_id
+            state.transcript.append(wrapper)
 
     @staticmethod
     def _handle_content_text(raw_content: str, state: _IterationState) -> None:
@@ -352,6 +374,32 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
         self._record_usage(message)
 
+        if isinstance(message, SystemMessage):
+            payload: dict[str, Any] = {
+                "type": "system",
+                "subtype": message.subtype,
+            }
+            if isinstance(message.data, dict):
+                payload.update(message.data)
+            for field_name in (
+                "task_id",
+                "description",
+                "task_type",
+                "tool_use_id",
+                "session_id",
+                "uuid",
+                "last_tool_name",
+                "usage",
+                "status",
+                "summary",
+                "output_file",
+            ):
+                value = getattr(message, field_name, None)
+                if value is not None:
+                    payload[field_name] = value
+            state.transcript.append(payload)
+            return
+
         if isinstance(message, ResultMessage):
             if message.result:
                 state.final_output = message.result
@@ -359,7 +407,7 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
         raw_content = getattr(message, "content", None)
         if isinstance(raw_content, list):
-            self._handle_content_list(raw_content, state)
+            self._handle_content_list(raw_content, state, message)
         elif isinstance(raw_content, str):
             self._handle_content_text(raw_content, state)
 

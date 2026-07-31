@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Dockerfile for OpenScientist
 # Builds on openscientist-base which includes Python, Node.js, uv, and Claude CLI
 
@@ -11,9 +13,29 @@
 FROM rust:1.95-bookworm AS codex-build
 ARG CODEX_REPO=https://github.com/LucaCappelletti94/codex.git
 ARG CODEX_REF=8f8009fcab89baafa51c15c9542734b1c94de8b6
-RUN git clone "${CODEX_REPO}" /codex \
-    && git -C /codex checkout "${CODEX_REF}" \
-    && cargo build --release --manifest-path /codex/codex-rs/Cargo.toml -p codex-cli \
+RUN set -eux; \
+    git init /codex; \
+    git -C /codex remote add origin "${CODEX_REPO}"; \
+    attempt=1; \
+    while true; do \
+        if git -c http.version=HTTP/1.1 -C /codex fetch \
+            --depth=1 --no-tags origin "${CODEX_REF}"; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -ge 5 ]; then \
+            echo "Failed to fetch Codex commit after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        delay=$((attempt * 10)); \
+        echo "Codex fetch attempt ${attempt} failed; retrying in ${delay}s" >&2; \
+        sleep "${delay}"; \
+        attempt=$((attempt + 1)); \
+    done; \
+    git -C /codex checkout --detach FETCH_HEAD
+RUN --mount=type=cache,id=codex-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=codex-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=codex-cargo-target,target=/codex/codex-rs/target,sharing=locked \
+    cargo build --release --manifest-path /codex/codex-rs/Cargo.toml -p codex-cli \
     && cp /codex/codex-rs/target/release/codex /usr/local/bin/codex
 
 FROM openscientist-base:latest
@@ -59,13 +81,45 @@ RUN chmod +x /usr/local/bin/codex
 
 # Copy project files — deps already installed in base
 COPY pyproject.toml README.md alembic.ini uv.lock ./
+COPY requirements/udwa-poc.txt ./requirements/udwa-poc.txt
 COPY src/ src/
 
-# Reinstall the project so the web image has dependencies added since the base
-# image was built, notably the openai-codex SDK used by the codex agent path
-# (in-page chat + discovery). The pyproject override drops the musl-only
-# openai-codex-cli-bin. The codex binary itself is provisioned above.
-RUN uv pip install --system -e .
+# Reinstall the locked dependency graph and project so the web runtime cannot
+# silently drift from the versions exercised by CI and the agent image.
+RUN uv export --locked --no-dev --no-emit-project --no-hashes \
+        --output-file /tmp/openscientist-requirements.txt \
+    && uv pip install --system -r /tmp/openscientist-requirements.txt \
+    && uv pip install --system --no-deps -e . \
+    && rm -f /tmp/openscientist-requirements.txt
+
+# The trusted DVC gateway runs in this web process, so it needs the same pinned
+# UDWA acquisition boundary as the agent image. Non-DVC builds may leave
+# INSTALL_UDWA=false; the FAIR/DVC deployment overlay sets it to true and
+# supplies the private-repository credential as a transient BuildKit secret.
+ARG INSTALL_UDWA=false
+RUN --mount=type=secret,id=github_token \
+    set -eu; \
+    if [ "${INSTALL_UDWA}" != "true" ]; then \
+        echo "Skipping optional UDWA install"; \
+        exit 0; \
+    fi; \
+    if [ ! -s /run/secrets/github_token ]; then \
+        echo "INSTALL_UDWA=true requires the github_token BuildKit secret" >&2; \
+        exit 1; \
+    fi; \
+    askpass="$(mktemp)"; \
+    trap 'rm -f "${askpass}"' EXIT; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'case "$1" in' \
+        '  *Username*) printf "%s\n" "x-access-token" ;;' \
+        '  *Password*) cat /run/secrets/github_token ;;' \
+        '  *) exit 1 ;;' \
+        'esac' \
+        > "${askpass}"; \
+    chmod 700 "${askpass}"; \
+    GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+        uv pip install --system -r requirements/udwa-poc.txt
 
 # Create jobs directory
 RUN mkdir -p jobs

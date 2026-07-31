@@ -181,7 +181,7 @@ class ContainerManager:
                     f"Path {p!r} is not under any mounted host directory. "
                     f"Mounted: {list(host_to_container.keys())}"
                 )
-            return str(Path(container_dir) / resolved.name)
+            return f"{container_dir.rstrip('/')}/{resolved.name}"
 
         remapped_data_path = _remap(data_path) if data_path else None
         remapped_files: list[dict[str, Any]] = []
@@ -251,33 +251,29 @@ class ContainerManager:
             output_dir=output_dir, data_files=data_files
         )
 
-        # Now translate volume mount sources from container-internal paths to
-        # host paths.  The Docker socket is the host's, so volume sources must
-        # be host-absolute paths.
-        settings = get_settings()
-        cs = settings.container
-
-        volumes = {str(to_host_path(Path(k), cs)): v for k, v in volumes.items()}
-        host_to_container = {
-            str(to_host_path(Path(k), cs)): v for k, v in host_to_container.items()
-        }
-
-        # Translate data_path so _remap_paths can find it in host_to_container.
-        if data_path:
-            data_path = str(to_host_path(Path(data_path).resolve(), cs))
-        if data_files:
-            data_files = [
-                {**f, "path": str(to_host_path(Path(f["path"]).resolve(), cs))}
-                if f.get("path")
-                else f
-                for f in data_files
-            ]
-
+        # Remap while paths still use the web container's native path syntax.
+        # On Windows hosts, translating these values first produces ``C:/...``
+        # strings which Linux ``Path.resolve()`` treats as relative paths.
+        # Only Docker volume *sources* need host translation.
         remapped_data_path, remapped_files = self._remap_paths(
             data_path=data_path,
             data_files=data_files,
             host_to_container=host_to_container,
         )
+
+        # The Docker socket is the host's, so volume sources must be
+        # host-absolute paths. Payload paths are already executor-local.
+        settings = get_settings()
+        cs = settings.container
+
+        translated: dict[str, dict[str, str]] = {}
+        for source, mount in volumes.items():
+            host_path = to_host_path(Path(source), cs)
+            # Preserve native absolute Windows paths for Docker Desktop, while
+            # retaining POSIX paths returned by Linux/compose remapping.
+            key = str(host_path) if host_path.drive else host_path.as_posix()
+            translated[key] = mount
+        volumes = translated
 
         input_b64 = self._encode_executor_input(
             code=code,

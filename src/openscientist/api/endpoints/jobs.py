@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -95,6 +95,13 @@ class JobCreate(BaseModel):
         description="Crystal space group",
         examples=["P212121"],
     )
+    skill_ids: list[UUID] | None = Field(
+        None,
+        description=(
+            "Enabled skills to assign to this job. Omit for all enabled skills; "
+            "send an empty list to run without skills."
+        ),
+    )
 
 
 class JobResponse(BaseModel):
@@ -155,6 +162,10 @@ class JobDetailResponse(JobResponse):
     investigation_mode: str | None = Field(None, description="Investigation mode")
     result_summary: str | None = Field(None, description="Final result summary")
     error_message: str | None = Field(None, description="Error message if failed")
+    skill_ids: list[str] | None = Field(
+        None,
+        description="Explicit skill assignment; null means all enabled skills",
+    )
 
 
 class _JobResponseFields(TypedDict):
@@ -236,6 +247,7 @@ def _job_to_detail_response(job: Job) -> JobDetailResponse:
         investigation_mode=job.investigation_mode,
         result_summary=job.result_summary,
         error_message=job.error_message,
+        skill_ids=getattr(job, "assigned_skill_ids", None),
     )
 
 
@@ -282,6 +294,15 @@ def _extract_job_payload_from_form(form: FormData) -> dict[str, Any]:
     """Build a JobCreate payload from multipart form fields."""
     payload: dict[str, Any] = {}
     for field_name in JobCreate.model_fields:
+        if field_name == "skill_ids":
+            selected = [
+                str(value)
+                for value in form.getlist(field_name)
+                if not isinstance(value, StarletteUploadFile) and str(value).strip()
+            ]
+            if selected or field_name in form:
+                payload[field_name] = selected
+            continue
         value = form.get(field_name)
         if value is None or isinstance(value, StarletteUploadFile):
             continue
@@ -413,6 +434,11 @@ async def create_job(
                 description=job_data.description,
                 pdb_code=job_data.pdb_code,
                 space_group=job_data.space_group,
+                skill_ids=(
+                    [str(skill_id) for skill_id in job_data.skill_ids]
+                    if job_data.skill_ids is not None
+                    else None
+                ),
             )
         logger.info("Created job %s for user %s", job_uuid, user.email)
     except FileTooBigError as e:
@@ -561,7 +587,7 @@ async def cancel_job(
     session: AsyncSession = SESSION_DEP,
 ) -> None:
     """
-    Cancel a pending, queued, running, paused, or feedback-waiting job.
+    Abort a pending, queued, running, paused, feedback-waiting, or reporting job.
 
     Active agent containers are stopped immediately.
     """
@@ -580,7 +606,14 @@ async def cancel_job(
             detail="Only the job owner can cancel a job",
         )
 
-    if job.status not in ["pending", "running", "queued", "paused", "awaiting_feedback"]:
+    if job.status not in [
+        "pending",
+        "running",
+        "queued",
+        "paused",
+        "awaiting_feedback",
+        "generating_report",
+    ]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot cancel job with status '{job.status}'",

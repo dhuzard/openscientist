@@ -11,12 +11,35 @@ from openscientist.settings import (
     BudgetSettings,
     ContainerSettings,
     DatabaseSettings,
+    DevSettings,
     FileSettings,
     PhenixSettings,
     ProviderSettings,
     clear_settings_cache,
     get_settings,
 )
+
+
+class TestDevSettings:
+    def test_reload_defaults_to_development_mode(self, monkeypatch):
+        monkeypatch.delenv("OPENSCIENTIST_RELOAD", raising=False)
+        assert (
+            DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=True).reload_enabled is True
+        )
+        assert (
+            DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=False).reload_enabled is False
+        )
+
+    def test_reload_can_be_disabled_without_disabling_development_auth(self, monkeypatch):
+        monkeypatch.delenv("OPENSCIENTIST_RELOAD", raising=False)
+        settings = DevSettings(
+            _env_file=None,
+            OPENSCIENTIST_DEV_MODE=True,
+            OPENSCIENTIST_RELOAD=False,
+        )
+
+        assert settings.dev_mode is True
+        assert settings.reload_enabled is False
 
 
 class TestProviderSettings:

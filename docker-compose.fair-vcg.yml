@@ -1,0 +1,99 @@
+# FAIR-VCG production overlay.
+#
+# The upstream backend is built from the reviewed immutable Git revision. It is
+# not published on a host port; OpenScientist and spawned job containers reach
+# it over the attachable user-defined bridge.
+#
+# Start with:
+#   docker compose -f docker-compose.yml -f docker-compose.fair-vcg.yml up -d --build
+
+services:
+  postgres:
+    networks:
+      - default
+      - agent-runtime
+
+  fair-vcg-mentor:
+    image: fair-vcg-mentor:11b0918c0106
+    build:
+      context: https://github.com/Neuronautix/FAIR-VCG-mentor.git#11b0918c01062a0c9a388b33d28068982712d762:backend
+    restart: ${OPENSCIENTIST_RESTART_POLICY:-unless-stopped}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SESSION_DB: /var/lib/fair-vcg/sessions.db
+    expose:
+      - "8000"
+    volumes:
+      - fair_vcg_sessions:/var/lib/fair-vcg
+    networks:
+      agent-runtime:
+        aliases:
+          - fair-vcg-mentor
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).read(1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot readiness gate. OpenScientist is not started unless the pinned
+  # version and all routes/templates used in production pass with synthetic data.
+  fair-vcg-canary:
+    build: .
+    restart: "no"
+    depends_on:
+      fair-vcg-mentor:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - openscientist.integrations.fair_prepare_canary
+      - --base-url
+      - http://fair-vcg-mentor:8000
+      - --attempts
+      - "1"
+    environment:
+      FAIR_PREPARE_URL: http://fair-vcg-mentor:8000
+      PYTHONDONTWRITEBYTECODE: "1"
+    networks:
+      - agent-runtime
+
+  openscientist:
+    build:
+      context: .
+      args:
+        INSTALL_UDWA: "true"
+      secrets:
+        - github_token
+    depends_on:
+      fair-vcg-canary:
+        condition: service_completed_successfully
+    environment:
+      # These are service locators, not credentials. JobContainerRunner
+      # validates and forwards only FAIR_PREPARE_URL to discovery/report jobs.
+      FAIR_PREPARE_URL: http://fair-vcg-mentor:8000
+      OPENSCIENTIST_AGENT_NETWORK: ${OPENSCIENTIST_AGENT_NETWORK:-openscientist-agent-runtime}
+    networks:
+      - default
+      - agent-runtime
+
+volumes:
+  fair_vcg_sessions:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
+
+networks:
+  agent-runtime:
+    name: ${OPENSCIENTIST_AGENT_NETWORK:-openscientist-agent-runtime}
+    driver: bridge
+    attachable: true

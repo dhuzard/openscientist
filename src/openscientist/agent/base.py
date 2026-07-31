@@ -147,6 +147,8 @@ class AgentConfig:
     system_prompt: str | None = None
     use_hypotheses: bool = False
     data_files: tuple[Path, ...] = ()
+    # None means all enabled skills (legacy/default); () means no skills.
+    assigned_skill_ids: tuple[str, ...] | None = None
     mcp_servers: tuple[McpServerSpec, ...] = ()
     # Optional per-run model override. Honored by the Claude path (e.g. the
     # ANTHROPIC_CHAT_MODEL escape hatch for in-page chat). The codex path
@@ -227,6 +229,11 @@ class AbstractAgent[P: Provider](abc.ABC):
     @property
     def total_tokens(self) -> TokenUsage:
         return self._token_usage
+
+    @property
+    def effective_model_name(self) -> str | None:
+        """Model id used by this agent execution, when known."""
+        return self._provider.effective_model_name()
 
     @abc.abstractmethod
     async def run_iteration(

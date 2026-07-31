@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .hypothesis import Hypothesis
     from .job_chat_message import JobChatMessage
     from .job_data_file import JobDataFile
+    from .job_guidance import JobGuidance
     from .job_share import JobShare
     from .user import User
 
@@ -46,6 +47,8 @@ class Job(UUIDv7Mixin, Base):
         resume_iteration: Iteration to resume from (NULL for new jobs)
         llm_provider: LLM provider being used (vertex/bedrock/cborg)
         llm_config: LLM configuration (model, temperature, etc.)
+        assigned_skill_ids: Explicit skill IDs assigned at creation. NULL keeps
+            legacy behavior (all enabled skills); an empty list disables skills.
         error_message: Error message if job failed
         result_summary: Final analysis summary
         owner: Related User object
@@ -53,6 +56,7 @@ class Job(UUIDv7Mixin, Base):
         data_files: Uploaded data files for this job
         hypotheses: Generated hypotheses
         chat_messages: In-page chat messages
+        guidance: Owner-submitted ideas queued for a future turn
         cost_records: Cost tracking records
     """
 
@@ -151,6 +155,15 @@ class Job(UUIDv7Mixin, Base):
         comment="LLM configuration (model, temperature, etc.)",
     )
 
+    assigned_skill_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment=(
+            "Skill UUIDs assigned to this job; NULL means all enabled skills "
+            "(legacy/default), [] means no skills"
+        ),
+    )
+
     data_summary: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
@@ -212,6 +225,11 @@ class Job(UUIDv7Mixin, Base):
     )
 
     chat_messages: Mapped[list["JobChatMessage"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+    guidance: Mapped[list["JobGuidance"]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
     )
