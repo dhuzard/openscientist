@@ -12,6 +12,8 @@ from uuid import uuid4
 import pytest
 
 from openscientist.job.types import JobStatus
+from openscientist.transcript import TaskNotification, ToolCall, ToolResult
+from openscientist.transcript.io import save_transcript
 from openscientist.webapp_components.pages import job_detail
 
 
@@ -95,6 +97,7 @@ def test_agentic_and_scientific_reporting_have_separate_tabs() -> None:
     assert "_render_report_tab(context)" in tabs_source
 
     for renderer in (
+        "_render_job_agent_activity",
         "_render_job_agent_task_trace",
         "_render_job_skill_usage",
         "_render_job_agent_usage",
@@ -104,6 +107,93 @@ def test_agentic_and_scientific_reporting_have_separate_tabs() -> None:
 
     assert "final_report.md" not in agentic_source
     assert "final_report.md" in report_source
+
+
+def test_agentic_activity_loads_failures_timeouts_and_live_calls(tmp_path: Path) -> None:
+    provenance = tmp_path / "provenance"
+    save_transcript(
+        provenance / "iter1_transcript.json",
+        [
+            ToolCall(
+                id="exec-1",
+                tool="execute_code",
+                arguments={"description": "Run dataset QC", "code": "print(1)"},
+            ),
+            ToolResult(
+                call_id="exec-1",
+                output="",
+                success=False,
+                status="failed",
+                error_message="execution broker returned HTTP 500: Internal Server Error",
+            ),
+            TaskNotification(
+                task_id="codex-turn",
+                status="timed_out",
+                summary="Codex turn exceeded 900s after 1 recorded tool call.",
+                output_file="",
+            ),
+        ],
+    )
+    save_transcript(
+        provenance / "current_turn_transcript.json",
+        [ToolCall(id="search-1", tool="search_pubmed", arguments={"query": "DVC"})],
+    )
+
+    trace = job_detail._load_job_agent_activity(tmp_path)
+
+    assert len(trace["actions"]) == 2
+    assert trace["actions"][0]["location"] == "Iteration 1"
+    assert trace["actions"][1]["location"] == "Current turn (live)"
+    assert len(trace["failures"]) == 1
+    assert len(trace["http_5xx"]) == 1
+    assert len(trace["unfinished"]) == 1
+    assert len(trace["timeouts"]) == 1
+
+
+def test_agentic_activity_recovers_calls_from_legacy_codex_rollout(tmp_path: Path) -> None:
+    provenance = tmp_path / "provenance"
+    save_transcript(provenance / "iter1_transcript.json", [])
+    session_dir = tmp_path / ".codex" / "sessions" / "2026" / "07" / "31"
+    session_dir.mkdir(parents=True)
+    records = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "execute_code",
+                "arguments": json.dumps(
+                    {"description": "Load DVC files", "code": "print('loaded')"}
+                ),
+                "call_id": "call-1",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "❌ ERROR: execution broker returned HTTP 500: Internal Server Error",
+            },
+        },
+    ]
+    (session_dir / "rollout-test.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records),
+        encoding="utf-8",
+    )
+    (tmp_path / "claude_iterations.log").write_text(
+        "=== Iteration 1 ===\nTool calls: 0\nTimed out: yes\n",
+        encoding="utf-8",
+    )
+
+    trace = job_detail._load_job_agent_activity(tmp_path)
+
+    assert len(trace["actions"]) == 1
+    assert trace["actions"][0]["name"] == "execute_code"
+    assert trace["actions"][0]["location"] == "Raw Codex session 1"
+    assert trace["actions"][0]["status"] == "failed"
+    assert len(trace["failures"]) == 1
+    assert len(trace["http_5xx"]) == 1
+    assert len(trace["timeouts"]) == 1
 
 
 def test_scientific_report_surfaces_evidence_derived_dvc_governance() -> None:

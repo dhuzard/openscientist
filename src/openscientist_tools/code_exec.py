@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from openscientist.code_executor import format_execution_result
 from openscientist.exec_broker_client import BrokerError, execute_code_via_broker
 from openscientist.file_loader import get_file_info, load_data_file
@@ -322,6 +324,7 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
     host_output_dir = _to_host(provenance_dir)
 
     result: dict[str, Any]
+    execution_started = time.time()
     try:
         if language == "python":
             data_files: list[dict[str, Any]] = []
@@ -356,7 +359,28 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
                 timeout=300 if language == "rust" else 60,
             )
     except BrokerError as exc:
-        return f"❌ ERROR: code execution service unavailable: {exc}"
+        message = f"Code execution service unavailable: {exc}"
+        execution_time = time.time() - execution_started
+        # Persist the failure independently of the agent transcript. This makes
+        # the warning visible in the investigation timeline immediately, even
+        # when the surrounding model turn later times out.
+        ks.log_analysis(
+            action="execute_code",
+            code=code,
+            description=description,
+            output=message,
+            success=False,
+            execution_time=execution_time,
+            plots=[],
+            governance_scope=governance_scope,
+        )
+        ks.set_agent_status("Code execution failed — see Agentic Info")
+        ks.save_to_database_sync(STATE.job_id)
+        logger.error("execute_code broker failure for job %s: %s", STATE.job_id, exc)
+        # Returning an error-looking string is still a successful MCP call.
+        # Raising ToolError sets the protocol-level isError flag so Codex and
+        # the UI can reliably classify and alarm on the failure.
+        raise ToolError(message) from exc
 
     ks.log_analysis(
         action="execute_code",

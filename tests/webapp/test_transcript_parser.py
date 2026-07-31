@@ -2,11 +2,15 @@
 
 from openscientist.transcript import (
     AssistantText,
+    ShellExecution,
+    TaskNotification,
     ToolCall,
     ToolResult,
     TranscriptEntry,
 )
 from openscientist.webapp_components.utils.transcript_parser import (
+    extract_agent_activity,
+    extract_agent_notifications,
     extract_usage_summary,
     get_action_description,
     parse_transcript_actions,
@@ -221,3 +225,84 @@ class TestExtractUsageSummary:
         summary = extract_usage_summary(transcript)
         assert summary.skill_invocations == ["review", "debug", "review"]
         assert summary.skills_used == ["review", "debug"]
+
+
+class TestExtractAgentActivity:
+    def test_protocol_failure_preserves_http_500_alarm(self) -> None:
+        transcript: list[TranscriptEntry] = [
+            ToolCall(
+                id="exec-1",
+                tool="execute_code",
+                arguments={"code": "print(1)", "description": "Run QC"},
+            ),
+            ToolResult(
+                call_id="exec-1",
+                output="",
+                success=False,
+                status="failed",
+                error_message="execution broker returned HTTP 500: Internal Server Error",
+            ),
+        ]
+
+        activity = extract_agent_activity(transcript)
+
+        assert len(activity) == 1
+        assert activity[0]["success"] is False
+        assert activity[0]["http_5xx"] is True
+        assert activity[0]["error"].endswith("Internal Server Error")
+
+    def test_legacy_error_text_is_not_misreported_as_success(self) -> None:
+        transcript: list[TranscriptEntry] = [
+            ToolCall(id="exec-1", tool="execute_code", arguments={"code": "print(1)"}),
+            ToolResult(
+                call_id="exec-1",
+                output=(
+                    "❌ ERROR: code execution service unavailable: execution broker "
+                    "returned HTTP 500: Internal Server Error"
+                ),
+                success=True,
+            ),
+        ]
+
+        action = extract_agent_activity(transcript)[0]
+
+        assert action["success"] is False
+        assert action["legacy_error_response"] is True
+        assert action["http_5xx"] is True
+
+    def test_shell_and_unfinished_tool_are_included(self) -> None:
+        transcript: list[TranscriptEntry] = [
+            ShellExecution(
+                id="shell-1",
+                command="python inspect.py",
+                output="done",
+                exit_code=0,
+                status="completed",
+            ),
+            ToolCall(id="exec-1", tool="execute_code", arguments={"code": "pass"}),
+        ]
+
+        activity = extract_agent_activity(transcript)
+
+        assert [item["kind"] for item in activity] == ["shell", "tool"]
+        assert activity[0]["success"] is True
+        assert activity[1]["success"] is None
+        assert activity[1]["status"] == "running"
+
+    def test_timeout_notifications_are_extracted(self) -> None:
+        transcript: list[TranscriptEntry] = [
+            TaskNotification(
+                task_id="codex-turn",
+                status="timed_out",
+                summary="Turn exceeded 900s after 12 recorded tool calls.",
+                output_file="",
+            )
+        ]
+
+        assert extract_agent_notifications(transcript) == [
+            {
+                "status": "timed_out",
+                "summary": "Turn exceeded 900s after 12 recorded tool calls.",
+                "task_id": "codex-turn",
+            }
+        ]

@@ -2003,6 +2003,8 @@ class TestTurnOutcomePolicy:
 
         provenance = tmp_path / "prov"
         provenance.mkdir()
+        live_transcript = provenance / "current_turn_transcript.json"
+        live_transcript.write_text("[]", encoding="utf-8")
         log = tmp_path / "log.txt"
         _append_iteration_artifacts(
             provenance_dir=provenance,
@@ -2013,3 +2015,4 @@ class TestTurnOutcomePolicy:
             overwrite_log=True,
         )
         assert "Timed out: yes" in log.read_text()
+        assert not live_transcript.exists()

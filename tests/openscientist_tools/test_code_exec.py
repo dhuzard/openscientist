@@ -20,6 +20,7 @@ import pytest
 import uvicorn
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from sqlalchemy import delete
 
@@ -281,7 +282,7 @@ def test_execute_code_failure_returns_error_format(
     assert last_log["success"] is False
 
 
-def test_execute_code_broker_unavailable_returns_error(
+def test_execute_code_broker_unavailable_raises_and_logs_error(
     monkeypatch: pytest.MonkeyPatch,
     state_job_dir: Path,
     patched_ks_persistence: KnowledgeState,
@@ -289,10 +290,16 @@ def test_execute_code_broker_unavailable_returns_error(
     broker = _mock_broker(monkeypatch, {})
     broker.side_effect = BrokerError("connection refused")
 
-    result = execute_code("print('hi')")
-    assert result.startswith("❌ ERROR: code execution service unavailable")
-    # A transport failure is exceptional: nothing is logged as an execution.
-    assert patched_ks_persistence.data["analysis_log"] == []
+    with pytest.raises(ToolError, match="Code execution service unavailable"):
+        execute_code("print('hi')", description="Broker alarm regression")
+
+    last_log = patched_ks_persistence.data["analysis_log"][-1]
+    assert last_log["action"] == "execute_code"
+    assert last_log["success"] is False
+    assert "connection refused" in last_log["output"]
+    assert patched_ks_persistence.data["agent_status"] == (
+        "Code execution failed — see Agentic Info"
+    )
 
 
 def test_execute_code_python_with_data_files(

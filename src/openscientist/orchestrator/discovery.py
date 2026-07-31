@@ -128,6 +128,10 @@ def _append_iteration_artifacts(
 ) -> None:
     """Persist transcript and log entry for a completed iteration."""
     _save_transcript(provenance_dir / f"iter{iteration}_transcript.json", result.transcript)
+    # Codex streams completed items here while a turn is active so the UI can
+    # show live troubleshooting details. Once the numbered transcript is
+    # durable, remove the transient copy to avoid duplicate activity cards.
+    (provenance_dir / "current_turn_transcript.json").unlink(missing_ok=True)
     _append_log(
         log_file,
         iteration,

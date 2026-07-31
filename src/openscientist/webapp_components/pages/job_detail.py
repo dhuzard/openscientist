@@ -7,6 +7,7 @@ without full page reloads.
 
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,6 +52,7 @@ from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
 from openscientist.pdf_generator import markdown_to_pdf
 from openscientist.skill_provenance import build_job_skill_provenance
+from openscientist.transcript.io import load_transcript
 from openscientist.usage_summary import (
     aggregate_model_usage,
     aggregate_operation_usage,
@@ -78,6 +80,10 @@ from openscientist.webapp_components.utils import (
     is_client_connected,
     safe_run_javascript,
     setup_timer_cleanup,
+)
+from openscientist.webapp_components.utils.transcript_parser import (
+    extract_agent_activity,
+    extract_agent_notifications,
 )
 
 logger = logging.getLogger(__name__)
@@ -2114,10 +2120,274 @@ def _render_job_skill_usage(usage: dict[str, Any]) -> None:
                         )
 
 
+_ITER_TRANSCRIPT_RE = re.compile(r"iter(\d+)_transcript\.json$")
+_RAW_CODEX_FAILURE_RE = re.compile(
+    r"HTTP(?:/\S+)?\s+5\d\d|HTTP\s+5\d\d|❌\s*ERROR|"
+    r"Process exited with code\s+(?!0\b)\d+",
+    re.IGNORECASE,
+)
+_RAW_CODEX_HTTP_5XX_RE = re.compile(
+    r"HTTP(?:/\S+)?\s+5\d\d|HTTP\s+5\d\d",
+    re.IGNORECASE,
+)
+
+
+def _raw_codex_session_activity(job_dir: Path) -> list[dict[str, Any]]:
+    """Recover calls from Codex rollout JSONL when timeout transcripts are empty."""
+    session_root = job_dir / ".codex" / "sessions"
+    actions: list[dict[str, Any]] = []
+    for session_number, path in enumerate(sorted(session_root.rglob("rollout-*.jsonl")), start=1):
+        calls: list[dict[str, Any]] = []
+        outputs: dict[str, str] = {}
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        # A live rollout may end with one partially-written line.
+                        continue
+                    if record.get("type") != "response_item":
+                        continue
+                    payload = record.get("payload") or {}
+                    if payload.get("type") == "function_call":
+                        calls.append(payload)
+                    elif payload.get("type") == "function_call_output":
+                        outputs[str(payload.get("call_id") or "")] = str(
+                            payload.get("output") or ""
+                        )
+        except OSError as exc:
+            logger.warning("Could not recover raw Codex activity from %s: %s", path, exc)
+            continue
+
+        for call in calls:
+            call_id = str(call.get("call_id") or "")
+            name = str(call.get("name") or "unknown_tool")
+            raw_arguments = call.get("arguments")
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError:
+                arguments = {"raw": raw_arguments}
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+            output = outputs.get(call_id, "")
+            failed = bool(output and _RAW_CODEX_FAILURE_RE.search(output))
+            description = str(
+                arguments.get("description")
+                or arguments.get("cmd")
+                or arguments.get("query")
+                or arguments.get("title")
+                or name
+            )
+            actions.append(
+                {
+                    "kind": "shell" if name in {"exec_command", "write_stdin"} else "tool",
+                    "name": name,
+                    "description": description,
+                    "input": arguments,
+                    "output": output,
+                    "success": None if not output else not failed,
+                    "status": "running" if not output else "failed" if failed else "completed",
+                    "error": output if failed else "",
+                    "http_5xx": bool(_RAW_CODEX_HTTP_5XX_RE.search(output)),
+                    "legacy_error_response": failed,
+                    "location": f"Raw Codex session {session_number}",
+                }
+            )
+    return actions
+
+
+def _legacy_timeout_notifications(job_dir: Path) -> list[dict[str, str]]:
+    """Recover timeout alarms from the legacy human-readable iteration log."""
+    log_path = job_dir / "claude_iterations.log"
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [
+        {
+            "status": "timed_out",
+            "summary": "Turn exceeded the configured wall-clock limit; partial raw activity recovered.",
+            "task_id": "codex-turn",
+            "location": f"Iteration {iteration}",
+        }
+        for iteration in re.findall(
+            r"=== Iteration (\d+) ===.*?Timed out: yes", content, flags=re.DOTALL
+        )
+    ]
+
+
+def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
+    """Load numbered and live transcripts into one troubleshooting trace."""
+    provenance_dir = job_dir / "provenance"
+    paths = list(provenance_dir.glob("iter*_transcript.json"))
+    paths.sort(
+        key=lambda path: int(match.group(1))
+        if (match := _ITER_TRANSCRIPT_RE.fullmatch(path.name))
+        else 0
+    )
+    live_path = provenance_dir / "current_turn_transcript.json"
+    if live_path.exists():
+        paths.append(live_path)
+
+    actions: list[dict[str, Any]] = []
+    notifications: list[dict[str, str]] = []
+    unreadable: list[str] = []
+    for path in paths:
+        match = _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+        location = f"Iteration {match.group(1)}" if match else "Current turn (live)"
+        try:
+            transcript = load_transcript(path)
+        except Exception as exc:
+            logger.warning("Could not load agent transcript %s: %s", path, exc)
+            unreadable.append(f"{path.name}: {exc}")
+            continue
+        for action in extract_agent_activity(transcript):
+            actions.append({**action, "location": location})
+        for notification in extract_agent_notifications(transcript):
+            notifications.append({**notification, "location": location})
+
+    # Releases before live transcript streaming saved [] on timeout. Codex's
+    # own rollout JSONL is still present, so reconstruct those calls instead of
+    # continuing to tell the user that no activity occurred.
+    if not actions:
+        actions = _raw_codex_session_activity(job_dir)
+    if not notifications:
+        notifications = _legacy_timeout_notifications(job_dir)
+
+    failures = [action for action in actions if action.get("success") is False]
+    unfinished = [action for action in actions if action.get("success") is None]
+    http_5xx = [action for action in actions if action.get("http_5xx")]
+    timeouts = [
+        item for item in notifications if item.get("status") in {"timed_out", "timeout"}
+    ]
+    return {
+        "actions": actions,
+        "notifications": notifications,
+        "failures": failures,
+        "unfinished": unfinished,
+        "http_5xx": http_5xx,
+        "timeouts": timeouts,
+        "unreadable": unreadable,
+    }
+
+
+def _agent_activity_preview(value: Any, *, limit: int = 20_000) -> str:
+    if isinstance(value, str):
+        rendered = value
+    else:
+        rendered = json.dumps(value, indent=2, ensure_ascii=False, default=str)
+    if len(rendered) <= limit:
+        return rendered
+    return f"{rendered[:limit]}\n… truncated ({len(rendered) - limit:,} more characters)"
+
+
+def _render_job_agent_activity(trace: dict[str, Any]) -> None:
+    """Render live calls, failures, and timeout alarms for troubleshooting."""
+    actions = trace.get("actions") or []
+    failures = trace.get("failures") or []
+    unfinished = trace.get("unfinished") or []
+    http_5xx = trace.get("http_5xx") or []
+    timeouts = trace.get("timeouts") or []
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Live Agent Activity & Troubleshooting").classes("text-h6 font-bold")
+        ui.label(
+            "Completed Codex actions are streamed here while a turn is running and remain "
+            "available after completion or timeout. Expand an action to inspect its exact input "
+            "and result."
+        ).classes("text-sm text-gray-600")
+        render_stat_badges(
+            [
+                ("Recorded Actions", f"{len(actions):,}", "blue"),
+                ("Failures", f"{len(failures):,}", "red" if failures else "green"),
+                ("In Progress", f"{len(unfinished):,}", "orange" if unfinished else "gray"),
+                ("Timed-out Turns", f"{len(timeouts):,}", "orange" if timeouts else "green"),
+            ]
+        )
+
+        if http_5xx:
+            with ui.card().classes("w-full border-l-4 border-red-600 bg-red-50 mt-3"):
+                ui.label("HTTP 5xx tool failure detected").classes("font-bold text-red-900")
+                ui.label(
+                    f"{len(http_5xx)} agent action(s) encountered a server-side HTTP error. "
+                    "The affected computation did not complete; inspect the failed actions below."
+                ).classes("text-sm text-red-800")
+        elif failures:
+            with ui.card().classes("w-full border-l-4 border-red-500 bg-red-50 mt-3"):
+                ui.label("Agent tool failures detected").classes("font-bold text-red-900")
+                ui.label(
+                    f"{len(failures)} action(s) failed. Their errors and inputs are preserved below."
+                ).classes("text-sm text-red-800")
+
+        if timeouts:
+            with ui.card().classes("w-full border-l-4 border-orange-500 bg-orange-50 mt-3"):
+                ui.label("Codex turn timeout detected").classes("font-bold text-orange-900")
+                for timeout in timeouts:
+                    ui.label(
+                        f"{timeout.get('location')}: {timeout.get('summary')}"
+                    ).classes("text-sm text-orange-800")
+
+        if trace.get("unreadable"):
+            ui.label(
+                "Some transcript files could not be read: " + "; ".join(trace["unreadable"])
+            ).classes("text-sm text-red-800 mt-2")
+
+        if not actions:
+            ui.label("No completed agent actions have been streamed yet.").classes(
+                "text-sm text-gray-500 italic mt-3"
+            )
+            return
+
+        with ui.expansion(
+            f"Agent action details ({len(actions)})",
+            icon="troubleshoot",
+            value=bool(failures or timeouts),
+        ).classes("w-full mt-3"):
+            for index, action in enumerate(actions, start=1):
+                success = action.get("success")
+                if success is False:
+                    icon = "error"
+                    state = "FAILED"
+                    color = "red"
+                elif success is None:
+                    icon = "pending"
+                    state = "IN PROGRESS"
+                    color = "orange"
+                else:
+                    icon = "check_circle"
+                    state = "SUCCEEDED"
+                    color = "green"
+                title = (
+                    f"{index}. {action.get('location')} — {action.get('name')}: "
+                    f"{str(action.get('description') or '')[:120]}"
+                )
+                with ui.expansion(title, icon=icon).classes("w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.badge(state, color=color)
+                        ui.badge(str(action.get("kind") or "tool"), color="gray").props("outline")
+                        if action.get("http_5xx"):
+                            ui.badge("HTTP 5xx", color="red")
+                        if action.get("legacy_error_response"):
+                            ui.badge("Legacy error response", color="orange").props("outline")
+                    ui.label("Input / arguments").classes("font-medium mt-2")
+                    ui.code(_agent_activity_preview(action.get("input") or {}), language="json").classes(
+                        "w-full text-xs"
+                    )
+                    ui.label("Result / output").classes("font-medium mt-2")
+                    result_text = action.get("error") or action.get("output") or "No result captured yet."
+                    ui.code(_agent_activity_preview(result_text)).classes("w-full text-xs")
+
+
 def _render_agentic_info_tab(context: _JobDetailContext) -> None:
     """Render per-job model, token, subagent, and skill provenance."""
     skill_usage = {"value": _load_job_skill_usage(context.job_dir)}
     agent_task_usage = {"value": build_job_agent_task_provenance(context.job_dir)}
+    agent_activity = {"value": _load_job_agent_activity(context.job_dir)}
+
+    @ui.refreshable
+    def render_agent_activity() -> None:
+        _render_job_agent_activity(agent_activity["value"])
 
     @ui.refreshable
     def render_agent_task_usage() -> None:
@@ -2131,6 +2401,7 @@ def _render_agentic_info_tab(context: _JobDetailContext) -> None:
     def render_agent_usage() -> None:
         _render_job_agent_usage(context.cost_records)
 
+    render_agent_activity()
     render_agent_task_usage()
     render_skill_usage()
     render_agent_usage()
@@ -2140,6 +2411,8 @@ def _render_agentic_info_tab(context: _JobDetailContext) -> None:
         context.cost_records = await _load_job_cost_records(context.job_id, context.user_id)
         skill_usage["value"] = _load_job_skill_usage(context.job_dir)
         agent_task_usage["value"] = build_job_agent_task_provenance(context.job_dir)
+        agent_activity["value"] = _load_job_agent_activity(context.job_dir)
+        render_agent_activity.refresh()
         render_agent_task_usage.refresh()
         render_skill_usage.refresh()
         render_agent_usage.refresh()
