@@ -2160,6 +2160,10 @@ def _render_job_skill_usage(usage: dict[str, Any]) -> None:
 
 
 _ITER_TRANSCRIPT_RE = re.compile(r"iter(\d+)_transcript\.json$")
+_ATTEMPT_TRANSCRIPT_RE = re.compile(
+    r"(?:(?:iter(?P<iteration>\d+))|(?P<phase>report|consensus))_attempt"
+    r"(?P<attempt>\d+)_transcript\.json$"
+)
 _RAW_CODEX_FAILURE_RE = re.compile(
     r"HTTP(?:/\S+)?\s+5\d\d|HTTP\s+5\d\d|❌\s*ERROR|"
     r"Process exited with code\s+(?!0\b)\d+",
@@ -2204,7 +2208,9 @@ def _raw_codex_session_activity(job_dir: Path) -> list[dict[str, Any]]:
             name = str(call.get("name") or "unknown_tool")
             raw_arguments = call.get("arguments")
             try:
-                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                arguments = (
+                    json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                )
             except json.JSONDecodeError:
                 arguments = {"raw": raw_arguments}
             if not isinstance(arguments, dict):
@@ -2259,12 +2265,21 @@ def _legacy_timeout_notifications(job_dir: Path) -> list[dict[str, str]]:
 def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
     """Load numbered and live transcripts into one troubleshooting trace."""
     provenance_dir = job_dir / "provenance"
-    paths = list(provenance_dir.glob("iter*_transcript.json"))
-    paths.sort(
-        key=lambda path: int(match.group(1))
-        if (match := _ITER_TRANSCRIPT_RE.fullmatch(path.name))
-        else 0
-    )
+    attempt_paths = [
+        path
+        for path in provenance_dir.glob("*_attempt*_transcript.json")
+        if _ATTEMPT_TRANSCRIPT_RE.fullmatch(path.name)
+    ]
+    attempt_paths.sort(key=lambda path: path.name)
+    if attempt_paths:
+        paths = attempt_paths
+    else:
+        paths = [
+            path
+            for path in provenance_dir.glob("iter*_transcript.json")
+            if _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+        ]
+        paths.sort(key=lambda path: int(_ITER_TRANSCRIPT_RE.fullmatch(path.name).group(1)))
     live_path = provenance_dir / "current_turn_transcript.json"
     if live_path.exists():
         paths.append(live_path)
@@ -2272,19 +2287,48 @@ def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     notifications: list[dict[str, str]] = []
     unreadable: list[str] = []
+    attempts: list[dict[str, Any]] = []
     for path in paths:
         match = _ITER_TRANSCRIPT_RE.fullmatch(path.name)
-        location = f"Iteration {match.group(1)}" if match else "Current turn (live)"
+        attempt_match = _ATTEMPT_TRANSCRIPT_RE.fullmatch(path.name)
+        if attempt_match:
+            logical = (
+                f"Iteration {attempt_match.group('iteration')}"
+                if attempt_match.group("iteration")
+                else str(attempt_match.group("phase")).title()
+            )
+            location = f"{logical} · Attempt {attempt_match.group('attempt')}"
+        else:
+            location = f"Iteration {match.group(1)}" if match else "Current turn (live)"
         try:
             transcript = load_transcript(path)
         except Exception as exc:
             logger.warning("Could not load agent transcript %s: %s", path, exc)
             unreadable.append(f"{path.name}: {exc}")
             continue
-        for action in extract_agent_activity(transcript):
-            actions.append({**action, "location": location})
-        for notification in extract_agent_notifications(transcript):
-            notifications.append({**notification, "location": location})
+        attempt_actions = [
+            {**action, "location": location} for action in extract_agent_activity(transcript)
+        ]
+        attempt_notifications = [
+            {**notification, "location": location}
+            for notification in extract_agent_notifications(transcript)
+        ]
+        actions.extend(attempt_actions)
+        notifications.extend(attempt_notifications)
+        if attempt_match:
+            status_path = path.with_name(path.name.replace("_transcript.json", "_status.json"))
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                status = {"state": "active", "outcome": "running"}
+            attempts.append(
+                {
+                    **status,
+                    "location": location,
+                    "actions": attempt_actions,
+                    "notifications": attempt_notifications,
+                }
+            )
 
     # Releases before live transcript streaming saved [] on timeout. Codex's
     # own rollout JSONL is still present, so reconstruct those calls instead of
@@ -2297,9 +2341,7 @@ def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
     failures = [action for action in actions if action.get("success") is False]
     unfinished = [action for action in actions if action.get("success") is None]
     http_5xx = [action for action in actions if action.get("http_5xx")]
-    timeouts = [
-        item for item in notifications if item.get("status") in {"timed_out", "timeout"}
-    ]
+    timeouts = [item for item in notifications if item.get("status") in {"timed_out", "timeout"}]
     return {
         "actions": actions,
         "notifications": notifications,
@@ -2307,6 +2349,19 @@ def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
         "unfinished": unfinished,
         "http_5xx": http_5xx,
         "timeouts": timeouts,
+        "attempts": attempts,
+        "attempt_states": {
+            state: sum(
+                1
+                for attempt in attempts
+                if (
+                    attempt.get("outcome") == "timed_out"
+                    if state == "timed_out"
+                    else attempt.get("state") == state
+                )
+            )
+            for state in ("accepted", "retrying", "timed_out", "failed", "active")
+        },
         "unreadable": unreadable,
     }
 
@@ -2328,6 +2383,8 @@ def _render_job_agent_activity(trace: dict[str, Any]) -> None:
     unfinished = trace.get("unfinished") or []
     http_5xx = trace.get("http_5xx") or []
     timeouts = trace.get("timeouts") or []
+    attempts = trace.get("attempts") or []
+    attempt_states = trace.get("attempt_states") or {}
 
     with ui.card().classes("w-full mb-4"):
         ui.label("Live Agent Activity & Troubleshooting").classes("text-h6 font-bold")
@@ -2344,6 +2401,53 @@ def _render_job_agent_activity(trace: dict[str, Any]) -> None:
                 ("Timed-out Turns", f"{len(timeouts):,}", "orange" if timeouts else "green"),
             ]
         )
+
+        if attempts:
+            with ui.expansion(
+                f"Attempts grouped by logical iteration ({len(attempts)})",
+                icon="account_tree",
+                value=bool(attempt_states.get("failed") or timeouts),
+            ).classes("w-full mt-3"):
+                for attempt in attempts:
+                    policy_state = str(attempt.get("state") or "active")
+                    state = policy_state
+                    outcome = str(attempt.get("outcome") or "running")
+                    if outcome == "timed_out":
+                        state = "timed_out"
+                    color = {
+                        "accepted": "green",
+                        "retrying": "orange",
+                        "timed_out": "orange",
+                        "failed": "red",
+                        "active": "blue",
+                    }.get(state, "gray")
+                    with ui.expansion(
+                        f"{attempt.get('location')} — {state.replace('_', ' ').upper()}",
+                        icon="history",
+                    ).classes("w-full"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.badge(state.replace("_", " ").upper(), color=color)
+                            if state == "timed_out" and policy_state == "retrying":
+                                ui.badge("RETRYING", color="orange").props("outline")
+                            ui.badge(
+                                f"{int(attempt.get('tool_calls') or len(attempt.get('actions') or []))} calls",
+                                color="gray",
+                            ).props("outline")
+                        if attempt.get("error"):
+                            ui.label(str(attempt["error"])).classes("text-sm text-red-800")
+                        for action in attempt.get("actions") or []:
+                            success = action.get("success")
+                            action_state = (
+                                "FAILED"
+                                if success is False
+                                else "RUNNING"
+                                if success is None
+                                else "SUCCEEDED"
+                            )
+                            ui.label(
+                                f"{action_state} · {action.get('name')}: "
+                                f"{str(action.get('description') or '')[:100]}"
+                            ).classes("text-sm")
 
         if http_5xx:
             with ui.card().classes("w-full border-l-4 border-red-600 bg-red-50 mt-3"):
@@ -2363,9 +2467,9 @@ def _render_job_agent_activity(trace: dict[str, Any]) -> None:
             with ui.card().classes("w-full border-l-4 border-orange-500 bg-orange-50 mt-3"):
                 ui.label("Codex turn timeout detected").classes("font-bold text-orange-900")
                 for timeout in timeouts:
-                    ui.label(
-                        f"{timeout.get('location')}: {timeout.get('summary')}"
-                    ).classes("text-sm text-orange-800")
+                    ui.label(f"{timeout.get('location')}: {timeout.get('summary')}").classes(
+                        "text-sm text-orange-800"
+                    )
 
         if trace.get("unreadable"):
             ui.label(
@@ -2410,11 +2514,13 @@ def _render_job_agent_activity(trace: dict[str, Any]) -> None:
                         if action.get("legacy_error_response"):
                             ui.badge("Legacy error response", color="orange").props("outline")
                     ui.label("Input / arguments").classes("font-medium mt-2")
-                    ui.code(_agent_activity_preview(action.get("input") or {}), language="json").classes(
-                        "w-full text-xs"
-                    )
+                    ui.code(
+                        _agent_activity_preview(action.get("input") or {}), language="json"
+                    ).classes("w-full text-xs")
                     ui.label("Result / output").classes("font-medium mt-2")
-                    result_text = action.get("error") or action.get("output") or "No result captured yet."
+                    result_text = (
+                        action.get("error") or action.get("output") or "No result captured yet."
+                    )
                     ui.code(_agent_activity_preview(result_text)).classes("w-full text-xs")
 
 

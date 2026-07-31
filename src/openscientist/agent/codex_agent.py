@@ -64,9 +64,18 @@ logger = logging.getLogger(__name__)
 
 _MCP_SERVER_NAME = "openscientist-tools"
 
-# Item types that are messages or reasoning rather than tool actions. Everything
-# else (commandExecution, mcpToolCall, fileChange, ...) counts as a tool call.
-_NON_TOOL_ITEM_TYPES = frozenset({"userMessage", "agentMessage", "reasoning"})
+# Positive allowlist: new informational SDK item types must not silently inflate
+# the troubleshooting call count.
+_TOOL_ITEM_TYPES = frozenset(
+    {
+        "commandExecution",
+        "mcpToolCall",
+        "fileChange",
+        "webSearch",
+        "imageGeneration",
+        "collabAgentToolCall",
+    }
+)
 
 # Hard wall-clock bound on a single agent turn. A weak model can get stuck
 # retrying an unsupported tool call (e.g. apply_patch) and never end the turn,
@@ -409,6 +418,20 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             # transcript persistence path remains the authoritative fallback.
             logger.warning("Failed to persist live Codex transcript", exc_info=True)
 
+    def _upsert_partial_item(self, item: Any) -> None:
+        """Retain started calls and replace them with completed forms by id."""
+        item_id = item.model_dump(mode="json").get("id")
+        if item_id:
+            for index, existing in enumerate(self._partial_items):
+                if existing.model_dump(mode="json").get("id") == item_id:
+                    self._partial_items[index] = item
+                    break
+            else:
+                self._partial_items.append(item)
+        else:
+            self._partial_items.append(item)
+        self._persist_partial_transcript()
+
     @staticmethod
     def _final_response_from_items(items: list[Any]) -> str:
         """Extract the last final/phase-less Codex assistant message."""
@@ -434,7 +457,6 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         """
         self._partial_items = []
         self._partial_usage = None
-        self._persist_partial_transcript()
 
         turn = await thread.turn(prompt)
         self._active_turn = turn
@@ -444,20 +466,19 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             async for event in stream:
                 payload = event.payload
                 if (
-                    isinstance(payload, ItemCompletedNotification)
-                    and payload.turn_id == turn.id
+                    payload.__class__.__name__ == "ItemStartedNotification"
+                    and getattr(payload, "turn_id", None) == turn.id
+                    and getattr(payload, "item", None) is not None
                 ):
-                    self._partial_items.append(payload.item)
-                    self._persist_partial_transcript()
+                    self._upsert_partial_item(payload.item)
+                if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn.id:
+                    self._upsert_partial_item(payload.item)
                 elif (
                     isinstance(payload, ThreadTokenUsageUpdatedNotification)
                     and payload.turn_id == turn.id
                 ):
                     self._partial_usage = payload.token_usage
-                elif (
-                    isinstance(payload, TurnCompletedNotification)
-                    and payload.turn.id == turn.id
-                ):
+                elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
                     completed = payload
         finally:
             await stream.aclose()
@@ -480,9 +501,7 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
     @staticmethod
     def _tool_call_count(items: list[Any]) -> int:
         return sum(
-            1
-            for item in items
-            if item.model_dump(mode="json").get("type") not in _NON_TOOL_ITEM_TYPES
+            1 for item in items if item.model_dump(mode="json").get("type") in _TOOL_ITEM_TYPES
         )
 
     def _partial_transcript_with_notification(
@@ -497,6 +516,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
                 output_file="",
             )
         )
+        try:
+            save_transcript(self._live_transcript_path(), transcript)
+        except Exception:
+            logger.warning("Failed to persist terminal Codex notification", exc_info=True)
         return transcript
 
     async def run_iteration(self, prompt: str, *, reset_session: bool = False) -> IterationResult:
@@ -515,18 +538,30 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
                 # Test/provider compatibility for AsyncThread-like adapters
                 # that implement the older aggregate ``run`` contract only.
                 turn_coro = thread.run(prompt)
-            result = await asyncio.wait_for(turn_coro, timeout=_TURN_TIMEOUT_SECONDS)
+            turn_task = asyncio.create_task(turn_coro)
+            done, _ = await asyncio.wait({turn_task}, timeout=_TURN_TIMEOUT_SECONDS)
+            if done:
+                result = turn_task.result()
+            else:
+                # Interrupt while the live turn reference still exists. wait_for
+                # used to cancel the consumer first, whose finally block cleared
+                # _active_turn before this handler could interrupt Codex.
+                if self._active_turn is not None:
+                    try:
+                        await self._active_turn.interrupt()
+                    except Exception:
+                        logger.debug("Interrupting timed-out Codex turn failed", exc_info=True)
+                done, _ = await asyncio.wait({turn_task}, timeout=5.0)
+                if not done:
+                    turn_task.cancel()
+                    await asyncio.gather(turn_task, return_exceptions=True)
+                raise TimeoutError
         except TimeoutError:
             # Runaway turn (e.g. the model looping on an unsupported tool call).
             # Report it honestly as TIMED_OUT (work done before the cut is already
             # persisted via the MCP tools); the orchestrator decides whether to
             # advance or fail, rather than this layer claiming success.
             logger.warning("Codex turn exceeded %ds, cutting the turn", _TURN_TIMEOUT_SECONDS)
-            if self._active_turn is not None:
-                try:
-                    await self._active_turn.interrupt()
-                except Exception:
-                    logger.debug("Interrupting timed-out Codex turn failed", exc_info=True)
             if self._partial_usage is not None:
                 self._token_usage += self._usage_from_payload(self._partial_usage)
             transcript = self._partial_transcript_with_notification(

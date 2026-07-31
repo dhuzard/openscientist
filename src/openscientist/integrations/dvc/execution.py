@@ -127,12 +127,8 @@ OPERATION_CONTRACTS: dict[str, OperationContract] = {
     ),
 }
 
-_BIOLOGICAL_TIME_OPERATIONS = frozenset(
-    {"summarize_light_dark", "summarize_circadian_cosinor"}
-)
-_VERIFIED_EVIDENCE_STATUSES = frozenset(
-    {EvidenceStatus.RECORDED, EvidenceStatus.COMPUTED}
-)
+_BIOLOGICAL_TIME_OPERATIONS = frozenset({"summarize_light_dark", "summarize_circadian_cosinor"})
+_VERIFIED_EVIDENCE_STATUSES = frozenset({EvidenceStatus.RECORDED, EvidenceStatus.COMPUTED})
 
 
 class DVCAnalysisBlockedError(RuntimeError):
@@ -329,16 +325,23 @@ class DVCAnalysisService:
             raise DVCAnalysisError("Pinned UDWA dependency is incompatible: " + "; ".join(details))
 
         dataset_dir = self._dataset_dir(request.dataset_id)
-        measurements_path = dataset_dir / "measurements.csv"
         manifest_path = dataset_dir / "manifest.json"
-        if not measurements_path.is_file() or not manifest_path.is_file():
-            raise DVCAnalysisError(
-                "Dataset is incomplete: measurements.csv or manifest.json is missing."
-            )
+        if not manifest_path.is_file():
+            raise DVCAnalysisError("Dataset is incomplete: manifest.json is missing.")
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        measurement_relpath = manifest.get("measurement_relpath", "measurements.csv")
+        if not isinstance(measurement_relpath, str):
+            raise DVCAnalysisError("Dataset manifest has an invalid measurement path.")
+        measurements_path = (dataset_dir / measurement_relpath).resolve()
+        if dataset_dir not in measurements_path.parents or not measurements_path.is_file():
+            raise DVCAnalysisError("Dataset manifest measurement asset is missing or unsafe.")
         self._verify_dataset_integrity(measurements_path, manifest)
-        dataframe = pd.read_csv(measurements_path)
+        dataframe = (
+            pd.read_parquet(measurements_path)
+            if measurements_path.suffix.casefold() == ".parquet"
+            else pd.read_csv(measurements_path)
+        )
 
         started_at = datetime.now(timezone.utc)
         try:
@@ -482,6 +485,18 @@ class DVCAnalysisService:
 
     @staticmethod
     def _verify_dataset_integrity(measurements_path: Path, manifest: dict[str, Any]) -> None:
+        prepared_hashes = manifest.get("artifact_sha256")
+        if isinstance(prepared_hashes, dict):
+            expected = prepared_hashes.get(measurements_path.name)
+            if not isinstance(expected, str):
+                raise DVCAnalysisError(
+                    "Prepared dataset manifest does not identify normalized measurements."
+                )
+            if _sha256(measurements_path) != expected:
+                raise DVCAnalysisError(
+                    "Dataset integrity check failed for normalized measurements."
+                )
+            return
         assets = manifest.get("result", {}).get("assets", [])
         expected = next(
             (

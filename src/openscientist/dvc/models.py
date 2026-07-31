@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -184,6 +185,49 @@ class ExportInspection(StrictModel):
     ended_at: datetime | None = None
     native_bin_seconds: float | None = Field(default=None, gt=0)
     warnings: list[str] = Field(default_factory=list)
+
+
+class DVCSourceSpec(StrictModel):
+    """Source-specific parsing and reconciliation contract for an upload."""
+
+    path: Path
+    source_id: str
+    schema_hint: ExportType | None = None
+    metric_name: str = "activity"
+    site: str | None = None
+    cohort: str | None = None
+    iana_timezone: str | None = None
+    clock_correction_minutes: int = 0
+    clock_correction_reason: str = "none"
+    expected_trace_count: int | None = Field(default=None, ge=1)
+    expected_trace_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def validate_expected_traces(self) -> DVCSourceSpec:
+        if self.expected_trace_ids is not None:
+            if len(self.expected_trace_ids) != len(set(self.expected_trace_ids)):
+                raise ValueError("expected trace ids must be unique within a source")
+            if self.expected_trace_count not in (None, len(self.expected_trace_ids)):
+                raise ValueError("expected trace count differs from expected trace ids")
+        if self.clock_correction_minutes and self.clock_correction_reason == "none":
+            raise ValueError("a nonzero clock correction requires a reason")
+        return self
+
+
+class DVCImportSpec(StrictModel):
+    schema_version: Literal["openscientist-dvc-upload/1"] = "openscientist-dvc-upload/1"
+    sources: list[DVCSourceSpec] = Field(min_length=1)
+    strict: bool = True
+
+
+class DVCPreparedDataset(StrictModel):
+    dataset_id: str
+    cache_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_relpath: str
+    measurement_asset_id: str
+    reused: bool
+    trace_count: int = Field(ge=1)
+    row_count: int = Field(ge=1)
 
 
 class AggregationValidation(StrictModel):

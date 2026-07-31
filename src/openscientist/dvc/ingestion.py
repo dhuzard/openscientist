@@ -20,7 +20,7 @@ from openscientist.dvc.models import (
 )
 
 CSVSource = str | Path | bytes | bytearray | BinaryIO | TextIO
-_TYPE1 = {"timestamp", "group", "cage", "samples", "stop_ts"}
+_TYPE1_BASE = {"timestamp", "group", "samples", "stop_ts"}
 _EVENTS = {"timestamp", "group", "cage", "rack", "position", "event"}
 _META_SUFFIXES = ("_TIMESTAMP", "_AVG", "_SEM", "_QRT", "_SAMPLES")
 _ELECTRODE = re.compile(r"^v_(\d+)$", re.IGNORECASE)
@@ -46,12 +46,18 @@ def file_sha256(path: str | Path) -> str:
 
 def detect_export_type(columns: Iterable[str]) -> ExportType:
     values = {str(column) for column in columns}
-    if _EVENTS.issubset(values):
+    folded = {column.casefold() for column in values}
+    if {column.casefold() for column in _EVENTS}.issubset(folded):
         return ExportType.EVENTS
-    if _TYPE1.issubset(values) and any(_ELECTRODE.match(column) for column in values):
+    identities = folded & {"cage", "mouse"}
+    if (
+        _TYPE1_BASE.issubset(folded)
+        and len(identities) == 1
+        and any(_ELECTRODE.match(column) for column in values)
+    ):
         return ExportType.TYPE1
-    if any(column.endswith("_TIMESTAMP") for column in values) and any(
-        column.endswith("_AVG") for column in values
+    if any(column.casefold().endswith("_timestamp") for column in values) and any(
+        column.casefold().endswith("_avg") for column in values
     ):
         return ExportType.TYPE2
     return ExportType.UNKNOWN
@@ -110,9 +116,16 @@ def normalize_type1(
     metric_name: str,
     expected_frequency_hz: float | None = 4.0,
 ) -> tuple[pd.DataFrame, ExportInspection]:
-    missing = sorted(_TYPE1 - set(frame.columns))
+    folded = {str(column).casefold(): str(column) for column in frame.columns}
+    missing = sorted(_TYPE1_BASE - set(folded))
     if missing:
         raise DVCIngestionError(f"Type 1 export is missing columns: {missing}")
+    identity_aliases = [name for name in ("cage", "mouse") if name in folded]
+    if len(identity_aliases) != 1:
+        raise DVCIngestionError(
+            "Type 1 export requires exactly one cage identity column: cage or mouse"
+        )
+    identity_column = folded[identity_aliases[0]]
     electrodes = _electrodes(frame.columns)
     if not electrodes:
         raise DVCIngestionError("Type 1 export has no v_1 ... v_12 columns")
@@ -124,7 +137,7 @@ def normalize_type1(
     out["timestamp_source"], out["timestamp_utc"] = _timestamps(out["timestamp"])
     out["stop_timestamp_source"], out["stop_timestamp_utc"] = _timestamps(out["stop_ts"])
     out["export_group"] = out["group"].astype("string")
-    out["cage_id"] = out["cage"].astype("string")
+    out["cage_id"] = out[identity_column].astype("string")
     out["source_file"] = source_file
     out["metric_name"] = metric_name
     out["samples"] = pd.to_numeric(out["samples"], errors="coerce")
@@ -139,9 +152,9 @@ def normalize_type1(
     else:
         out["expected_samples"] = out["interval_seconds"] * expected_frequency_hz
         out["coverage_fraction"] = out["samples"] / out["expected_samples"]
-    invalid = int(out["timestamp_utc"].isna().sum())
+    invalid = int(out.loc[out["timestamp_source"].notna(), "timestamp_utc"].isna().sum())
     if invalid:
-        warnings.append(f"{invalid} timestamps could not be parsed")
+        raise DVCIngestionError(f"{invalid} nonblank Type 1 timestamps could not be parsed")
 
     columns = [
         "source_file",
@@ -172,33 +185,61 @@ def _type2_prefixes(columns: Iterable[str]) -> list[str]:
     return [
         str(column)[: -len("_TIMESTAMP")]
         for column in columns
-        if str(column).endswith("_TIMESTAMP")
+        if str(column).casefold().endswith("_timestamp")
     ]
+
+
+def type2_trace_columns(columns: Iterable[str]) -> dict[str, list[str]]:
+    """Allocate physical traces to the longest matching export-group prefix."""
+    values = [str(column) for column in columns]
+    prefixes = sorted(_type2_prefixes(values), key=len, reverse=True)
+    folded_prefixes = [prefix.casefold() for prefix in prefixes]
+    if len(folded_prefixes) != len(set(folded_prefixes)):
+        raise DVCIngestionError(
+            "Type 2 export has ambiguous timestamp blocks that differ only by case"
+        )
+    timestamp_columns = {
+        column.casefold() for column in values if column.casefold().endswith("_timestamp")
+    }
+    excluded_suffixes = tuple(suffix.casefold() for suffix in _META_SUFFIXES)
+    shared = {"day", "hour", "minute", "relativetime"}
+    allocated: dict[str, list[str]] = {prefix: [] for prefix in prefixes}
+    for column in values:
+        folded = column.casefold()
+        if folded in shared or folded in timestamp_columns or folded.endswith(excluded_suffixes):
+            continue
+        owner = next(
+            (prefix for prefix in prefixes if folded.startswith(prefix.casefold() + "_")),
+            None,
+        )
+        if owner is not None:
+            allocated[owner].append(column)
+    return allocated
 
 
 def normalize_type2(
     frame: pd.DataFrame, *, source_file: str, metric_name: str
 ) -> tuple[pd.DataFrame, ExportInspection]:
-    prefixes = _type2_prefixes(frame.columns)
+    traces_by_prefix = type2_trace_columns(frame.columns)
+    prefixes = list(traces_by_prefix)
     if not prefixes:
         raise DVCIngestionError("Type 2 export has no *_TIMESTAMP columns")
     warnings: list[str] = []
     blocks: list[pd.DataFrame] = []
     shared = [column for column in ("day", "hour", "minute", "relativeTime") if column in frame]
     for prefix in prefixes:
-        timestamp = f"{prefix}_TIMESTAMP"
-        excluded = {f"{prefix}{suffix}" for suffix in _META_SUFFIXES}
-        cage_columns = [
+        timestamp = next(
             column
             for column in frame.columns
-            if column.startswith(f"{prefix}_") and column not in excluded
-        ]
+            if str(column).casefold() == f"{prefix}_timestamp".casefold()
+        )
+        cage_columns = traces_by_prefix[prefix]
         if not cage_columns:
-            warnings.append(f"group {prefix!r} has no cage columns")
-            continue
-        vendor_avg = frame.get(f"{prefix}_AVG")
-        vendor_sem = frame.get(f"{prefix}_SEM")
-        vendor_samples = frame.get(f"{prefix}_SAMPLES")
+            raise DVCIngestionError(f"Type 2 group {prefix!r} has no physical cage traces")
+        folded_columns = {str(column).casefold(): str(column) for column in frame.columns}
+        vendor_avg = frame.get(folded_columns.get(f"{prefix}_avg".casefold(), ""))
+        vendor_sem = frame.get(folded_columns.get(f"{prefix}_sem".casefold(), ""))
+        vendor_samples = frame.get(folded_columns.get(f"{prefix}_samples".casefold(), ""))
         if vendor_avg is None:
             vendor_avg = pd.Series(np.nan, index=frame.index)
         if vendor_sem is None:
@@ -219,6 +260,11 @@ def normalize_type2(
             block["vendor_group_samples"] = pd.to_numeric(vendor_samples, errors="coerce")
             blocks.append(block)
     normalized = pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
+    invalid = int(
+        normalized.loc[normalized["timestamp_source"].notna(), "timestamp_utc"].isna().sum()
+    )
+    if invalid:
+        raise DVCIngestionError(f"{invalid} nonblank Type 2 timestamps could not be parsed")
     return normalized, _inspection(normalized, source_file, ExportType.TYPE2, warnings)
 
 

@@ -201,8 +201,7 @@ def test_execute_code_python_happy_path(
     assert call_kwargs["language"] == "python"
     assert call_kwargs["timeout"] == 60
     assert call_kwargs["job_id"] == state_job_dir.name
-    # The output dir is forwarded as a host-absolute path.
-    assert call_kwargs["output_dir"] == str((state_job_dir / "provenance").resolve())
+    assert call_kwargs["output_dir"] == {"job_relpath": "provenance"}
 
     last_log = patched_ks_persistence.data["analysis_log"][-1]
     assert last_log["action"] == "execute_code"
@@ -319,13 +318,14 @@ def test_execute_code_python_with_data_files(
     execute_code("pass")
 
     call_kwargs = broker.call_args.kwargs
-    assert call_kwargs["data_path"] == str((state_job_dir / "a.csv").resolve())
+    assert call_kwargs["data_path"]["job_relpath"] == "a.csv"
+    assert call_kwargs["data_path"]["asset_id"].startswith("asset-")
+    assert len(call_kwargs["data_path"]["sha256"]) == 64
     assert len(call_kwargs["data_files"]) == 2
     assert {f["name"] for f in call_kwargs["data_files"]} == {"a.csv", "b.csv"}
-    # Data-file paths are forwarded host-absolute (here an identity resolve).
-    assert {f["path"] for f in call_kwargs["data_files"]} == {
-        str((state_job_dir / "a.csv").resolve()),
-        str((state_job_dir / "b.csv").resolve()),
+    assert {f["asset"]["job_relpath"] for f in call_kwargs["data_files"]} == {
+        "a.csv",
+        "b.csv",
     }
 
 

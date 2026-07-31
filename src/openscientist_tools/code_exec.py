@@ -8,6 +8,7 @@ log_analysis writes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -21,9 +22,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from openscientist.code_executor import format_execution_result
 from openscientist.exec_broker_client import BrokerError, execute_code_via_broker
 from openscientist.file_loader import get_file_info, load_data_file
-from openscientist.job_container.utils import to_host_path
 from openscientist.knowledge_state import KnowledgeState
-from openscientist.settings import get_settings
+from openscientist.settings import get_settings  # noqa: F401 - compatibility patch point
 from openscientist_tools.server import mcp
 from openscientist_tools.state import STATE
 
@@ -93,10 +93,7 @@ def _verified_biological_time_context_issue(
         return "the code references an unknown DVC dataset"
     if not referenced:
         if len(available) != 1:
-            return (
-                "the exact DVC dataset is ambiguous; reference one dataset ID "
-                "explicitly"
-            )
+            return "the exact DVC dataset is ambiguous; reference one dataset ID explicitly"
         referenced = available
 
     analyses_dir = job_dir / "dvc_analyses"
@@ -159,10 +156,7 @@ def _dvc_code_guardrail(
         )
 
     searchable = f"{description}\n{code}"
-    if (
-        _STATISTICS_OR_PLOT_RE.search(searchable)
-        and _DATA_SCIENCE_SKILL_KEY not in skills
-    ):
+    if _STATISTICS_OR_PLOT_RE.search(searchable) and _DATA_SCIENCE_SKILL_KEY not in skills:
         return (
             "❌ DVC METHODOLOGY BLOCK: statistical testing, assumptions, effect "
             "sizes, correlations, modelling, and plots outside governed UDWA require "
@@ -201,6 +195,13 @@ def _ensure_data_loaded() -> str | None:
     _DATA_LOADED[key] = True
 
     if STATE.data_file is None:
+        _DATA_ERROR[key] = None
+        _DATA_CACHE[key] = None
+        return None
+
+    if STATE.data_file.suffix.casefold() == ".parquet" and "dvc_datasets" in STATE.data_file.parts:
+        # The executor loads the immutable prepared artifact as `data`. Avoid a
+        # duplicate DataFrame in the MCP process on every fresh agent session.
         _DATA_ERROR[key] = None
         _DATA_CACHE[key] = None
         return None
@@ -314,14 +315,24 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
     provenance_dir = STATE.job_dir / "provenance"
     provenance_dir.mkdir(parents=True, exist_ok=True)
 
-    cs = get_settings().container
-
-    def _to_host(path: Path) -> str:
-        # Resolve and map to the host path the broker mounts.
-        return str(to_host_path(path.resolve(), cs))
+    def _asset_ref(path: Path) -> dict[str, str]:
+        resolved = path.resolve()
+        job_root = STATE.job_dir.resolve()
+        if resolved != job_root and job_root not in resolved.parents:
+            raise ValueError(f"Execution asset is outside the job directory: {path}")
+        digest = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        sha256 = digest.hexdigest()
+        return {
+            "asset_id": f"asset-{sha256[:20]}",
+            "job_relpath": resolved.relative_to(job_root).as_posix(),
+            "sha256": sha256,
+        }
 
     job_id = STATE.job_dir.name
-    host_output_dir = _to_host(provenance_dir)
+    output_ref = {"job_relpath": provenance_dir.relative_to(STATE.job_dir).as_posix()}
 
     result: dict[str, Any]
     execution_started = time.time()
@@ -332,17 +343,17 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
                 if not df_path.exists():
                     raise FileNotFoundError(f"Data file not found: {df_path}")
                 info = get_file_info(df_path)
-                info["path"] = _to_host(Path(info["path"]))
+                info["asset"] = _asset_ref(Path(info.pop("path")))
                 data_files.append(info)
 
-            primary_data_path = _to_host(STATE.data_files[0]) if STATE.data_files else None
+            primary_data_ref = _asset_ref(STATE.data_files[0]) if STATE.data_files else None
 
             result = execute_code_via_broker(
                 code=code,
                 language="python",
                 job_id=job_id,
-                output_dir=host_output_dir,
-                data_path=primary_data_path,
+                output_dir=output_ref,
+                data_path=primary_data_ref,
                 data_files=data_files,
                 description=description,
                 iteration=int(ks.data["iteration"]),
@@ -353,13 +364,19 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
                 code=code,
                 language=language,
                 job_id=job_id,
-                output_dir=host_output_dir,
+                output_dir=output_ref,
                 description=description,
                 iteration=int(ks.data["iteration"]),
                 timeout=300 if language == "rust" else 60,
             )
     except BrokerError as exc:
-        message = f"Code execution service unavailable: {exc}"
+        failure = exc.as_dict()
+        http_label = f"HTTP {exc.status_code}: " if exc.status_code else ""
+        message = (
+            "Code execution service unavailable: "
+            + http_label
+            + json.dumps(failure, sort_keys=True)
+        )
         execution_time = time.time() - execution_started
         # Persist the failure independently of the agent transcript. This makes
         # the warning visible in the investigation timeline immediately, even
@@ -373,6 +390,7 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
             execution_time=execution_time,
             plots=[],
             governance_scope=governance_scope,
+            broker_failure=failure,
         )
         ks.set_agent_status("Code execution failed — see Agentic Info")
         ks.save_to_database_sync(STATE.job_id)

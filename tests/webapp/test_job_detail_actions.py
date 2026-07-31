@@ -150,6 +150,58 @@ def test_agentic_activity_loads_failures_timeouts_and_live_calls(tmp_path: Path)
     assert len(trace["timeouts"]) == 1
 
 
+def test_agentic_activity_groups_attempt_states(tmp_path: Path) -> None:
+    provenance = tmp_path / "provenance"
+    save_transcript(
+        provenance / "iter1_attempt1_transcript.json",
+        [
+            ToolCall(id="exec-1", tool="execute_code", arguments={"code": "pass"}),
+            TaskNotification(
+                task_id="codex-turn",
+                status="timed_out",
+                summary="Timed out after one call",
+                output_file="",
+            ),
+        ],
+    )
+    (provenance / "iter1_attempt1_status.json").write_text(
+        json.dumps(
+            {
+                "logical_iteration": 1,
+                "attempt": 1,
+                "state": "retrying",
+                "outcome": "timed_out",
+                "tool_calls": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_transcript(provenance / "iter1_attempt2_transcript.json", [])
+    (provenance / "iter1_attempt2_status.json").write_text(
+        json.dumps(
+            {
+                "logical_iteration": 1,
+                "attempt": 2,
+                "state": "accepted",
+                "outcome": "completed",
+                "tool_calls": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    trace = job_detail._load_job_agent_activity(tmp_path)
+
+    assert [attempt["state"] for attempt in trace["attempts"]] == [
+        "retrying",
+        "accepted",
+    ]
+    assert trace["attempt_states"]["timed_out"] == 1
+    assert trace["attempt_states"]["retrying"] == 1
+    assert trace["attempt_states"]["accepted"] == 1
+    assert trace["actions"][0]["location"] == "Iteration 1 · Attempt 1"
+
+
 def test_agentic_activity_recovers_calls_from_legacy_codex_rollout(tmp_path: Path) -> None:
     provenance = tmp_path / "provenance"
     save_transcript(provenance / "iter1_transcript.json", [])

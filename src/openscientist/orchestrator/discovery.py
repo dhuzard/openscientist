@@ -7,12 +7,18 @@ calls via asyncio.run().
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import os
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import pandas as pd
 from sqlalchemy import select
 
 from openscientist.agent.base import (
@@ -23,9 +29,12 @@ from openscientist.agent.base import (
     TurnOutcome,
 )
 from openscientist.agent.factory import agent_class_for_provider_id, get_agent
-from openscientist.database.models import JobDataFile
+from openscientist.database.models import JobDataFile, Skill
 from openscientist.database.models.job import Job as JobModel
 from openscientist.database.session import AsyncSessionLocal
+from openscientist.dvc.ingestion import detect_export_type
+from openscientist.dvc.models import DVCImportSpec, ExportType
+from openscientist.dvc.preparation import default_upload_spec, prepare_uploaded_dvc
 from openscientist.evidence_librarian import initialise_evidence_trace
 from openscientist.exceptions import OpenScientistError
 from openscientist.job_guidance import (
@@ -50,9 +59,20 @@ from openscientist.providers import get_provider
 from openscientist.providers.base import Provider
 from openscientist.settings import get_settings
 from openscientist.transcript import TranscriptEntry, save_transcript
+from openscientist.transcript.variants import ToolCall, ToolResult
 from openscientist.version import get_version_string
 
 logger = logging.getLogger(__name__)
+
+_DVC_SKILL_KEY = "domain--digital-ventilated-cage-analysis"
+
+_SCIENTIFIC_TOOL_RE = re.compile(
+    r"(?:^|__)(?:execute_code|search_pubmed|search_semantic|dvc_|record_finding|"
+    r"add_finding|update_hypothesis)",
+    re.IGNORECASE,
+)
+_MAX_INFRA_ATTEMPTS = 2
+_MAX_EMPTY_ATTEMPTS = 3
 
 
 class _DiscoveryCancelledError(RuntimeError):
@@ -143,25 +163,191 @@ def _append_iteration_artifacts(
     )
 
 
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _scientific_product_count(ks: KnowledgeState, iteration: int) -> int:
+    count = 0
+    for key in ("findings", "literature", "hypotheses"):
+        for item in ks.data.get(key, []):
+            if not isinstance(item, dict):
+                continue
+            item_iteration = item.get("iteration", item.get("retrieved_at_iteration"))
+            if item_iteration == iteration:
+                count += 1
+    for item in ks.data.get("analysis_log", []):
+        if not isinstance(item, dict) or item.get("iteration") != iteration:
+            continue
+        if item.get("success") is False:
+            continue
+        if _SCIENTIFIC_TOOL_RE.search(str(item.get("action") or "")):
+            count += 1
+    return count
+
+
+def _transcript_has_scientific_product(result: IterationResult) -> bool:
+    calls = {
+        entry.id: entry.tool
+        for entry in result.transcript
+        if isinstance(entry, ToolCall) and _SCIENTIFIC_TOOL_RE.search(entry.tool)
+    }
+    return any(
+        isinstance(entry, ToolResult) and entry.success and entry.call_id in calls
+        for entry in result.transcript
+    )
+
+
+def _failure_signature(result: IterationResult, *, accepted: bool) -> str:
+    if accepted:
+        return ""
+    if result.outcome is TurnOutcome.TIMED_OUT:
+        return "timed_out"
+    if result.outcome is TurnOutcome.FAILED:
+        text = re.sub(r"\s+", " ", result.error.lower()).strip()
+        http = re.search(r"http\s+5\d\d", text)
+        return http.group(0).replace(" ", "_") if http else text[:160] or "failed"
+    failed_outputs = " ".join(
+        f"{entry.error_message or ''} {entry.output}"
+        for entry in result.transcript
+        if isinstance(entry, ToolResult) and not entry.success
+    ).lower()
+    if match := re.search(r"http\s+5\d\d", failed_outputs):
+        return match.group(0).replace(" ", "_")
+    if "broker" in failed_outputs and "error" in failed_outputs:
+        return "broker_error"
+    return "completed_without_accepted_product"
+
+
+def _attempt_status(
+    *,
+    iteration: int,
+    attempt: int,
+    result: IterationResult,
+    state: str,
+    signature: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "openscientist-attempt/1",
+        "logical_iteration": iteration,
+        "attempt": attempt,
+        "state": state,
+        "outcome": result.outcome.value,
+        "tool_calls": result.tool_calls,
+        "error": result.error,
+        "failure_signature": signature,
+        "persisted_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _run_discovery_attempts(
+    *,
+    executor: AbstractAgent[Provider],
+    job_id: str,
+    provenance_dir: Path,
+    iteration: int,
+    prompt: str,
+    reset_session: bool,
+) -> IterationResult:
+    """Persist each physical attempt before applying bounded retry policy."""
+    initial_ks = KnowledgeState.load_from_database_sync(job_id)
+    baseline_products = _scientific_product_count(initial_ks, iteration)
+    signatures: list[str] = []
+    attempt = 0
+    current_prompt = prompt
+    current_reset = reset_session
+
+    while True:
+        attempt += 1
+        result = await _run_cost_tracked_iteration(
+            executor,
+            job_id,
+            current_prompt,
+            reset_session=current_reset,
+            iteration=iteration,
+            operation_type="discovery",
+        )
+        transcript_path = provenance_dir / f"iter{iteration}_attempt{attempt}_transcript.json"
+        _save_transcript(transcript_path, result.transcript)
+        (provenance_dir / "current_turn_transcript.json").unlink(missing_ok=True)
+
+        ks = KnowledgeState.load_from_database_sync(job_id)
+        summary = ks.get_iteration_summary(iteration) or result.output.strip()
+        product = (
+            _scientific_product_count(ks, iteration) > baseline_products
+            or _transcript_has_scientific_product(result)
+            # Compatibility for aggregate provider adapters that report a call
+            # count but cannot expose a canonical transcript.
+            or (not result.transcript and result.tool_calls > 0)
+        )
+        accepted = (
+            result.outcome is TurnOutcome.COMPLETED
+            and bool(summary and summary.strip())
+            and product
+        )
+        signature = _failure_signature(result, accepted=accepted)
+
+        if accepted:
+            state = "accepted"
+        else:
+            signatures.append(signature)
+            infrastructure = (
+                result.outcome is not TurnOutcome.COMPLETED
+                or signature.startswith("http_5")
+                or signature == "broker_error"
+            )
+            identical_infra = (
+                infrastructure and len(signatures) >= 2 and signatures[-1] == signatures[-2]
+            )
+            max_attempts = _MAX_INFRA_ATTEMPTS if infrastructure else _MAX_EMPTY_ATTEMPTS
+            state = "failed" if identical_infra or attempt >= max_attempts else "retrying"
+
+        _atomic_json(
+            provenance_dir / f"iter{iteration}_attempt{attempt}_status.json",
+            _attempt_status(
+                iteration=iteration,
+                attempt=attempt,
+                result=result,
+                state=state,
+                signature=signature,
+            ),
+        )
+        # The immutable attempt is durable before this policy branch.
+        if state == "accepted":
+            _save_transcript(provenance_dir / f"iter{iteration}_transcript.json", result.transcript)
+            return result
+        if state == "failed":
+            raise RuntimeError(
+                f"Iteration {iteration} failed after {attempt} attempt(s): "
+                f"{result.error or signature}"
+            )
+
+        current_reset = result.outcome is not TurnOutcome.COMPLETED
+        current_prompt = (
+            prompt
+            + "\n\nRETRY REQUIREMENT: The prior attempt was not accepted. Complete at least one "
+            "successful scientific tool action and save a non-empty iteration summary. "
+            f"Prior state: {result.outcome.value}; failure: {result.error or signature}."
+        )
+
+
 def _check_turn_outcome(result: IterationResult, iteration: int) -> None:
     """Apply the loop's per-turn policy.
 
-    FAILED aborts the run. TIMED_OUT is recorded and the loop advances: the
-    turn was cut by a wall-clock timeout, and any work done before the cut is
-    already persisted via the tools, so a stalled model is surfaced (in the log
-    and the honest outcome) rather than silently passed off as success.
+    This compatibility guard never advances a failed or timed-out turn. The
+    attempt runner normally handles retries before reaching this function.
     """
     if result.outcome is TurnOutcome.FAILED:
         logger.error("Iteration %d failed: %s", iteration, result.error)
         raise RuntimeError(f"Iteration {iteration} failed: {result.error}")
     if result.outcome is TurnOutcome.TIMED_OUT:
-        logger.warning(
-            "Iteration %d timed out (tool_calls=%d); advancing, work before the cut is persisted",
-            iteration,
-            result.tool_calls,
+        raise RuntimeError(
+            f"Iteration {iteration} timed out after {result.tool_calls} recorded tool calls"
         )
-    else:
-        logger.info("Iteration %d completed (tool_calls=%d)", iteration, result.tool_calls)
+    logger.info("Iteration %d completed (tool_calls=%d)", iteration, result.tool_calls)
 
 
 def _sync_version_metadata_if_available(job_id: str) -> None:
@@ -265,15 +451,23 @@ async def _run_primary_discovery_loop(
         )
 
         logger.info("Iteration 1/%d: Starting session", current_limit)
-        result = await _run_cost_tracked_iteration(
-            executor,
-            job_id,
-            initial_prompt,
-            reset_session=True,
+        result = await _run_discovery_attempts(
+            executor=executor,
+            job_id=job_id,
+            provenance_dir=provenance_dir,
             iteration=1,
-            operation_type="discovery",
+            prompt=initial_prompt,
+            reset_session=True,
         )
-        _check_turn_outcome(result, 1)
+        prepared_dvc = runtime.get("prepared_dvc")
+        if prepared_dvc:
+            initial_prompt += (
+                "\n\nSTRICT DVC PREPARATION COMPLETED BEFORE ITERATION 1. "
+                f"Use prepared dataset asset {prepared_dvc['measurement_asset_id']} "
+                f"(dataset {prepared_dvc['dataset_id']}) through the preloaded `data` "
+                "DataFrame. Do not reopen or heuristically reparse raw uploaded DVC CSVs. "
+                "The immutable manifest and cage reconciliation are listed in data_files."
+            )
 
         _sync_version_metadata_if_available(job_id)
         _append_iteration_artifacts(
@@ -340,15 +534,14 @@ async def _run_primary_discovery_loop(
             "fresh session" if should_reset else "continuing",
         )
 
-        result = await _run_cost_tracked_iteration(
-            executor,
-            job_id,
-            iteration_prompt,
-            reset_session=should_reset,
+        result = await _run_discovery_attempts(
+            executor=executor,
+            job_id=job_id,
+            provenance_dir=provenance_dir,
             iteration=iteration,
-            operation_type="discovery",
+            prompt=iteration_prompt,
+            reset_session=should_reset,
         )
-        _check_turn_outcome(result, iteration)
         _append_iteration_artifacts(
             provenance_dir=provenance_dir,
             log_file=log_file,
@@ -535,36 +728,59 @@ async def _run_report_turn(
     )
     logger.info("Report generation turn (prompt: %d chars)", len(prompt))
 
-    result = await _run_cost_tracked_iteration(
-        executor,
-        job_dir.name,
-        prompt,
-        reset_session=False,
-        operation_type="report",
-    )
+    reset_for_retry = False
     for attempt in range(1, _MAX_REPORT_ATTEMPTS + 1):
-        if _ensure_report_written(report_path, result, baseline_mtime_ns=baseline_mtime_ns):
-            if attempt > 1:
-                logger.info("Report written on attempt %d", attempt)
-            return result, True
-        if attempt == _MAX_REPORT_ATTEMPTS:
-            break
-        logger.warning(
-            "Report file missing after attempt %d/%d; re-asking", attempt, _MAX_REPORT_ATTEMPTS
-        )
-        result = await _run_cost_tracked_iteration(
-            executor,
-            job_dir.name,
-            build_report_retry_prompt(
+        attempt_prompt = (
+            prompt
+            if attempt == 1
+            else build_report_retry_prompt(
                 research_question,
                 ks,
                 job_dir=job_dir,
                 description=description,
                 file_write_tool=file_write_tool,
                 context_window_tokens=context_window_tokens,
-            ),
-            reset_session=False,
+            )
+        )
+        result = await _run_cost_tracked_iteration(
+            executor,
+            job_dir.name,
+            attempt_prompt,
+            reset_session=reset_for_retry,
             operation_type="report",
+        )
+        accepted = result.outcome is TurnOutcome.COMPLETED and _ensure_report_written(
+            report_path, result, baseline_mtime_ns=baseline_mtime_ns
+        )
+        state = (
+            "accepted"
+            if accepted
+            else ("failed" if attempt == _MAX_REPORT_ATTEMPTS else "retrying")
+        )
+        provenance = job_dir / "provenance"
+        _save_transcript(provenance / f"report_attempt{attempt}_transcript.json", result.transcript)
+        _atomic_json(
+            provenance / f"report_attempt{attempt}_status.json",
+            {
+                "schema": "openscientist-attempt/1",
+                "phase": "report",
+                "attempt": attempt,
+                "state": state,
+                "outcome": result.outcome.value,
+                "tool_calls": result.tool_calls,
+                "error": result.error,
+                "persisted_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        if accepted:
+            if attempt > 1:
+                logger.info("Report written on attempt %d", attempt)
+            return result, True
+        reset_for_retry = result.outcome is not TurnOutcome.COMPLETED
+        if attempt == _MAX_REPORT_ATTEMPTS:
+            break
+        logger.warning(
+            "Report file missing after attempt %d/%d; re-asking", attempt, _MAX_REPORT_ATTEMPTS
         )
     logger.error("Report file not written after %d attempts", _MAX_REPORT_ATTEMPTS)
     return result, False
@@ -590,7 +806,7 @@ async def _set_consensus_answer(
             if attempt == 1
             else build_consensus_retry_prompt(research_question)
         )
-        await _run_cost_tracked_iteration(
+        result = await _run_cost_tracked_iteration(
             executor,
             job_dir.name,
             prompt,
@@ -598,7 +814,30 @@ async def _set_consensus_answer(
             operation_type="consensus",
         )
         current = KnowledgeState.load_from_database_sync(job_dir.name).data.get("consensus_answer")
-        if current and current != baseline:
+        accepted = result.outcome is TurnOutcome.COMPLETED and current and current != baseline
+        state = (
+            "accepted"
+            if accepted
+            else ("failed" if attempt == _MAX_CONSENSUS_ATTEMPTS else "retrying")
+        )
+        provenance = job_dir / "provenance"
+        _save_transcript(
+            provenance / f"consensus_attempt{attempt}_transcript.json", result.transcript
+        )
+        _atomic_json(
+            provenance / f"consensus_attempt{attempt}_status.json",
+            {
+                "schema": "openscientist-attempt/1",
+                "phase": "consensus",
+                "attempt": attempt,
+                "state": state,
+                "outcome": result.outcome.value,
+                "tool_calls": result.tool_calls,
+                "error": result.error,
+                "persisted_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        if accepted:
             if attempt > 1:
                 logger.info("Consensus recorded on attempt %d", attempt)
             return
@@ -672,6 +911,15 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
             .order_by(JobDataFile.created_at.asc())
         )
         data_files = [str(path) for path in files_result.scalars().all()]
+        assigned_ids = getattr(job, "assigned_skill_ids", None)
+        skill_keys: list[str] = []
+        if assigned_ids:
+            skill_result = await session.execute(
+                select(Skill).where(Skill.id.in_([UUID(value) for value in assigned_ids]))
+            )
+            skill_keys = [
+                f"{skill.category}--{skill.slug}" for skill in skill_result.scalars().all()
+            ]
 
     resolved_files: list[str] = []
     for raw_path in data_files:
@@ -691,9 +939,71 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
         ),
         "use_hypotheses": bool(job.use_hypotheses),
         "assigned_skill_ids": getattr(job, "assigned_skill_ids", None),
+        "assigned_skill_keys": skill_keys,
         "investigation_mode": job.investigation_mode,
         "data_files": resolved_files,
     }
+
+
+def _prepare_dvc_uploads(job_dir: Path, runtime: dict[str, Any]) -> None:
+    """Route explicitly assigned DVC upload jobs through strict preparation."""
+    csv_paths = [
+        Path(path) for path in runtime["data_files"] if Path(path).suffix.casefold() == ".csv"
+    ]
+    if not csv_paths:
+        return
+    assigned = _DVC_SKILL_KEY in set(runtime.get("assigned_skill_keys") or [])
+    activity_paths: list[Path] = []
+    for path in csv_paths:
+        try:
+            columns = pd.read_csv(path, nrows=0).columns
+        except (OSError, ValueError):
+            continue
+        export_type = detect_export_type(columns)
+        if export_type in {ExportType.TYPE1, ExportType.TYPE2}:
+            activity_paths.append(path)
+        elif assigned and export_type is ExportType.UNKNOWN:
+            folded = [str(column).casefold() for column in columns]
+            looks_dvc = any(re.fullmatch(r"v_\d+", column) for column in folded) or any(
+                column.endswith("_timestamp") for column in folded
+            )
+            if looks_dvc:
+                raise ValueError(
+                    f"DVC-like CSV has an unsupported or ambiguous schema: {path.name}"
+                )
+    if not activity_paths:
+        return
+
+    spec_path = next(
+        (
+            Path(path)
+            for path in runtime["data_files"]
+            if Path(path).name.casefold() == "dvc_upload_spec.json"
+        ),
+        job_dir / "dvc_upload_spec.json",
+    )
+    if spec_path.is_file():
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        for source in payload.get("sources", []):
+            path = Path(source["path"])
+            source["path"] = str(path if path.is_absolute() else spec_path.parent / path)
+        spec = DVCImportSpec.model_validate(payload)
+    else:
+        spec = default_upload_spec(activity_paths)
+    result = prepare_uploaded_dvc(job_dir, spec)
+    dataset_dir = job_dir / "dvc_datasets" / result.dataset_id
+    metadata_files = [
+        path
+        for path in runtime["data_files"]
+        if Path(path) not in activity_paths and Path(path).name.casefold() != "dvc_upload_spec.json"
+    ]
+    runtime["data_files"] = [
+        str(dataset_dir / "measurements.parquet"),
+        str(dataset_dir / "cage_reconciliation.parquet"),
+        str(dataset_dir / "manifest.json"),
+        *metadata_files,
+    ]
+    runtime["prepared_dvc"] = result.model_dump()
 
 
 def get_version_metadata() -> dict[str, str]:
@@ -946,6 +1256,20 @@ async def run_discovery_async(job_dir: Path) -> dict[str, Any]:
     runtime = await _load_runtime_context(job_dir)
     job_id = runtime["job_id"]
     logger.info("Starting discovery for job %s (mode=%s)", job_id, runtime["investigation_mode"])
+
+    try:
+        await asyncio.to_thread(_prepare_dvc_uploads, job_dir, runtime)
+    except Exception as exc:
+        message = f"Strict DVC preparation failed before iteration 1: {exc}"
+        logger.error(message, exc_info=True)
+        await update_job_status(job_dir, "failed", error_message=message)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "iterations": 0,
+            "findings": 0,
+            "error": message,
+        }
 
     executor = await _build_and_prepare_executor(job_dir, runtime)
     logger.info("Created agent executor for job %s", job_id)

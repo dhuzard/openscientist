@@ -5,6 +5,7 @@ the full agent loop. The run_discovery integration is too heavyweight for
 unit testing.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -452,7 +453,7 @@ class TestDiscoveryResumeAndLimitControls:
             return_value=IterationResult(
                 outcome=TurnOutcome.COMPLETED,
                 output="resumed iteration complete",
-                tool_calls=0,
+                tool_calls=1,
                 transcript=[],
             )
         )
@@ -1972,17 +1973,123 @@ class TestTurnOutcomePolicy:
         with pytest.raises(RuntimeError, match="Iteration 3 failed"):
             _check_turn_outcome(self._result(TurnOutcome.FAILED), 3)
 
-    def test_timed_out_turn_advances(self):
+    def test_timed_out_turn_does_not_advance(self):
         from openscientist.orchestrator.discovery import _check_turn_outcome
 
-        # Must NOT raise: a wall-clock timeout advances the loop (work before the
-        # cut is persisted), unlike a failure.
-        _check_turn_outcome(self._result(TurnOutcome.TIMED_OUT, tool_calls=2), 2)
+        with pytest.raises(RuntimeError, match="timed out"):
+            _check_turn_outcome(self._result(TurnOutcome.TIMED_OUT, tool_calls=2), 2)
 
     def test_completed_turn_advances(self):
         from openscientist.orchestrator.discovery import _check_turn_outcome
 
         _check_turn_outcome(self._result(TurnOutcome.COMPLETED), 1)
+
+
+class TestDiscoveryAttemptPolicy:
+    @staticmethod
+    def _result(outcome: TurnOutcome, tool_calls: int = 0):
+        from openscientist.agent.base import IterationResult
+
+        return IterationResult(
+            outcome=outcome,
+            output="",
+            tool_calls=tool_calls,
+            transcript=[],
+            error="boom" if outcome is TurnOutcome.FAILED else "",
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_attempt_is_persisted_then_accepted_retry(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+        from openscientist.transcript.variants import ToolCall, ToolResult
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+        timed_out = IterationResult(
+            outcome=TurnOutcome.TIMED_OUT,
+            output="",
+            tool_calls=2,
+            transcript=[],
+            error="900 second timeout",
+        )
+        accepted = IterationResult(
+            outcome=TurnOutcome.COMPLETED,
+            output="Prepared a validated result.",
+            tool_calls=1,
+            transcript=[
+                ToolCall(id="c1", tool="execute_code", arguments={"code": "pass"}),
+                ToolResult(call_id="c1", output="ok", success=True),
+            ],
+        )
+        run = AsyncMock(side_effect=[timed_out, accepted])
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(discovery, "_run_cost_tracked_iteration", new=run),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+        ):
+            result = await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        assert result is accepted
+        first = json.loads((provenance / "iter1_attempt1_status.json").read_text())
+        second = json.loads((provenance / "iter1_attempt2_status.json").read_text())
+        assert (first["state"], first["outcome"]) == ("retrying", "timed_out")
+        assert second["state"] == "accepted"
+        assert (provenance / "iter1_transcript.json").is_file()
+        assert run.call_args_list[1].kwargs["reset_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_empty_attempts_stop_without_canonical_iteration(self, tmp_path: Path):
+        from openscientist.agent.base import IterationResult
+        from openscientist.knowledge_state import KnowledgeState
+        from openscientist.orchestrator import discovery
+
+        job_id = str(uuid4())
+        ks = KnowledgeState(job_id, "Question?", 2)
+        empty = IterationResult(
+            outcome=TurnOutcome.COMPLETED,
+            output="",
+            tool_calls=0,
+            transcript=[],
+        )
+        provenance = tmp_path / "provenance"
+        with (
+            patch.object(
+                discovery,
+                "_run_cost_tracked_iteration",
+                new=AsyncMock(side_effect=[empty, empty, empty]),
+            ),
+            patch.object(
+                discovery.KnowledgeState,
+                "load_from_database_sync",
+                return_value=ks,
+            ),
+            pytest.raises(RuntimeError, match="failed after 3 attempt"),
+        ):
+            await discovery._run_discovery_attempts(
+                executor=MagicMock(),
+                job_id=job_id,
+                provenance_dir=provenance,
+                iteration=1,
+                prompt="Investigate",
+                reset_session=False,
+            )
+
+        assert not (provenance / "iter1_transcript.json").exists()
+        final = json.loads((provenance / "iter1_attempt3_status.json").read_text())
+        assert final["state"] == "failed"
 
     def test_append_log_records_timeout(self, tmp_path: Path):
         from openscientist.orchestrator.discovery import _append_log
