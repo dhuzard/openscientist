@@ -66,6 +66,7 @@ def _submit_job(
     user_can_start_jobs: bool,
     session_id: str,
     research_question: ui.textarea,
+    description: ui.textarea,
     max_iterations: ui.number,
     use_hypotheses: ui.switch,
     coinvestigate_mode: ui.switch,
@@ -81,6 +82,7 @@ def _submit_job(
     if not question:
         ui.notify("Please enter a research question", type="negative")
         return
+    description_text = str(description.value or "").strip() or None
 
     current_user_id = get_current_user_id()
     if not current_user_id:
@@ -121,6 +123,7 @@ def _submit_job(
             auto_start=True,
             investigation_mode=mode,
             owner_id=current_user_id,
+            description=description_text,
             evidence_plan=evidence_plan if evidence_librarian_enabled else None,
         )
         ui.notify(f"Job {job_id} created and started!", type="positive")
@@ -183,6 +186,21 @@ def new_job_page() -> None:
             placeholder="e.g., What metabolic pathways are affected by hypothermia?",
             validation={"Too short": lambda value: len(value) >= 10},
         ).classes("w-full")
+
+        description = (
+            ui.textarea(
+                label="Study Context / Description (Optional)",
+                placeholder=(
+                    "Add study design, file roles, experimental units, primary outcomes, "
+                    "constraints, and required deliverables."
+                ),
+            )
+            .props("autogrow")
+            .classes("w-full")
+        )
+        ui.label(
+            "This context is included in every analysis iteration and in the final report."
+        ).classes("text-caption text-grey-6")
 
         ui.upload(
             label="Upload Data Files (Optional - Tabular, Structures, Sequences, Images)",
@@ -346,6 +364,7 @@ def new_job_page() -> None:
                 user_can_start_jobs=user_can_start_jobs,
                 session_id=session_id,
                 research_question=research_question,
+                description=description,
                 max_iterations=max_iterations,
                 use_hypotheses=use_hypotheses,
                 coinvestigate_mode=coinvestigate_mode,

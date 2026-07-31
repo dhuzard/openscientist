@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Job Brief"
+  short_description: "Draft rigorous scientific job starting briefs"
+  default_prompt: "Use $create-job-brief to turn my study objective and uploaded files into a rigorous OpenScientist job brief."
