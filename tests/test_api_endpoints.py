@@ -1010,6 +1010,40 @@ class TestJobEndpoints:
         mock_job_manager.cancel_job.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancel_report_generation_job(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+    ):
+        """Abort remains available while an early/final report is running."""
+        _, full_key = test_api_key_db
+        reporting_job = Job(
+            owner_id=test_user_db.id,
+            research_question="Reporting Job",
+            status="generating_report",
+        )
+        db_session.add(reporting_job)
+        await db_session.commit()
+        await db_session.refresh(reporting_job)
+
+        app = _build_authenticated_app(db_session, test_user_db)
+        manager = MagicMock()
+
+        with patch("openscientist.api.endpoints.jobs._get_job_manager", return_value=manager):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.post(
+                    f"/api/v1/jobs/{reporting_job.id}/cancel",
+                    headers={"Authorization": f"Bearer {full_key}"},
+                )
+
+        assert response.status_code == 204
+        manager.cancel_job.assert_called_once_with(str(reporting_job.id))
+
+    @pytest.mark.asyncio
     async def test_cancel_job_does_not_directly_mutate_database_status(
         self,
         db_session: AsyncSession,

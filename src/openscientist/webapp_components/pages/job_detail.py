@@ -1146,7 +1146,31 @@ def _confirm_stop_and_report(context: _JobDetailContext) -> None:
                     "Discovery stopped. Generating the report from saved work.",
                 )
 
-            ui.button("Stop and report", on_click=confirm).props("color=negative")
+            ui.button("Stop and Report", on_click=confirm).props("color=warning")
+    dialog.open()
+
+
+def _confirm_abort_job(context: _JobDetailContext) -> None:
+    """Confirm immediate termination without starting report generation."""
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Abort this job?").classes("text-lg font-bold text-red-800")
+        ui.label(
+            "No report will be generated. The active agent and its container will be stopped "
+            "immediately. Saved transcripts, findings, and artifacts will remain available, "
+            "and the cancelled job can be restarted later."
+        ).classes("text-sm text-gray-600 max-w-lg")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Keep running", on_click=dialog.close).props("flat color=grey")
+
+            def confirm() -> None:
+                dialog.close()
+                _run_owner_job_action(
+                    context,
+                    "cancel_job",
+                    "Job aborted. Agent execution stopped; no report will be generated.",
+                )
+
+            ui.button("Abort", icon="cancel", on_click=confirm).props("color=negative")
     dialog.open()
 
 
@@ -1269,6 +1293,15 @@ def _available_run_controls(context: _JobDetailContext) -> set[str]:
         JobStatus.PAUSED,
     }:
         controls.add("stop_and_report")
+    if status in {
+        JobStatus.PENDING,
+        JobStatus.QUEUED,
+        JobStatus.RUNNING,
+        JobStatus.AWAITING_FEEDBACK,
+        JobStatus.PAUSED,
+        JobStatus.GENERATING_REPORT,
+    }:
+        controls.add("abort")
     return controls
 
 
@@ -1321,10 +1354,16 @@ def _render_job_runtime_controls(context: _JobDetailContext) -> None:
                     ).props("color=primary outline")
                 if "stop_and_report" in controls:
                     ui.button(
-                        "Stop and report",
+                        "Stop and Report",
                         icon="stop_circle",
                         on_click=lambda: _confirm_stop_and_report(context),
-                    ).props("color=negative outline")
+                    ).props("color=warning outline")
+                if "abort" in controls:
+                    ui.button(
+                        "Abort",
+                        icon="cancel",
+                        on_click=lambda: _confirm_abort_job(context),
+                    ).props("color=negative")
 
 
 def _render_timeline_content_for_context(context: _JobDetailContext) -> None:

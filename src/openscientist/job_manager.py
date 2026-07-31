@@ -924,8 +924,13 @@ class JobManager:
             # control waits and then stops that exact container.
             with self._lock:
                 current = self.get_job(job_id)
+                # Abort wins over both discovery and report-only launches. This
+                # closes the narrow transition window after discovery stops but
+                # before the early-report container starts.
+                if current is not None and current.status == JobStatus.CANCELLED:
+                    raise _ControlledJobStopError
                 if run_mode == "discovery" and current is not None:
-                    if current.status in {JobStatus.PAUSED, JobStatus.CANCELLED}:
+                    if current.status == JobStatus.PAUSED:
                         raise _ControlledJobStopError
                     if current.status == JobStatus.GENERATING_REPORT:
                         raise _EarlyReportTransitionError
@@ -1032,7 +1037,7 @@ class JobManager:
 
     def cancel_job(self, job_id: str) -> None:
         """
-        Cancel a pending, running, or queued job.
+        Abort a pending, queued, paused, running, feedback-waiting, or reporting job.
 
         Args:
             job_id: Job ID
@@ -1050,9 +1055,11 @@ class JobManager:
             JobStatus.QUEUED,
             JobStatus.PAUSED,
             JobStatus.AWAITING_FEEDBACK,
+            JobStatus.GENERATING_REPORT,
         ]:
             raise ValueError(
-                f"Job {job_id} is not pending, running, queued, paused, or awaiting feedback"
+                f"Job {job_id} is not pending, queued, running, paused, awaiting feedback, "
+                "or generating a report"
             )
 
         # Update status with reason
@@ -1068,7 +1075,11 @@ class JobManager:
 
         # Send SIGTERM to the agent container immediately so it doesn't
         # keep burning resources until the polling loop notices the DB change.
-        if job_info.status in [JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK]:
+        if job_info.status in [
+            JobStatus.RUNNING,
+            JobStatus.AWAITING_FEEDBACK,
+            JobStatus.GENERATING_REPORT,
+        ]:
             try:
                 from openscientist.job_container import JobContainerRunner
 

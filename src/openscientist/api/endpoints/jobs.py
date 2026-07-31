@@ -587,7 +587,7 @@ async def cancel_job(
     session: AsyncSession = SESSION_DEP,
 ) -> None:
     """
-    Cancel a pending, queued, running, paused, or feedback-waiting job.
+    Abort a pending, queued, running, paused, feedback-waiting, or reporting job.
 
     Active agent containers are stopped immediately.
     """
@@ -606,7 +606,14 @@ async def cancel_job(
             detail="Only the job owner can cancel a job",
         )
 
-    if job.status not in ["pending", "running", "queued", "paused", "awaiting_feedback"]:
+    if job.status not in [
+        "pending",
+        "running",
+        "queued",
+        "paused",
+        "awaiting_feedback",
+        "generating_report",
+    ]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot cancel job with status '{job.status}'",

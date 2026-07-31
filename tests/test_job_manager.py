@@ -638,6 +638,33 @@ class TestJobManagerCancellationConcurrency:
         ):
             assert manager._get_active_job_count() == 1
 
+    def test_cancel_during_report_generation_stops_container(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        reporting_job = JobInfo(
+            job_id=job_id,
+            research_question="Q?",
+            status=JobStatus.GENERATING_REPORT,
+            created_at="2026-02-01T00:00:00+00:00",
+        )
+        runner = MagicMock()
+
+        with (
+            patch.object(manager, "get_job", return_value=reporting_job),
+            patch.object(manager, "_update_job_status") as update_status,
+            patch.object(manager, "_start_next_queued_job"),
+            patch("openscientist.job_container.JobContainerRunner", return_value=runner),
+        ):
+            manager.cancel_job(job_id)
+
+        update_status.assert_called_once_with(
+            job_id,
+            JobStatus.CANCELLED,
+            cancellation_reason="Cancelled by user",
+        )
+        runner.stop.assert_called_once_with(job_id)
+
 
 class TestJobManagerRestart:
     """Failed and cancelled jobs can be rescheduled without losing progress."""
@@ -897,6 +924,28 @@ class TestJobManagerRunControls:
 
         assert job_id not in manager._running_jobs
         runner.cleanup.assert_called_once()
+        start_next.assert_called_once()
+
+    def test_abort_wins_before_report_only_container_launch(self, tmp_path):
+        manager = _new_manager(tmp_path)
+        job_id = str(uuid4())
+        manager._running_jobs[job_id] = MagicMock()
+        runner = MagicMock()
+
+        with (
+            patch.object(
+                manager,
+                "get_job",
+                return_value=self._job(job_id, JobStatus.CANCELLED),
+            ),
+            patch.object(manager, "_start_next_queued_job") as start_next,
+            patch("openscientist.job_container.JobContainerRunner", return_value=runner),
+        ):
+            manager._run_job_in_container(job_id, run_mode="report_only")
+
+        runner.launch.assert_not_called()
+        runner.cleanup.assert_called_once_with(job_id, log_dir=tmp_path / job_id)
+        assert job_id not in manager._running_jobs
         start_next.assert_called_once()
 
 

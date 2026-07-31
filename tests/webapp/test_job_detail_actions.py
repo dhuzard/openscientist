@@ -309,10 +309,16 @@ def test_restart_action_blocks_when_edit_permission_was_revoked() -> None:
     [
         (
             JobStatus.RUNNING,
-            {"add_idea", "pause", "reduce_iterations", "stop_and_report"},
+            {"add_idea", "pause", "reduce_iterations", "stop_and_report", "abort"},
         ),
-        (JobStatus.AWAITING_FEEDBACK, {"pause", "reduce_iterations", "stop_and_report"}),
-        (JobStatus.PAUSED, {"resume", "reduce_iterations", "stop_and_report"}),
+        (
+            JobStatus.AWAITING_FEEDBACK,
+            {"pause", "reduce_iterations", "stop_and_report", "abort"},
+        ),
+        (JobStatus.PAUSED, {"resume", "reduce_iterations", "stop_and_report", "abort"}),
+        (JobStatus.GENERATING_REPORT, {"abort"}),
+        (JobStatus.PENDING, {"reduce_iterations", "abort"}),
+        (JobStatus.QUEUED, {"reduce_iterations", "abort"}),
         (JobStatus.COMPLETED, set()),
     ],
 )
@@ -341,6 +347,18 @@ def test_shared_user_cannot_see_run_controls() -> None:
         ),
     )
     assert job_detail._available_run_controls(context) == set()  # type: ignore[arg-type]
+
+
+def test_runtime_controls_render_distinct_abort_and_report_actions() -> None:
+    source = inspect.getsource(job_detail._render_job_runtime_controls)
+    abort_dialog = inspect.getsource(job_detail._confirm_abort_job)
+    report_dialog = inspect.getsource(job_detail._confirm_stop_and_report)
+
+    assert '"Abort"' in source
+    assert '"Stop and Report"' in source
+    assert '"cancel_job"' in abort_dialog
+    assert "No report will be generated" in abort_dialog
+    assert '"stop_and_generate_report"' in report_dialog
 
 
 def test_add_idea_hidden_when_current_iteration_is_final() -> None:
