@@ -34,6 +34,10 @@ from openscientist.settings import ProviderSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
+#: Served when OPENSCIENTIST_MODEL is unset. Ollama can hold several models and
+#: selects one per request, so a default keeps it usable with no configuration.
+_DEFAULT_MODEL = "gpt-oss:20b"
+
 
 def _ollama_http_base(base_url: str) -> str:
     """The Ollama HTTP root from its OpenAI-compatible base URL.
@@ -90,7 +94,8 @@ class OllamaProvider(CodexCompatible):
     def container_env(
         cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
     ) -> dict[str, str]:
-        return {"OLLAMA_BASE_URL": provider.ollama_base_url, "OLLAMA_MODEL": provider.ollama_model}
+        # The model is forwarded generically as OPENSCIENTIST_MODEL.
+        return {"OLLAMA_BASE_URL": provider.ollama_base_url}
 
     def harness_env(self, *, proxy: str | None) -> dict[str, str]:
         if proxy:
@@ -135,9 +140,10 @@ class OllamaProvider(CodexCompatible):
         )
 
     def codex_model_name(self) -> str | None:
-        # Default to the configured Ollama model unless OPENSCIENTIST_MODEL is set.
-        s = get_settings().provider
-        return s.model or s.ollama_model
+        # Ollama holds several models and picks one per request, so a default
+        # here keeps it zero-config. It lives with the provider rather than as a
+        # second env var that OPENSCIENTIST_MODEL would silently override.
+        return get_settings().provider.model or _DEFAULT_MODEL
 
     def model_profile(self) -> ModelProfile:
         # A self-hosted window is whatever num_ctx the deployment allocates, so

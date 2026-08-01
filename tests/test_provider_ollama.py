@@ -15,14 +15,12 @@ from openscientist.providers.ollama import OllamaProvider
 def _settings(
     *,
     base_url: str = "http://localhost:11434/v1",
-    model_default: str = "gpt-oss:20b",
     model: str | None = None,
     model_context_tokens: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         provider=SimpleNamespace(
             ollama_base_url=base_url,
-            ollama_model=model_default,
             model=model,
             model_context_tokens=model_context_tokens,
         )
@@ -72,7 +70,7 @@ def test_config_overrides_are_keyless_responses_surface() -> None:
     assert mp["stream_idle_timeout_ms"] == 3600000
 
 
-def test_model_name_defaults_to_ollama_model() -> None:
+def test_model_name_falls_back_to_the_provider_default() -> None:
     with patch(
         "openscientist.providers.ollama.get_settings",
         return_value=_settings(model=None),

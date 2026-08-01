@@ -107,7 +107,6 @@ class ProviderSettings(BaseSettings):
     # Ollama's OpenAI-compatible Responses endpoint). Local and keyless, so
     # codex is told the provider needs no OpenAI auth.
     ollama_base_url: str = Field(default="http://localhost:11434/v1", alias="OLLAMA_BASE_URL")
-    ollama_model: str = Field(default="gpt-oss:20b", alias="OLLAMA_MODEL")
 
     # Model settings
     model: str | None = Field(default=None, alias="OPENSCIENTIST_MODEL")
