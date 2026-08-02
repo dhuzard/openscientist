@@ -109,10 +109,10 @@ class ProviderSettings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434/v1", alias="OLLAMA_BASE_URL")
 
     # vLLM (omp-driven, open-weight models served by a self-hosted vLLM server
-    # on its OpenAI-compatible wire). Auth is optional: only a server launched
-    # with --api-key needs VLLM_API_KEY.
+    # on its OpenAI-compatible wire). The served model is named by
+    # OPENSCIENTIST_MODEL. Auth is optional: only a server launched with
+    # --api-key needs VLLM_API_KEY.
     vllm_base_url: str = Field(default="http://localhost:8000/v1", alias="VLLM_BASE_URL")
-    vllm_model: str = Field(default="", alias="VLLM_MODEL")
     vllm_api_key: str | None = Field(default=None, alias="VLLM_API_KEY")
 
     # Model settings

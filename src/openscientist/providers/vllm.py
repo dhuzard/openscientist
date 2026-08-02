@@ -2,7 +2,7 @@
 
 Routes an agent at a self-hosted vLLM server (default
 ``http://localhost:8000/v1``). A vLLM server serves exactly the model it was
-launched with, so ``VLLM_MODEL`` (or ``OPENSCIENTIST_MODEL``) must name it.
+launched with, so ``OPENSCIENTIST_MODEL`` must name it.
 Auth is optional: a server started with ``--api-key`` needs ``VLLM_API_KEY``,
 otherwise the provider is keyless like Ollama.
 
@@ -89,7 +89,6 @@ class VllmProvider(OpenAiWireCompatible):
         return env_from_pairs(
             [
                 ("VLLM_BASE_URL", provider.vllm_base_url),
-                ("VLLM_MODEL", provider.vllm_model),
                 ("VLLM_API_KEY", provider.vllm_api_key),
             ]
         )
@@ -109,9 +108,9 @@ class VllmProvider(OpenAiWireCompatible):
     def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         # The base URL has a usable default and the key is optional, but a vLLM
         # server has no default served model, so the operator must name it.
-        if provider.model or provider.vllm_model:
+        if provider.model:
             return []
-        return ["VLLM_MODEL (or OPENSCIENTIST_MODEL) must name the model the vLLM server serves."]
+        return ["OPENSCIENTIST_MODEL must name the model the vLLM server serves."]
 
     def get_cost_info(self, lookback_hours: int = 24) -> CostInfo:
         # Self-hosted inference has no per-call API cost. Report zero spend so
@@ -151,8 +150,7 @@ class VllmProvider(OpenAiWireCompatible):
         return s.vllm_base_url, s.vllm_api_key
 
     def effective_model_name(self) -> str | None:
-        s = get_settings().provider
-        return s.model or s.vllm_model or None
+        return get_settings().provider.model or None
 
     def model_profile(self) -> ModelProfile:
         # A self-hosted window is whatever --max-model-len the server was

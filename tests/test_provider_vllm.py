@@ -28,15 +28,13 @@ _PROBE_PATH = "openscientist.providers.vllm._probe_vllm_context_tokens"
 def _settings(
     *,
     base_url: str = "http://localhost:8000/v1",
-    model_default: str = "Qwen/Qwen3-32B",
-    model: str | None = None,
+    model: str | None = "Qwen/Qwen3-32B",
     api_key: str | None = None,
     model_context_tokens: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         provider=SimpleNamespace(
             vllm_base_url=base_url,
-            vllm_model=model_default,
             vllm_api_key=api_key,
             model=model,
             model_context_tokens=model_context_tokens,
@@ -76,14 +74,9 @@ def test_identity() -> None:
 # --- model name -----------------------------------------------------------------
 
 
-def test_model_name_defaults_to_vllm_model() -> None:
+def test_model_name_comes_from_openscientist_model() -> None:
     with _vllm() as p:
         assert p.effective_model_name() == "Qwen/Qwen3-32B"
-
-
-def test_model_override_wins() -> None:
-    with _vllm(_settings(model="meta-llama/Llama-3.3-70B-Instruct")) as p:
-        assert p.effective_model_name() == "meta-llama/Llama-3.3-70B-Instruct"
 
 
 # --- auth surface (keyless / keyed) ---------------------------------------------
@@ -123,8 +116,10 @@ def test_proxy_env_overrides_replace_the_real_api_key() -> None:
 
 
 def test_container_env_omits_api_key_when_unset() -> None:
+    # The model is absent on purpose: OPENSCIENTIST_MODEL is forwarded by the
+    # generic settings path, so repeating it per provider would be duplication.
     env = VllmProvider.container_env(_settings().provider)
-    assert env == {"VLLM_BASE_URL": "http://localhost:8000/v1", "VLLM_MODEL": "Qwen/Qwen3-32B"}
+    assert env == {"VLLM_BASE_URL": "http://localhost:8000/v1"}
 
 
 def test_container_env_carries_api_key_when_set() -> None:
@@ -199,9 +194,9 @@ def test_harness_env_points_at_proxy_when_active() -> None:
 
 
 def test_required_config_errors_demand_a_model() -> None:
-    errors = VllmProvider.required_config_errors(_settings(model_default="").provider)
+    errors = VllmProvider.required_config_errors(_settings(model=None).provider)
     assert len(errors) == 1
-    assert "VLLM_MODEL" in errors[0]
+    assert "OPENSCIENTIST_MODEL" in errors[0]
 
 
 def test_missing_model_surfaces_as_a_config_error(
@@ -213,7 +208,6 @@ def test_missing_model_surfaces_as_a_config_error(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENSCIENTIST_PROVIDER", "vllm")
-    monkeypatch.delenv("VLLM_MODEL", raising=False)
     monkeypatch.delenv("OPENSCIENTIST_MODEL", raising=False)
     clear_settings_cache()
     try:
@@ -222,23 +216,18 @@ def test_missing_model_surfaces_as_a_config_error(
         clear_settings_cache()
     assert configured is False
     assert name == "vllm"
-    assert any("VLLM_MODEL" in e for e in errors)
-
-
-def test_validate_required_config_accepts_vllm_model() -> None:
-    with _vllm() as p:
-        assert p.validate_required_config() == []
+    assert any("OPENSCIENTIST_MODEL" in e for e in errors)
 
 
 def test_validate_required_config_accepts_openscientist_model() -> None:
-    with _vllm(_settings(model_default="", model="Qwen/Qwen3-32B")) as p:
+    with _vllm(_settings(model="Qwen/Qwen3-32B")) as p:
         assert p.validate_required_config() == []
 
 
 def test_construction_fails_without_a_model() -> None:
     with (
-        patch(_SETTINGS_PATH, return_value=_settings(model_default="")),
-        pytest.raises(ValueError, match="VLLM_MODEL"),
+        patch(_SETTINGS_PATH, return_value=_settings(model=None)),
+        pytest.raises(ValueError, match="OPENSCIENTIST_MODEL"),
     ):
         VllmProvider()
 
@@ -256,7 +245,7 @@ def test_get_provider_selects_vllm(monkeypatch: pytest.MonkeyPatch) -> None:
     from openscientist.settings import clear_settings_cache
 
     monkeypatch.setenv("OPENSCIENTIST_PROVIDER", "vllm")
-    monkeypatch.setenv("VLLM_MODEL", "Qwen/Qwen3-32B")
+    monkeypatch.setenv("OPENSCIENTIST_MODEL", "Qwen/Qwen3-32B")
     clear_settings_cache()
     try:
         assert isinstance(get_provider(), VllmProvider)

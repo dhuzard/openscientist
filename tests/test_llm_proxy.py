@@ -44,7 +44,7 @@ def active_provider(monkeypatch):
         "ANTHROPIC_FOUNDRY_API_KEY",
         "OLLAMA_BASE_URL",
         "VLLM_BASE_URL",
-        "VLLM_MODEL",
+        "OPENSCIENTIST_MODEL",
         "VLLM_API_KEY",
         "CODEX_AUTH_HOST_PATH",
         "AWS_REGION",
@@ -256,7 +256,7 @@ class TestCodexUpstream:
         provider = active_provider(
             OPENSCIENTIST_PROVIDER="vllm",
             VLLM_BASE_URL="http://vllm:8000/v1",
-            VLLM_MODEL="Qwen/Qwen3-32B",
+            OPENSCIENTIST_MODEL="Qwen/Qwen3-32B",
         )
         assert provider.llm_upstream() == LlmUpstream("http://vllm:8000/v1", {})
 
@@ -264,7 +264,7 @@ class TestCodexUpstream:
         provider = active_provider(
             OPENSCIENTIST_PROVIDER="vllm",
             VLLM_BASE_URL="http://vllm:8000/v1",
-            VLLM_MODEL="Qwen/Qwen3-32B",
+            OPENSCIENTIST_MODEL="Qwen/Qwen3-32B",
             VLLM_API_KEY="vk-real",
         )
         assert provider.llm_upstream() == LlmUpstream(
@@ -315,7 +315,7 @@ class TestCodexProxiedEnv:
         provider = active_provider(
             OPENSCIENTIST_PROVIDER="vllm",
             VLLM_BASE_URL="http://vllm:8000/v1",
-            VLLM_MODEL="Qwen/Qwen3-32B",
+            OPENSCIENTIST_MODEL="Qwen/Qwen3-32B",
         )
         env = provider.proxied_container_env(
             proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
@@ -328,7 +328,7 @@ class TestCodexProxiedEnv:
         provider = active_provider(
             OPENSCIENTIST_PROVIDER="vllm",
             VLLM_BASE_URL="http://vllm:8000/v1",
-            VLLM_MODEL="Qwen/Qwen3-32B",
+            OPENSCIENTIST_MODEL="Qwen/Qwen3-32B",
             VLLM_API_KEY="vk-real",
         )
         env = provider.proxied_container_env(
@@ -625,7 +625,7 @@ class TestAirgapPosture:
         assert p.airgap_egress().mode is AirgapEgress.PROXY
 
     def test_vllm_proxies(self, active_provider):
-        p = active_provider(OPENSCIENTIST_PROVIDER="vllm", VLLM_MODEL="Qwen/Qwen3-32B")
+        p = active_provider(OPENSCIENTIST_PROVIDER="vllm", OPENSCIENTIST_MODEL="Qwen/Qwen3-32B")
         assert p.airgap_egress().mode is AirgapEgress.PROXY
 
     def test_bedrock_bearer_proxies(self, active_provider):
@@ -654,10 +654,10 @@ class TestAirgapPosture:
             {"OPENSCIENTIST_PROVIDER": "anthropic", "CLAUDE_CODE_OAUTH_TOKEN": "o"},
             {"OPENSCIENTIST_PROVIDER": "openai", "OPENAI_API_KEY": "sk"},
             {"OPENSCIENTIST_PROVIDER": "ollama"},
-            {"OPENSCIENTIST_PROVIDER": "vllm", "VLLM_MODEL": "Qwen/Qwen3-32B"},
+            {"OPENSCIENTIST_PROVIDER": "vllm", "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B"},
             {
                 "OPENSCIENTIST_PROVIDER": "vllm",
-                "VLLM_MODEL": "Qwen/Qwen3-32B",
+                "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B",
                 "VLLM_API_KEY": "vk",
             },
             {
@@ -757,10 +757,10 @@ class TestHarnessRouting:
             # Self-hosted providers route themselves rather than inheriting the
             # OpenAI default, so their credential wiring is bespoke and is the
             # class most likely to omit one.
-            {"OPENSCIENTIST_PROVIDER": "vllm", "VLLM_MODEL": "Qwen/Qwen3-32B"},
+            {"OPENSCIENTIST_PROVIDER": "vllm", "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B"},
             {
                 "OPENSCIENTIST_PROVIDER": "vllm",
-                "VLLM_MODEL": "Qwen/Qwen3-32B",
+                "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B",
                 "VLLM_API_KEY": "vk",
             },
         ],
