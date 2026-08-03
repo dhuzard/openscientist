@@ -55,6 +55,7 @@ def test_registry_maps_known_ids() -> None:
         "azure-openai",
         "ollama",
         "vllm",
+        "llamacpp",
     }
 
 

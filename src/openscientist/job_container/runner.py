@@ -169,10 +169,14 @@ class JobContainerRunner:
             JobContainerRunner._agent_runtime_settings(settings)
         )
         job_mount = f"{AGENT_APP_DIR}/jobs/{job_id}"
-        provider_env = get_provider().proxied_container_env(
+        provider = get_provider()
+        provider_env = provider.proxied_container_env(
             proxy_base_url=container_proxy_base_url(),
             placeholder=make_job_placeholder(settings.secret_key, job_id),
         )
+        # Resolve a self-hosted model's window app-side and pass it in, since the
+        # proxied container cannot probe a root path like llama.cpp's /props.
+        provider_env.update(provider.prelaunch_model_context_env())
         env = JobContainerRunner._build_container_environment(
             settings,
             job_id=job_id,

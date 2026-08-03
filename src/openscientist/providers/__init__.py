@@ -27,6 +27,7 @@ _PROVIDER_CLASS_PATHS: dict[str, tuple[str, str]] = {
     "azure-openai": ("openscientist.providers.azure_openai", "AzureOpenAIProvider"),
     "ollama": ("openscientist.providers.ollama", "OllamaProvider"),
     "vllm": ("openscientist.providers.vllm", "VllmProvider"),
+    "llamacpp": ("openscientist.providers.llamacpp", "LlamaCppProvider"),
 }
 
 
@@ -59,8 +60,9 @@ def get_provider() -> Provider:
 
     Returns:
         Provider instance. Anthropic/CBORG/Vertex/Bedrock/Foundry are
-        ClaudeCompatible, OpenAI/Azure-OpenAI/Ollama are CodexCompatible, and vLLM is
-        OpenAiWireCompatible (omp only, not a Codex backend).
+        ClaudeCompatible, OpenAI/Azure-OpenAI/Ollama are CodexCompatible, and vLLM
+        and llama.cpp are self-hosted OpenAiWireCompatible (omp only, not Codex
+        backends).
 
     Raises:
         ValueError: If provider is unknown or misconfigured
@@ -68,8 +70,8 @@ def get_provider() -> Provider:
     Environment:
         OPENSCIENTIST_PROVIDER: Provider name ("anthropic", "cborg", "vertex",
                                "bedrock", "foundry", "openai", "azure-openai",
-                               "ollama", "vllm"). Required: an unset value raises at
-                               startup.
+                               "ollama", "vllm", "llamacpp"). Required: an unset
+                               value raises at startup.
     """
     return provider_class(get_settings().provider.provider_id)()
 

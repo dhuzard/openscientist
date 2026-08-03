@@ -479,6 +479,35 @@ class TestProviderContainerEnvVars:
         assert "OPENSCIENTIST_MODEL" not in env
         assert "VLLM_API_KEY" not in env
 
+    def test_llamacpp_vars_passed_for_provider(self):
+        settings = ProviderSettings(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            LLAMACPP_BASE_URL="http://host.docker.internal:8080/v1",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+            LLAMACPP_API_KEY="lk-real",
+        )
+
+        env = settings.get_container_env_vars()
+
+        assert env["OPENSCIENTIST_PROVIDER"] == "llamacpp"
+        assert env["LLAMACPP_BASE_URL"] == "http://host.docker.internal:8080/v1"
+        assert env["OPENSCIENTIST_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+        assert env["LLAMACPP_API_KEY"] == "lk-real"
+
+    def test_llamacpp_optional_vars_default_or_are_omitted(self, monkeypatch, tmp_path):
+        # The dev .env reaches tests via both os.environ (database.engine calls
+        # load_dotenv() at import) and the settings env_file. Neutralize both.
+        monkeypatch.chdir(tmp_path)
+        for var in ("LLAMACPP_BASE_URL", "OPENSCIENTIST_MODEL", "LLAMACPP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        settings = ProviderSettings(OPENSCIENTIST_PROVIDER="llamacpp")
+        env = settings.get_container_env_vars()
+        assert env["LLAMACPP_BASE_URL"] == "http://localhost:8080/v1"
+        # There is no default served model and no default key, so neither is
+        # invented for the container.
+        assert "OPENSCIENTIST_MODEL" not in env
+        assert "LLAMACPP_API_KEY" not in env
+
     def test_optional_model_and_token_env_vars_are_included(self):
         settings = ProviderSettings(
             OPENSCIENTIST_PROVIDER="anthropic",

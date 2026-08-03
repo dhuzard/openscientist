@@ -46,6 +46,8 @@ def active_provider(monkeypatch):
         "VLLM_BASE_URL",
         "OPENSCIENTIST_MODEL",
         "VLLM_API_KEY",
+        "LLAMACPP_BASE_URL",
+        "LLAMACPP_API_KEY",
         "CODEX_AUTH_HOST_PATH",
         "AWS_REGION",
         "AWS_ACCESS_KEY_ID",
@@ -271,6 +273,25 @@ class TestCodexUpstream:
             "http://vllm:8000/v1", {"authorization": "Bearer vk-real"}
         )
 
+    def test_llamacpp_upstream_is_keyless_without_api_key(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            LLAMACPP_BASE_URL="http://llamacpp:8080/v1",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+        )
+        assert provider.llm_upstream() == LlmUpstream("http://llamacpp:8080/v1", {})
+
+    def test_llamacpp_upstream_injects_bearer_when_keyed(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            LLAMACPP_BASE_URL="http://llamacpp:8080/v1",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+            LLAMACPP_API_KEY="lk-real",
+        )
+        assert provider.llm_upstream() == LlmUpstream(
+            "http://llamacpp:8080/v1", {"authorization": "Bearer lk-real"}
+        )
+
 
 class TestCodexProxiedEnv:
     """Codex env redirect: placeholder key plus the proxy URL for config.toml."""
@@ -337,6 +358,33 @@ class TestCodexProxiedEnv:
         assert env["OPENAI_API_KEY"] == "job-1.tok"
         assert env["VLLM_API_KEY"] == "job-1.tok"
         assert "vk-real" not in env.values()
+
+    def test_llamacpp_redirects(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            LLAMACPP_BASE_URL="http://llamacpp:8080/v1",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "job-1.tok"
+        assert env["OPENSCIENTIST_LLM_PROXY_URL"] == "http://openscientist:8081"
+        assert "LLAMACPP_API_KEY" not in env
+
+    def test_llamacpp_redirects_and_strips_the_real_key(self, active_provider):
+        provider = active_provider(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            LLAMACPP_BASE_URL="http://llamacpp:8080/v1",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+            LLAMACPP_API_KEY="lk-real",
+        )
+        env = provider.proxied_container_env(
+            proxy_base_url="http://openscientist:8081", placeholder="job-1.tok"
+        )
+        assert env["OPENAI_API_KEY"] == "job-1.tok"
+        assert env["LLAMACPP_API_KEY"] == "job-1.tok"
+        assert "lk-real" not in env.values()
 
 
 class TestCodexConfigRedirect:
@@ -628,6 +676,13 @@ class TestAirgapPosture:
         p = active_provider(OPENSCIENTIST_PROVIDER="vllm", OPENSCIENTIST_MODEL="Qwen/Qwen3-32B")
         assert p.airgap_egress().mode is AirgapEgress.PROXY
 
+    def test_llamacpp_proxies(self, active_provider):
+        p = active_provider(
+            OPENSCIENTIST_PROVIDER="llamacpp",
+            OPENSCIENTIST_MODEL="meta-llama/Llama-3.1-8B-Instruct",
+        )
+        assert p.airgap_egress().mode is AirgapEgress.PROXY
+
     def test_bedrock_bearer_proxies(self, active_provider):
         p = active_provider(
             OPENSCIENTIST_PROVIDER="bedrock",
@@ -659,6 +714,12 @@ class TestAirgapPosture:
                 "OPENSCIENTIST_PROVIDER": "vllm",
                 "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B",
                 "VLLM_API_KEY": "vk",
+            },
+            {"OPENSCIENTIST_PROVIDER": "llamacpp", "OPENSCIENTIST_MODEL": "llama-3.1-8b"},
+            {
+                "OPENSCIENTIST_PROVIDER": "llamacpp",
+                "OPENSCIENTIST_MODEL": "llama-3.1-8b",
+                "LLAMACPP_API_KEY": "lk",
             },
             {
                 "OPENSCIENTIST_PROVIDER": "bedrock",
@@ -762,6 +823,12 @@ class TestHarnessRouting:
                 "OPENSCIENTIST_PROVIDER": "vllm",
                 "OPENSCIENTIST_MODEL": "Qwen/Qwen3-32B",
                 "VLLM_API_KEY": "vk",
+            },
+            {"OPENSCIENTIST_PROVIDER": "llamacpp", "OPENSCIENTIST_MODEL": "llama-3.1-8b"},
+            {
+                "OPENSCIENTIST_PROVIDER": "llamacpp",
+                "OPENSCIENTIST_MODEL": "llama-3.1-8b",
+                "LLAMACPP_API_KEY": "lk",
             },
         ],
     )

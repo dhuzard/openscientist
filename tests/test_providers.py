@@ -130,6 +130,8 @@ class TestAgentBackendForProvider:
         assert backend_for_provider_id("ollama") is AgentBackend.CODEX
         # vLLM is OpenAI-wire but not a Codex backend, so omp is its only harness.
         assert backend_for_provider_id("vllm") is AgentBackend.OMP
+        # llama.cpp is likewise OpenAI-wire but not a Codex backend.
+        assert backend_for_provider_id("llamacpp") is AgentBackend.OMP
 
     def test_claude_compatible_providers_map_to_claude_code(self):
         from openscientist.agent.base import AgentBackend
@@ -532,3 +534,17 @@ class TestProviderEnvironmentSwitching:
             assert "CLAUDE_CODE_USE_FOUNDRY" not in os.environ
             if expects_bedrock_flag:
                 assert os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+
+
+def test_base_provider_does_not_resolve_context_window_app_side() -> None:
+    """Only self-hosted providers probe a live server, so the base (and hosted
+    providers) inject no window at launch."""
+    from types import SimpleNamespace
+
+    stub = StubProvider()
+    assert stub.probe_context_window() is None
+    with patch(
+        "openscientist.providers.base.get_settings",
+        return_value=SimpleNamespace(provider=SimpleNamespace(model_context_tokens=None)),
+    ):
+        assert stub.prelaunch_model_context_env() == {}

@@ -48,7 +48,7 @@ class ProviderSettings(BaseSettings):
         alias="OPENSCIENTIST_PROVIDER",
         description=(
             "Provider id (anthropic, cborg, vertex, bedrock, foundry, openai, "
-            "azure-openai, ollama, vllm). Required: there is no default provider."
+            "azure-openai, ollama, vllm, llamacpp). Required: there is no default provider."
         ),
     )
 
@@ -115,6 +115,13 @@ class ProviderSettings(BaseSettings):
     vllm_base_url: str = Field(default="http://localhost:8000/v1", alias="VLLM_BASE_URL")
     vllm_api_key: str | None = Field(default=None, alias="VLLM_API_KEY")
 
+    # llama.cpp (omp-driven, open-weight models served by a self-hosted
+    # llama-server on its OpenAI-compatible wire). The served model is named by
+    # OPENSCIENTIST_MODEL. Auth is optional: only a server launched with
+    # --api-key needs LLAMACPP_API_KEY.
+    llamacpp_base_url: str = Field(default="http://localhost:8080/v1", alias="LLAMACPP_BASE_URL")
+    llamacpp_api_key: str | None = Field(default=None, alias="LLAMACPP_API_KEY")
+
     # Model settings
     model: str | None = Field(default=None, alias="OPENSCIENTIST_MODEL")
     model_context_tokens: int | None = Field(
@@ -122,7 +129,7 @@ class ProviderSettings(BaseSettings):
         alias="OPENSCIENTIST_MODEL_CONTEXT_TOKENS",
         description=(
             "Override the model's usable context window (tokens) used to budget "
-            "prompt size. When unset, the window is probed (Ollama, vLLM) or "
+            "prompt size. When unset, the window is probed (Ollama, vLLM, llama.cpp) or "
             "looked up for known API models, falling back to a conservative default."
         ),
     )
@@ -223,7 +230,7 @@ class ProviderSettings(BaseSettings):
             raise ValueError(
                 "OPENSCIENTIST_PROVIDER is not set and there is no default "
                 "provider. Set OPENSCIENTIST_PROVIDER to one of: anthropic, "
-                "cborg, vertex, bedrock, foundry, openai, azure-openai, ollama, vllm."
+                "cborg, vertex, bedrock, foundry, openai, azure-openai, ollama, vllm, llamacpp."
             )
         return self
 
@@ -241,7 +248,7 @@ class ProviderSettings(BaseSettings):
         except ValueError:
             logger.warning(
                 "Provider config: Unknown provider %r. Valid options: anthropic, "
-                "cborg, vertex, bedrock, foundry, openai, azure-openai, ollama, vllm.",
+                "cborg, vertex, bedrock, foundry, openai, azure-openai, ollama, vllm, llamacpp.",
                 self.provider_id,
             )
             return self

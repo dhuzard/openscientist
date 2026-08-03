@@ -229,3 +229,58 @@ def test_model_profile_probe_failure_logs_warning_and_defaults(caplog) -> None:
         profile = OllamaProvider().model_profile()
     assert profile.context_window_tokens == models._DEFAULT_CONTEXT_TOKENS
     assert any("Could not probe" in r.message for r in caplog.records)
+
+
+# --- app-side window resolution (probe_context_window / prelaunch env) -----------
+
+
+def test_probe_context_window_hits_the_direct_server() -> None:
+    """App-side resolution probes ollama_base_url directly, not through the proxy."""
+    from openscientist.providers import ollama as ollama_mod
+
+    with (
+        patch("openscientist.providers.ollama.get_settings", return_value=_settings()),
+        patch.object(ollama_mod, "_probe_ollama_context_tokens", return_value=8192) as probe,
+    ):
+        window = OllamaProvider().probe_context_window()
+    assert window == 8192
+    probe.assert_called_once_with("http://localhost:11434/v1", "gpt-oss:20b")
+
+
+def test_prelaunch_env_injects_the_probed_window() -> None:
+    from openscientist.providers import ollama as ollama_mod
+
+    s = _settings()
+    with (
+        patch("openscientist.providers.ollama.get_settings", return_value=s),
+        patch("openscientist.providers.base.get_settings", return_value=s),
+        patch.object(ollama_mod, "_probe_ollama_context_tokens", return_value=40960),
+    ):
+        env = OllamaProvider().prelaunch_model_context_env()
+    assert env == {"OPENSCIENTIST_MODEL_CONTEXT_TOKENS": "40960"}
+
+
+def test_prelaunch_env_is_empty_when_operator_pinned_the_window() -> None:
+    from openscientist.providers import ollama as ollama_mod
+
+    s = _settings(model_context_tokens=1234)
+    with (
+        patch("openscientist.providers.base.get_settings", return_value=s),
+        patch.object(ollama_mod, "_probe_ollama_context_tokens") as probe,
+    ):
+        env = OllamaProvider().prelaunch_model_context_env()
+    assert env == {}
+    probe.assert_not_called()
+
+
+def test_prelaunch_env_is_empty_when_the_probe_fails() -> None:
+    from openscientist.providers import ollama as ollama_mod
+
+    s = _settings()
+    with (
+        patch("openscientist.providers.ollama.get_settings", return_value=s),
+        patch("openscientist.providers.base.get_settings", return_value=s),
+        patch.object(ollama_mod, "_probe_ollama_context_tokens", return_value=None),
+    ):
+        env = OllamaProvider().prelaunch_model_context_env()
+    assert env == {}

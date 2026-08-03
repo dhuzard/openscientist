@@ -20,21 +20,11 @@ host (for example ``http://host.docker.internal:8000/v1``).
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
 
-from openscientist.models import ModelProfile, probed_model_profile
-from openscientist.providers.base import (
-    LLM_PROXY_URL_ENV,
-    CostInfo,
-    LlmUpstream,
-    OmpModelCatalog,
-    OpenAiWireCompatible,
-    env_from_pairs,
-    self_hosted_omp_model_catalog,
-)
-from openscientist.settings import ProviderSettings, get_settings
+from openscientist.providers.base import SelfHostedOpenAiWire
+from openscientist.settings import ProviderSettings
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +63,7 @@ def _probe_vllm_context_tokens(base_url: str, model_id: str, api_key: str | None
     return window or None
 
 
-class VllmProvider(OpenAiWireCompatible):
+class VllmProvider(SelfHostedOpenAiWire):
     """Self-hosted vLLM server driven by omp (open-weight models)."""
 
     @property
@@ -81,101 +71,18 @@ class VllmProvider(OpenAiWireCompatible):
         return "vllm"
 
     display_name = "vLLM (self-hosted)"
+    server_name = "vLLM"
+    base_url_env = "VLLM_BASE_URL"
+    api_key_env = "VLLM_API_KEY"
 
     @classmethod
-    def container_env(
-        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
-    ) -> dict[str, str]:
-        return env_from_pairs(
-            [
-                ("VLLM_BASE_URL", provider.vllm_base_url),
-                ("VLLM_API_KEY", provider.vllm_api_key),
-            ]
-        )
-
-    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
-        if proxy:
-            return super().harness_env(proxy=proxy)
-        # Point an OpenAI-family harness straight at vLLM. A keyless server
-        # still needs a non-empty key because OpenAI clients require one.
-        s = get_settings().provider
-        return {"OPENAI_BASE_URL": s.vllm_base_url, "OPENAI_API_KEY": s.vllm_api_key or "vllm"}
-
-    def validate_required_config(self) -> list[str]:
-        return self.required_config_errors(get_settings().provider)
+    def _base_url_of(cls, provider: ProviderSettings) -> str:
+        return provider.vllm_base_url
 
     @classmethod
-    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
-        # The base URL has a usable default and the key is optional, but a vLLM
-        # server has no default served model, so the operator must name it.
-        if provider.model:
-            return []
-        return ["OPENSCIENTIST_MODEL must name the model the vLLM server serves."]
+    def _api_key_of(cls, provider: ProviderSettings) -> str | None:
+        return provider.vllm_api_key
 
-    def get_cost_info(self, lookback_hours: int = 24) -> CostInfo:
-        # Self-hosted inference has no per-call API cost. Report zero spend so
-        # the budget checks pass cleanly rather than warning on missing data.
-        return CostInfo(
-            provider_name=self.display_name,
-            total_spend_usd=0.0,
-            recent_spend_usd=0.0,
-            recent_period_hours=lookback_hours,
-            data_lag_note="Self-hosted vLLM inference incurs no API cost.",
-        )
-
-    def llm_upstream(self) -> LlmUpstream | None:
-        s = get_settings().provider
-        headers = {"authorization": f"Bearer {s.vllm_api_key}"} if s.vllm_api_key else {}
-        return LlmUpstream(s.vllm_base_url, headers)
-
-    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
-        # omp authenticates with OPENAI_API_KEY, so the container
-        # sends the placeholder and the proxy swaps in the real credential.
-        env = {"OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
-        if get_settings().provider.vllm_api_key:
-            # Overwrite rather than ship the real key into the job container.
-            env["VLLM_API_KEY"] = placeholder
-        return env
-
-    def _endpoint(self) -> tuple[str, str | None]:
-        """Base URL and credential to reach the server.
-
-        Inside a proxied container the endpoint is the proxy and the credential
-        is the job placeholder, because the real key stays web-side.
-        """
-        proxy = os.environ.get(LLM_PROXY_URL_ENV)
-        s = get_settings().provider
-        if proxy:
-            return proxy, os.environ.get("OPENAI_API_KEY")
-        return s.vllm_base_url, s.vllm_api_key
-
-    def effective_model_name(self) -> str | None:
-        return get_settings().provider.model or None
-
-    def model_profile(self) -> ModelProfile:
-        # A self-hosted window is whatever --max-model-len the server was
-        # launched with, so probe it rather than trusting a trained maximum.
-        # Probing the same endpoint the agent uses keeps it working when the
-        # container may only reach the proxy.
-        base_url, key = self._endpoint()
-        return probed_model_profile(
-            model_id=self.effective_model_name(),
-            override=get_settings().provider.model_context_tokens,
-            probe=lambda mid: _probe_vllm_context_tokens(base_url, mid, key),
-            server_name="vLLM",
-            provider_logger=logger,
-        )
-
-    def omp_model_catalog(self, *, context_window: int) -> OmpModelCatalog | None:
-        model_id = self.effective_model_name()
-        if not model_id:
-            return None
-        base_url, key = self._endpoint()
-        return self_hosted_omp_model_catalog(
-            provider_id=self.id,
-            name=self.display_name,
-            base_url=base_url,
-            model_id=model_id,
-            context_window=context_window,
-            api_key=key,
-        )
+    @staticmethod
+    def _probe_context_tokens(base_url: str, model_id: str, api_key: str | None) -> int | None:
+        return _probe_vllm_context_tokens(base_url, model_id, api_key)

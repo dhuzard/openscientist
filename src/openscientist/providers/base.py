@@ -13,13 +13,14 @@ import abc
 import enum
 import inspect
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, ClassVar, NotRequired, TypedDict
 
 from openscientist.exceptions import ProviderError
-from openscientist.models import ModelProfile, default_model_profile
+from openscientist.models import ModelProfile, default_model_profile, probed_model_profile
 from openscientist.settings import ProviderSettings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,22 @@ class Provider(abc.ABC):
             self.effective_model_name(), get_settings().provider.model_context_tokens
         )
 
+    def probe_context_window(self) -> int | None:
+        """Launched context window from a direct probe, or None (hosted APIs do not probe)."""
+        return None
+
+    def prelaunch_model_context_env(self) -> dict[str, str]:
+        """Window resolved app-side and injected as ``OPENSCIENTIST_MODEL_CONTEXT_TOKENS``,
+        because the proxied container cannot probe a root path like llama.cpp's ``/props``.
+        Empty when the operator pinned the window or the provider does not probe.
+        """
+        if get_settings().provider.model_context_tokens is not None:
+            return {}
+        window = self.probe_context_window()
+        if not window:
+            return {}
+        return {"OPENSCIENTIST_MODEL_CONTEXT_TOKENS": str(window)}
+
     def llm_upstream(self) -> LlmUpstream | None:
         """Real endpoint and auth headers for the proxy, or None if not proxied."""
         return None
@@ -435,6 +452,131 @@ class OpenAiWireCompatible(Provider, abc.ABC):
         # OpenAI-family harnesses read OPENAI_BASE_URL; point it at the proxy
         # when active (codex uses config.toml instead, so this is omp's path).
         return {"OPENAI_BASE_URL": proxy} if proxy else {}
+
+
+class SelfHostedOpenAiWire(OpenAiWireCompatible, abc.ABC):
+    """Shared plumbing for a self-hosted OpenAI-wire server driven by omp (vLLM, llama.cpp).
+
+    A subclass supplies its identity, its two settings fields, and the context probe.
+    """
+
+    server_name: ClassVar[str]
+    base_url_env: ClassVar[str]
+    api_key_env: ClassVar[str]
+
+    @classmethod
+    @abc.abstractmethod
+    def _base_url_of(cls, provider: ProviderSettings) -> str:
+        """The configured server base URL."""
+
+    @classmethod
+    @abc.abstractmethod
+    def _api_key_of(cls, provider: ProviderSettings) -> str | None:
+        """The configured API key, or None for a keyless server."""
+
+    @staticmethod
+    @abc.abstractmethod
+    def _probe_context_tokens(base_url: str, model_id: str, api_key: str | None) -> int | None:
+        """Read the launched context window from the live server, or None."""
+
+    def _base_url(self) -> str:
+        return self._base_url_of(get_settings().provider)
+
+    def _api_key(self) -> str | None:
+        return self._api_key_of(get_settings().provider)
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return env_from_pairs(
+            [
+                (cls.base_url_env, cls._base_url_of(provider)),
+                (cls.api_key_env, cls._api_key_of(provider)),
+            ]
+        )
+
+    def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+        if proxy:
+            return super().harness_env(proxy=proxy)
+        # OpenAI clients require a non-empty key, so a keyless server gets a dummy.
+        return {"OPENAI_BASE_URL": self._base_url(), "OPENAI_API_KEY": self._api_key() or self.id}
+
+    def validate_required_config(self) -> list[str]:
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
+        # One server serves one model, so it must be named.
+        if provider.model:
+            return []
+        return [f"OPENSCIENTIST_MODEL must name the model the {cls.server_name} server serves."]
+
+    def get_cost_info(self, lookback_hours: int = 24) -> CostInfo:
+        # No per-call cost, so report zero spend and keep budget checks quiet.
+        return CostInfo(
+            provider_name=self.display_name,
+            total_spend_usd=0.0,
+            recent_spend_usd=0.0,
+            recent_period_hours=lookback_hours,
+            data_lag_note=f"Self-hosted {self.server_name} inference incurs no API cost.",
+        )
+
+    def llm_upstream(self) -> LlmUpstream | None:
+        key = self._api_key()
+        headers = {"authorization": f"Bearer {key}"} if key else {}
+        return LlmUpstream(self._base_url(), headers)
+
+    def proxy_env_overrides(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+        # omp reads OPENAI_API_KEY, which the proxy swaps for the real key.
+        env = {"OPENAI_API_KEY": placeholder, LLM_PROXY_URL_ENV: proxy_base_url}
+        if self._api_key():
+            # Never ship the real key into the container.
+            env[self.api_key_env] = placeholder
+        return env
+
+    def _endpoint(self) -> tuple[str, str | None]:
+        """Base URL and key to reach the server: the proxy and placeholder when proxied, else the real values."""
+        proxy = os.environ.get(LLM_PROXY_URL_ENV)
+        if proxy:
+            return proxy, os.environ.get("OPENAI_API_KEY")
+        return self._base_url(), self._api_key()
+
+    def effective_model_name(self) -> str | None:
+        return get_settings().provider.model or None
+
+    def probe_context_window(self) -> int | None:
+        # Probe the real server directly, since the proxy cannot forward a root /props.
+        model = self.effective_model_name()
+        if not model:
+            return None
+        return self._probe_context_tokens(self._base_url(), model, self._api_key())
+
+    def model_profile(self) -> ModelProfile:
+        # Probe the live window, not the trained maximum. Normally the launcher
+        # resolves it app-side (override below), so this proxied probe is a fallback.
+        base_url, key = self._endpoint()
+        return probed_model_profile(
+            model_id=self.effective_model_name(),
+            override=get_settings().provider.model_context_tokens,
+            probe=lambda mid: self._probe_context_tokens(base_url, mid, key),
+            server_name=self.server_name,
+            provider_logger=logging.getLogger(type(self).__module__),
+        )
+
+    def omp_model_catalog(self, *, context_window: int) -> OmpModelCatalog | None:
+        model_id = self.effective_model_name()
+        if not model_id:
+            return None
+        base_url, key = self._endpoint()
+        return self_hosted_omp_model_catalog(
+            provider_id=self.id,
+            name=self.display_name,
+            base_url=base_url,
+            model_id=model_id,
+            context_window=context_window,
+            api_key=key,
+        )
 
 
 class CodexCompatible(OpenAiWireCompatible, abc.ABC):

@@ -157,6 +157,13 @@ class OllamaProvider(CodexCompatible):
             provider_logger=logger,
         )
 
+    def probe_context_window(self) -> int | None:
+        # Probe the local server directly so the launcher can inject the window.
+        model = self.effective_model_name()
+        if not model:
+            return None
+        return _probe_ollama_context_tokens(get_settings().provider.ollama_base_url, model)
+
     def codex_model_provider_id(self) -> str:
         # Not "ollama": codex reserves that id for its built-in provider.
         return "ollama-local"
