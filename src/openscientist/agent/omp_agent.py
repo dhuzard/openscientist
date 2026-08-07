@@ -145,6 +145,21 @@ class OmpAgent(AbstractAgent[Provider]):
     def _omp_dir(self) -> Path:
         return self._job_dir() / ".omp"
 
+    def _session_dir(self) -> Path:
+        return self._omp_dir() / "session"
+
+    def _session_persisted(self, session_id: str) -> bool:
+        """True if omp wrote a session store for ``session_id``.
+
+        omp names it ``<timestamp>_<id>.jsonl``, so match on the id alone: the
+        timestamp prefix is omp's to change, and a resumed turn appends to the
+        file the first turn created rather than adding a new one.
+        """
+        try:
+            return any(session_id in entry.name for entry in self._session_dir().iterdir())
+        except OSError:
+            return False
+
     def _model_name(self) -> str | None:
         return self._model_override or self._provider.effective_model_name()
 
@@ -294,7 +309,7 @@ class OmpAgent(AbstractAgent[Provider]):
             f"--config={config_path}",
             f"--tools={','.join(self._OMP_ENABLED_TOOLS)}",
             f"--cwd={job_dir}",
-            f"--session-dir={self._omp_dir() / 'session'}",
+            f"--session-dir={self._session_dir()}",
             f"--system-prompt={system_prompt_path}",
         ]
         model = self._model_name()
@@ -477,6 +492,15 @@ class OmpAgent(AbstractAgent[Provider]):
                         text = self._message_text(message)
                         if text:
                             final_output = text
+                        # A model-level failure is reported inside the message,
+                        # not as an "error" event, and omp still exits 0. Without
+                        # this a turn that never reached the server -- wrong port,
+                        # server down, model rejected -- parses as a clean turn
+                        # that simply had nothing to say.
+                        if message.get("stopReason") == "error":
+                            detail = message.get("errorMessage")
+                            if isinstance(detail, str) and detail:
+                                stream_error = detail
             elif etype == "error":
                 msg = event.get("message")
                 if isinstance(msg, str):
@@ -487,6 +511,18 @@ class OmpAgent(AbstractAgent[Provider]):
         # partial stream is what makes a timed-out turn's usage recoverable.
         self._token_usage += usage
 
+        # omp announces the session id in its first event but only writes the
+        # session file once the turn has something to save. An id with no file
+        # behind it makes every later turn die on --resume with
+        # 'Session "<id>" not found', and since nothing clears it the same dead id
+        # is resent forever -- one empty turn then fails every turn after it.
+        # Drop it here so the next turn opens a fresh session instead.
+        if self._session_id is not None and not self._session_persisted(self._session_id):
+            logger.warning(
+                "omp did not persist session %s; the next turn starts fresh", self._session_id
+            )
+            self._session_id = None
+
         if timed_out:
             # Shape unchanged from before: only the usage accounting above is new,
             # which is what the review asked for. Surfacing the partial transcript
@@ -495,9 +531,18 @@ class OmpAgent(AbstractAgent[Provider]):
                 outcome=TurnOutcome.TIMED_OUT, output="", tool_calls=0, transcript=[], error=""
             )
 
-        if proc.returncode != 0 and not messages:
+        tool_calls = self._count_tool_calls(messages)
+
+        # A turn that produced neither text nor a tool call did no work, so if it
+        # also reported trouble it failed -- whether omp said so by exiting
+        # nonzero or by an errored message on a zero exit. Keying off ``messages``
+        # alone missed both: omp emits a message even for a turn that never
+        # reached the model, and the empty result then reads as COMPLETED, which
+        # the orchestrator cannot tell apart from "the agent had nothing to do".
+        # Work that did land still completes, so a late nonzero exit keeps it.
+        if not final_output and not tool_calls and (proc.returncode != 0 or stream_error):
             error = stream_error or stderr_text.strip() or f"omp exited with code {proc.returncode}"
-            logger.error("omp run failed (exit %s): %s", proc.returncode, error)
+            logger.error("omp turn produced no work (exit %s): %s", proc.returncode, error)
             return IterationResult(
                 outcome=TurnOutcome.FAILED, output="", tool_calls=0, transcript=[], error=error
             )
@@ -506,7 +551,7 @@ class OmpAgent(AbstractAgent[Provider]):
         return IterationResult(
             outcome=TurnOutcome.COMPLETED,
             output=final_output,
-            tool_calls=self._count_tool_calls(messages),
+            tool_calls=tool_calls,
             transcript=transcript,
             error=stream_error,
         )

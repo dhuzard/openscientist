@@ -100,8 +100,27 @@ if child_out:
         fh.write(str(child.pid))
 
 
+def write_session():
+    # Real omp only writes <timestamp>_<id>.jsonl once the turn has something to
+    # save, so a stub that always wrote one could not reproduce the empty turn.
+    if os.environ.get("OMP_STUB_WRITE_SESSION", "1") != "1":
+        return
+    sess_dir = next(
+        (a.split("=", 1)[1] for a in sys.argv if a.startswith("--session-dir=")), ""
+    )
+    sid = next(
+        (e.get("id") for e in json.loads({payload!r}) if e.get("type") == "session"), ""
+    )
+    if not sess_dir or not sid:
+        return
+    os.makedirs(sess_dir, exist_ok=True)
+    with open(os.path.join(sess_dir, "2026-01-01T00-00-00-000Z_" + sid + ".jsonl"), "a") as fh:
+        fh.write("session\\n")
+
+
 def emit():
     if os.environ.get("OMP_STUB_EMIT", "1") == "1":
+        write_session()
         for event in json.loads({payload!r}):
             print(json.dumps(event), flush=True)
 
@@ -250,6 +269,74 @@ class TestRunIteration:
         await agent.run_iteration("go", reset_session=True)
         argv = (tmp_path / "argv.txt").read_text().splitlines()
         assert not any(a == "--resume=STALE" for a in argv)
+
+    @pytest.mark.asyncio
+    async def test_unpersisted_session_is_not_resumed(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """omp announces a session id even for a turn it never persists. Keeping
+        that id made every later turn die on --resume with 'Session not found',
+        and re-sending the same dead id made one empty turn fail the whole job."""
+        monkeypatch.setenv("OMP_STUB_WRITE_SESSION", "0")
+        agent = _agent(tmp_path, system_prompt="SYS")
+        await agent.run_iteration("first")
+        assert agent._session_id is None
+
+        monkeypatch.setenv("OMP_STUB_WRITE_SESSION", "1")
+        await agent.run_iteration("second")
+        argv = (tmp_path / "argv.txt").read_text().splitlines()
+        assert not any(a.startswith("--resume=") for a in argv)
+        # The recovered turn persisted, so continuity resumes from here.
+        assert agent._session_id == "SID-abc123"
+
+    @pytest.mark.asyncio
+    async def test_model_error_with_no_work_fails_the_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """omp reports a model-level failure inside the assistant message and
+        still exits 0, so this parsed as a clean turn that had nothing to say."""
+        stream: list[dict[str, object]] = [
+            {"type": "session", "id": "SID-err"},
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "Unable to connect. Is the computer able to access the url?",
+                    "usage": {"input": 0, "output": 0},
+                },
+            },
+        ]
+        bin_path = tmp_path / "fake_omp"
+        _write_stub(bin_path, stream)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        agent = _agent(tmp_path, system_prompt="SYS")
+        result = await agent.run_iteration("go")
+        assert result.outcome is TurnOutcome.FAILED
+        assert "Unable to connect" in result.error
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_with_a_parsed_message_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keying the failure branch off ``messages`` let one parsed event mask a
+        nonzero exit, so a crashed turn reported COMPLETED with an empty result."""
+        stream: list[dict[str, object]] = [
+            {"type": "session", "id": "SID-crash"},
+            {
+                "type": "message_end",
+                "message": {"role": "user", "content": [{"type": "text", "text": "go"}]},
+            },
+        ]
+        bin_path = tmp_path / "fake_omp"
+        _write_stub(bin_path, stream)
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_EXIT", "3")
+        agent = _agent(tmp_path, system_prompt="SYS")
+        result = await agent.run_iteration("go")
+        assert result.outcome is TurnOutcome.FAILED
+        assert "3" in result.error
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_no_output_fails(
