@@ -165,7 +165,7 @@ class OllamaProvider(CodexCompatible):
         # Keyless: nothing to forward into the codex child environment.
         return {}
 
-    def omp_model_catalog(self) -> OmpModelCatalog | None:
+    def omp_model_catalog(self, *, context_window: int) -> OmpModelCatalog | None:
         model_id = self.effective_model_name()
         if not model_id:
             return None
@@ -178,6 +178,6 @@ class OllamaProvider(CodexCompatible):
             name=self.display_name,
             base_url=proxy or get_settings().provider.ollama_base_url,
             model_id=model_id,
-            context_window=self.model_profile().context_window_tokens,
+            context_window=context_window,
             api_key=key,
         )

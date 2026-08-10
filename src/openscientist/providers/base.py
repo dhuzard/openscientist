@@ -365,11 +365,16 @@ class Provider(abc.ABC):
         directly, but it now has to be stated rather than inherited.
         """
 
-    def omp_model_catalog(self) -> OmpModelCatalog | None:
+    def omp_model_catalog(self, *, context_window: int) -> OmpModelCatalog | None:
         """``models.yml`` declaring this provider's model to the omp harness, or
         None when omp's built-in catalog already knows it. Self-hosted providers
         override: omp cannot resolve ``--model`` for a server it has never heard
-        of. The codex analog is ``codex_config_overrides``."""
+        of. The codex analog is ``codex_config_overrides``.
+
+        ``context_window`` is passed in rather than resolved here because
+        resolving it can probe the live server, and the caller already holds the
+        run's cached profile.
+        """
         return None
 
     @classmethod

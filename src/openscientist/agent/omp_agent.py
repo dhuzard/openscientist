@@ -204,12 +204,13 @@ class OmpAgent(AbstractAgent[Provider]):
         """Write the per-run omp config overlay and return its path.
 
         ``tools.xdev`` defaults on, which mounts MCP tools as ``xd://`` devices
-        driven through ``write`` instead of exposing them as callable tools. The
-        shared prompts name the openscientist tools plainly (as Claude and codex
-        see them), so disabling it keeps one tool vocabulary across backends
-        rather than teaching omp a second calling convention. The cost is that
-        every enabled tool's schema ships on each request, which is why
-        ``_OMP_ENABLED_TOOLS`` is a short list.
+        driven through ``write`` instead of exposing them as callable tools.
+        Disabling it makes the openscientist tools ordinary callable tools, which
+        is the shape the shared prompts describe. omp still namespaces them as
+        ``mcp__<server>_<tool>``, so ``OMP_FRAGMENTS`` renames the mentions
+        through ``mcp_tool_prefix``. The cost is that every enabled tool's schema
+        ships on each request, which is why ``_OMP_ENABLED_TOOLS`` is a short
+        list.
         """
         omp_dir = self._omp_dir()
         omp_dir.mkdir(parents=True, exist_ok=True)
@@ -233,8 +234,14 @@ class OmpAgent(AbstractAgent[Provider]):
         return path
 
     def _write_omp_model_catalog(self) -> None:
-        """Write the active provider's ``models.yml`` into the omp home, if any."""
-        catalog = self._provider.omp_model_catalog()
+        """Write the active provider's ``models.yml`` into the omp home, if any.
+
+        Feeds the run's cached window in: resolving it can probe the live server,
+        and this runs once per turn.
+        """
+        catalog = self._provider.omp_model_catalog(
+            context_window=self.model_profile.context_window_tokens
+        )
         if not catalog:
             return
         home = self._omp_home()
@@ -279,12 +286,14 @@ class OmpAgent(AbstractAgent[Provider]):
         return env
 
     #: omp built-in tools the discovery loop may use. ``--tools`` is an enable
-    #: list, so everything absent here is off, notably omp's own code execution.
-    #: Analysis MUST go through the ``execute_code`` MCP tool: it runs in the
-    #: sandboxed executor container and captures figures into the report, whereas
-    #: omp's ``eval`` runs inside the agent container and only renders figures
-    #: inline, so its plots never reach the job artifacts. ``write`` is required:
-    #: omp invokes MCP tools by writing JSON to their ``xd://`` device.
+    #: list over the built-ins, so everything absent here is off, notably omp's
+    #: own code execution. It does not reach the MCP tools, which omp validates
+    #: separately and always exposes. Analysis MUST go through the
+    #: ``execute_code`` MCP tool: it runs in the sandboxed executor container and
+    #: captures figures into the report, whereas omp's ``eval`` runs inside the
+    #: agent container and only renders figures inline, so its plots never reach
+    #: the job artifacts. ``write`` is required because it is this class's
+    #: ``file_write_tool``.
     _OMP_ENABLED_TOOLS: ClassVar[tuple[str, ...]] = (
         "read",
         "write",

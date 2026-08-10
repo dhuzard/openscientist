@@ -16,6 +16,8 @@ import pytest
 
 from openscientist.agent.base import AgentConfig, TurnOutcome
 from openscientist.agent.omp_agent import OmpAgent
+from openscientist.models import ModelProfile
+from openscientist.providers.base import OmpModelCatalog, self_hosted_omp_model_catalog
 from openscientist.transcript import AssistantText, Reasoning, ToolCall, ToolResult, UserPrompt
 from tests.helpers import StubClaudeProvider
 
@@ -25,6 +27,28 @@ class _Provider(StubClaudeProvider):
 
     def claude_model_name(self) -> str:
         return "claude-omp-test"
+
+
+class _CatalogProvider(_Provider):
+    """Declares an omp catalog and counts how often the window is resolved."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.profile_calls = 0
+
+    def model_profile(self) -> ModelProfile:
+        self.profile_calls += 1
+        return ModelProfile(id="claude-omp-test", context_window_tokens=4242)
+
+    def omp_model_catalog(self, *, context_window: int) -> OmpModelCatalog | None:
+        return self_hosted_omp_model_catalog(
+            provider_id="stub",
+            name="Stub",
+            base_url="http://127.0.0.1:9/v1",
+            model_id="claude-omp-test",
+            context_window=context_window,
+            api_key=None,
+        )
 
 
 # Canned stream: user, assistant+toolCall, toolResult, final assistant.
@@ -192,14 +216,32 @@ class TestBuildArgs:
 
 class TestOmpConfigOverlay:
     def test_disables_xdev_so_mcp_tools_are_callable(self, tmp_path: Path) -> None:
-        """With xdev on, MCP tools are xd:// devices and the shared prompts'
-        plain tool names resolve to nothing."""
+        """With xdev on, the MCP tools are xd:// devices driven through write
+        rather than the callable tools the shared prompts describe."""
         import yaml
 
         agent = _agent(tmp_path)
         path = agent._write_omp_config()
         assert path == tmp_path.resolve() / ".omp" / "omp-config.yml"
         assert yaml.safe_load(path.read_text()) == {"tools": {"xdev": False}}
+
+
+class TestModelCatalog:
+    def test_reuses_the_runs_cached_window(self, tmp_path: Path) -> None:
+        """Resolving the window can probe the live server and the catalog is
+        rewritten every turn, so it must reuse the profile the agent cached
+        instead of resolving again per turn."""
+        import yaml
+
+        provider = _CatalogProvider()
+        agent = OmpAgent(AgentConfig(job_dir=tmp_path), provider)
+
+        agent._write_omp_model_catalog()
+        agent._write_omp_model_catalog()
+
+        catalog = yaml.safe_load((tmp_path.resolve() / ".omp-home" / "models.yml").read_text())
+        assert catalog["providers"]["stub"]["models"][0]["contextWindow"] == 4242
+        assert provider.profile_calls == 1
 
 
 class TestMcpConfig:
