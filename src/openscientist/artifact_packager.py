@@ -13,7 +13,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_EXCLUDE_DIRS = {".codex", ".git", "__pycache__", ".pytest_cache", "node_modules"}
+# Agent working directories are never artifacts, and they hold credentials: the
+# per-job MCP config, session transcripts, and the copied omp credential vault.
+_EXCLUDE_DIRS = {
+    ".codex",
+    ".omp",
+    ".omp-home",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+}
 _EXCLUDE_FILES = {"config.json"}
 
 

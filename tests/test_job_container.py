@@ -23,6 +23,9 @@ class _FakeProvider:
     def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
         return {"EXTRA_ENV": "1"}
 
+    def prelaunch_model_context_env(self) -> dict[str, str]:
+        return {}
+
     def airgap_egress(self) -> AirgapPosture:
         return self._posture or AirgapPosture(AirgapEgress.PROXY)
 

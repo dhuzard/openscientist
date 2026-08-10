@@ -107,6 +107,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
 
     backend = AgentBackend.CODEX
     file_write_tool = "apply_patch"
+    display_name = "Codex"
+    # codex discovers ``.agents/skills/<name>/SKILL.md`` under its cwd; the base
+    # class writes them there via the default SKILL.md layout.
+    skills_subdir = ".agents/skills"
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -121,11 +125,6 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         # Codex reads a single AGENTS.md, so its discovery system prompt is the
         # full per-job doc (CodexAgent writes it to AGENTS.md from this prompt).
         return cls.job_doc(use_hypotheses=use_hypotheses, phenix_available=phenix_available)
-
-    async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
-        from openscientist.agent.skills import write_skills_to_codex_dir
-
-        await write_skills_to_codex_dir(self._config.job_dir)
 
     # apply_runtime_environment, chat_system_prompt, write_chat_context, and
     # chat_model_override use the AbstractAgent defaults: codex configures its
@@ -180,21 +179,8 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         OPENSCIENTIST_SECRET_KEY, provider creds, executor image, ...) that the
         tools need, then overlay the per-job ``OPENSCIENTIST_*`` values.
         """
-        config = self._config
-        job_dir = self._job_dir()
         env = dict(os.environ)
-        env.update(
-            {
-                "OPENSCIENTIST_JOB_ID": job_dir.name,
-                "OPENSCIENTIST_JOB_DIR": str(job_dir),
-                "OPENSCIENTIST_USE_HYPOTHESES": "1" if config.use_hypotheses else "0",
-            }
-        )
-        if config.data_file is not None:
-            env["OPENSCIENTIST_DATA_FILE"] = str(config.data_file)
-        if config.data_files:
-            env["OPENSCIENTIST_DATA_FILES"] = os.pathsep.join(str(p) for p in config.data_files)
-        env.update(config.tool_server_env)
+        env.update(self._job_env_overlay(self._job_dir()))
         return env
 
     def _write_codex_config(self) -> None:

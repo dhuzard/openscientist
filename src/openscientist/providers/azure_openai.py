@@ -13,8 +13,14 @@ from __future__ import annotations
 
 import os
 
-from openscientist.providers.base import LLM_PROXY_URL_ENV, CodexCompatible, CostInfo, LlmUpstream
-from openscientist.settings import get_settings
+from openscientist.providers.base import (
+    LLM_PROXY_URL_ENV,
+    CodexCompatible,
+    CostInfo,
+    LlmUpstream,
+    env_from_pairs,
+)
+from openscientist.settings import ProviderSettings, get_settings
 
 
 class AzureOpenAIProvider(CodexCompatible):
@@ -24,21 +30,36 @@ class AzureOpenAIProvider(CodexCompatible):
     def id(self) -> str:
         return "azure-openai"
 
-    @property
-    def display_name(self) -> str:
-        return "Azure OpenAI Service"
+    display_name = "Azure OpenAI Service"
+
+    @classmethod
+    def container_env(
+        cls, provider: ProviderSettings, *, gcp_credentials_container_path: str | None = None
+    ) -> dict[str, str]:
+        return env_from_pairs(
+            [
+                ("AZURE_OPENAI_API_KEY", provider.azure_openai_api_key),
+                ("AZURE_OPENAI_RESOURCE", provider.azure_openai_resource),
+                ("AZURE_OPENAI_DEPLOYMENT", provider.azure_openai_deployment),
+                ("AZURE_OPENAI_API_VERSION", provider.azure_openai_api_version),
+                ("AZURE_OPENAI_STREAM_MAX_RETRIES", str(provider.azure_openai_stream_max_retries)),
+            ]
+        )
 
     def validate_required_config(self) -> list[str]:
-        s = get_settings().provider
+        return self.required_config_errors(get_settings().provider)
+
+    @classmethod
+    def required_config_errors(cls, provider: ProviderSettings) -> list[str]:
         errors: list[str] = []
         if not os.environ.get("AZURE_OPENAI_API_KEY"):
             errors.append("AZURE_OPENAI_API_KEY is required for the Azure OpenAI provider.")
-        if not s.azure_openai_resource:
+        if not provider.azure_openai_resource:
             errors.append(
                 "AZURE_OPENAI_RESOURCE is required (the <resource> in "
                 "https://<resource>.openai.azure.com)."
             )
-        if not s.azure_openai_deployment:
+        if not provider.azure_openai_deployment:
             errors.append(
                 "AZURE_OPENAI_DEPLOYMENT is required (the deployment name configured in Azure)."
             )

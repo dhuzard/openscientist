@@ -238,17 +238,12 @@ class TestVertexClaudeCompatible:
 
     def test_validate_required_config_ok(self, tmp_path: Path) -> None:
         settings = _mock_settings(self._creds_file(tmp_path))
-        with patch("openscientist.providers.vertex.get_settings", return_value=settings):
-            assert VertexProvider().validate_required_config() == []
+        assert VertexProvider.required_config_errors(settings.provider) == []
 
     def test_validate_required_config_errors_when_unset(self, tmp_path: Path) -> None:
-        settings = _mock_settings(self._creds_file(tmp_path))
-        with patch("openscientist.providers.vertex.get_settings", return_value=settings):
-            provider = VertexProvider()
         unset = _mock_settings("", project=None, billing=None, region=None)
         unset.provider.google_application_credentials = None
-        with patch("openscientist.providers.vertex.get_settings", return_value=unset):
-            errors = provider.validate_required_config()
+        errors = VertexProvider.required_config_errors(unset.provider)
         assert any("ANTHROPIC_VERTEX_PROJECT_ID" in e for e in errors)
         assert any("GOOGLE_APPLICATION_CREDENTIALS" in e for e in errors)
         assert any("GCP_BILLING_ACCOUNT_ID" in e for e in errors)

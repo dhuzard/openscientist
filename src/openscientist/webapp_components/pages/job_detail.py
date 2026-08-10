@@ -16,7 +16,7 @@ from uuid import UUID
 
 from nicegui import ui
 
-from openscientist.agent.factory import backend_for_provider_id
+from openscientist.agent.factory import agent_class_for_provider_id
 from openscientist.artifact_packager import create_artifacts_zip
 from openscientist.async_tasks import run_sync
 from openscientist.auth import get_current_user_id, is_current_user_admin, require_auth
@@ -865,16 +865,14 @@ def _render_job_status_notices(context: _JobDetailContext) -> None:
         _render_ks_loading_notice(context.ks_load_error)
 
 
-_PROVIDER_DISPLAY = {
-    "anthropic": "Anthropic",
-    "cborg": "CBORG",
-    "vertex": "Vertex AI",
-    "bedrock": "AWS Bedrock",
-    "foundry": "Azure AI Foundry",
-    "openai": "OpenAI",
-    "azure-openai": "Azure OpenAI",
-    "ollama": "Ollama (local)",
-}
+def _provider_display_name(provider_id: str) -> str:
+    """The provider's own display name, or a titled id for an unknown provider."""
+    from openscientist.providers import provider_class
+
+    try:
+        return provider_class(provider_id).display_name
+    except ValueError:
+        return provider_id.title()
 
 
 def _format_model_name(llm_model: str | None) -> str | None:
@@ -917,11 +915,9 @@ def _stats_badges(latest_job: Any, lit_count: int, hyp_count: int = 0) -> list[A
         badges.append(("Hypotheses", hyp_count, "orange"))
     provider_id = getattr(latest_job, "llm_provider", None)
     if provider_id:
-        backend = backend_for_provider_id(provider_id)
-        badges.append(("Agent", backend.display_name, "indigo"))
-        badges.append(
-            ("Provider", _PROVIDER_DISPLAY.get(provider_id.lower(), provider_id.title()), "teal")
-        )
+        agent_cls = agent_class_for_provider_id(provider_id)
+        badges.append(("Agent", agent_cls.display_name, "indigo"))
+        badges.append(("Provider", _provider_display_name(provider_id), "teal"))
     # Show the model as its own badge when known. This is independent of the
     # provider badge: the provider is where the model is hosted, the model is
     # which one ran. Codex on an account default records no model id, so the

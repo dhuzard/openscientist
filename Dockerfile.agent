@@ -76,6 +76,18 @@ RUN uv pip install --system -e .
 COPY --from=codex-build /usr/local/bin/codex /usr/local/bin/codex
 RUN chmod +x /usr/local/bin/codex
 
+# omp harness CLI (OPENSCIENTIST_HARNESS=omp): pinned static binary onto PATH.
+# The checksum is the release asset digest, not just the tag: a git tag is
+# mutable and can be repointed at different bytes without this file changing,
+# and this binary runs with the job's database credentials in its environment.
+ARG OMP_VERSION=v17.1.5
+ARG OMP_SHA256=35019bfa4d1acae0040ef1f3d91c29c6e7401acfcdbcfeba6ff506a6b103c987
+ARG OMP_RELEASE_BASE=https://github.com/can1357/oh-my-pi/releases/download
+RUN curl -fsSL "${OMP_RELEASE_BASE}/${OMP_VERSION}/omp-linux-x64" -o /tmp/omp \
+    && echo "${OMP_SHA256}  /tmp/omp" | sha256sum -c - \
+    && install -m 0755 /tmp/omp /usr/local/bin/omp \
+    && rm /tmp/omp
+
 # Copy agent entrypoint
 COPY docker/agent-entrypoint.py /agent-entrypoint.py
 
