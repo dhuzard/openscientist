@@ -147,31 +147,19 @@ def test_probe_matches_model_name_prefix() -> None:
         assert _probe_ollama_context_tokens("http://h:11434/v1", "gpt-oss:120b") == 40000
 
 
-def test_probe_falls_back_to_api_show_when_not_loaded() -> None:
+def test_probe_declines_the_trained_maximum_when_not_loaded() -> None:
+    """A cold model gets None, never ``/api/show``'s trained maximum. Both callers
+    run before the first model call, so that figure would be the usual answer
+    rather than a rare fallback, and it over-budgets a server launched below it."""
     from openscientist.providers import ollama as ollama_mod
     from openscientist.providers.ollama import _probe_ollama_context_tokens
 
     with (
         patch.object(ollama_mod.requests, "get", return_value=_resp({"models": []})),
-        patch.object(
-            ollama_mod.requests,
-            "post",
-            return_value=_resp({"model_info": {"gptoss.context_length": 131072}}),
-        ) as post,
-    ):
-        assert _probe_ollama_context_tokens("http://h:11434/v1", "gpt-oss:120b") == 131072
-    post.assert_called_once()
-
-
-def test_probe_returns_none_on_empty_responses() -> None:
-    from openscientist.providers import ollama as ollama_mod
-    from openscientist.providers.ollama import _probe_ollama_context_tokens
-
-    with (
-        patch.object(ollama_mod.requests, "get", return_value=_resp({"models": []})),
-        patch.object(ollama_mod.requests, "post", return_value=_resp({"model_info": {}})),
+        patch.object(ollama_mod.requests, "post") as post,
     ):
         assert _probe_ollama_context_tokens("http://h:11434/v1", "gpt-oss:120b") is None
+    post.assert_not_called()
 
 
 def test_probe_returns_none_on_connection_error() -> None:
@@ -180,10 +168,7 @@ def test_probe_returns_none_on_connection_error() -> None:
     from openscientist.providers import ollama as ollama_mod
     from openscientist.providers.ollama import _probe_ollama_context_tokens
 
-    with (
-        patch.object(ollama_mod.requests, "get", side_effect=requests.ConnectionError("down")),
-        patch.object(ollama_mod.requests, "post", side_effect=requests.ConnectionError("down")),
-    ):
+    with patch.object(ollama_mod.requests, "get", side_effect=requests.ConnectionError("down")):
         assert _probe_ollama_context_tokens("http://h:11434/v1", "gpt-oss:120b") is None
 
 

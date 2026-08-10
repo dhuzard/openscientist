@@ -49,13 +49,17 @@ def _ollama_http_base(base_url: str) -> str:
 
 
 def _probe_ollama_context_tokens(base_url: str, model_id: str) -> int | None:
-    """Read the actual runtime context window of a loaded Ollama model.
+    """Read the served context window of a loaded Ollama model, or None.
 
     ``/api/ps`` reports ``context_length`` for currently-loaded models, which
     reflects the deployment's ``num_ctx`` (e.g. ``OLLAMA_CONTEXT_LENGTH``), the
-    number we must budget against. Falls back to ``/api/show`` (the model's
-    trained maximum) when the model is not currently loaded. Returns None on any
-    failure so the caller can fall back further.
+    number we must budget against. A cold model gets None rather than the
+    ``/api/show`` trained maximum: both callers run before the first model call,
+    so the trained figure would be the usual answer rather than a rare fallback,
+    and it over-budgets a server launched smaller (262144 reported against a
+    32768 deployment). ``probed_model_profile`` turns None into a conservative
+    budget plus a warning naming ``OPENSCIENTIST_MODEL_CONTEXT_TOKENS``, which
+    is the number the operator can actually act on.
     """
     root = _ollama_http_base(base_url)
     try:
@@ -67,16 +71,6 @@ def _probe_ollama_context_tokens(base_url: str, model_id: str) -> int | None:
                 return int(m["context_length"])
     except (requests.RequestException, ValueError, KeyError) as exc:
         logger.debug("Ollama /api/ps probe failed: %s", exc)
-
-    try:
-        resp = requests.post(f"{root}/api/show", json={"name": model_id}, timeout=5)
-        resp.raise_for_status()
-        info = resp.json().get("model_info", {})
-        for key, value in info.items():
-            if key.endswith("context_length") and value:
-                return int(value)
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        logger.debug("Ollama /api/show probe failed: %s", exc)
 
     return None
 
