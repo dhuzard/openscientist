@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import mcp.types as types
+
 from openscientist_tools.server import mcp
 
 #: Touched the first time a client asks for the tool inventory. The harness has
@@ -15,22 +17,31 @@ HANDSHAKE_MARKER = "mcp_handshake"
 
 
 def _install_handshake_marker() -> None:
+    """Record that a client requested our tools, by wrapping the live handler.
+
+    The wrap has to go on ``request_handlers``: ``FastMCP`` binds its own
+    ``list_tools`` into that table at construction, so replacing the attribute
+    afterwards leaves the registered handler untouched and the marker unwritten.
+    """
     job_dir = os.environ.get("OPENSCIENTIST_JOB_DIR")
     if not job_dir:
         return
     marker = Path(job_dir) / ".omp" / HANDSHAKE_MARKER
-    original = mcp.list_tools
+    handlers = mcp._mcp_server.request_handlers
+    original = handlers.get(types.ListToolsRequest)
+    if original is None:
+        return
 
-    async def list_tools_recording_handshake(*args: Any, **kwargs: Any) -> Any:
+    async def record_then_list(*args: Any, **kwargs: Any) -> Any:
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
         except OSError:
-            # The marker is diagnostics only; never fail a tools/list over it.
+            # Diagnostics only; never fail a tools/list over the marker.
             pass
         return await original(*args, **kwargs)
 
-    mcp.list_tools = list_tools_recording_handshake  # type: ignore[method-assign]
+    handlers[types.ListToolsRequest] = record_then_list
 
 
 if __name__ == "__main__":
