@@ -41,8 +41,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MCP_SERVER_NAME = "openscientist-tools"
-#: omp namespaces MCP tools as ``mcp__<server>_<tool>``.
-_MCP_TOOL_PREFIX = "mcp__openscientist_tools_"
 
 # Wall-clock bound on one turn; a stuck turn is cut and the loop advances.
 _TURN_TIMEOUT_SECONDS = int(os.environ.get("OPENSCIENTIST_OMP_TURN_TIMEOUT", "900"))
@@ -79,9 +77,6 @@ class OmpAgent(AbstractAgent[Provider]):
         super().__init__(config, provider)
         self._model_override = config.model_override
         self._session_id: str | None = None
-        # MCP calls seen in the most recent omp run, used to detect a run
-        # that omp launched without registering the tools server.
-        self._last_mcp_tool_calls = 0
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -362,22 +357,23 @@ class OmpAgent(AbstractAgent[Provider]):
         ]
         return "".join(parts)
 
-    @staticmethod
-    def _count_mcp_tool_calls(messages: list[dict[str, Any]]) -> int:
-        """Calls the agent made to the openscientist-tools MCP server this turn."""
-        count = 0
-        for message in messages:
-            if message.get("role") != "assistant":
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "toolCall":
-                    continue
-                if str(block.get("name") or "").startswith(_MCP_TOOL_PREFIX):
-                    count += 1
-        return count
+    def _mcp_handshake_marker(self) -> Path:
+        """Touched by the tools server when a client asks for its tool inventory."""
+        return self._omp_dir() / "mcp_handshake"
+
+    def _mcp_handshake_seen(self) -> bool:
+        """True if openscientist-tools was asked for its tools during this run.
+
+        Counting the agent's own MCP calls cannot answer this: a report turn
+        legitimately writes the file with the built-in ``write`` and calls no MCP
+        tool at all, and omp exposes no way to ask which servers it connected to.
+        The server records the handshake itself instead.
+        """
+        return self._mcp_handshake_marker().exists()
+
+    def _clear_mcp_handshake(self) -> None:
+        """Drop any marker from an earlier turn so it only describes this run."""
+        self._mcp_handshake_marker().unlink(missing_ok=True)
 
     @staticmethod
     def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
@@ -452,6 +448,7 @@ class OmpAgent(AbstractAgent[Provider]):
         system_prompt_path = self._write_system_prompt()
         self._write_mcp_config()
         config_path = self._write_omp_config()
+        self._clear_mcp_handshake()
         prompt_path = self._write_turn_prompt(prompt)
         args = self._build_args(system_prompt_path, prompt_path, config_path)
 
@@ -563,7 +560,6 @@ class OmpAgent(AbstractAgent[Provider]):
             )
 
         tool_calls = self._count_tool_calls(messages)
-        self._last_mcp_tool_calls = self._count_mcp_tool_calls(messages)
 
         # A turn that produced neither text nor a tool call did no work, so if it
         # also reported trouble it failed -- whether omp said so by exiting
@@ -605,13 +601,13 @@ class OmpAgent(AbstractAgent[Provider]):
             # report. omp respawns the server every turn, so a fresh attempt is
             # usually enough; a turn that legitimately needs no MCP tool is rare
             # enough that paying for one retry is cheaper than shipping that.
-            if result.outcome is TurnOutcome.COMPLETED and self._last_mcp_tool_calls == 0:
+            if result.outcome is TurnOutcome.COMPLETED and not self._mcp_handshake_seen():
                 logger.warning(
-                    "omp turn used no openscientist-tools MCP tool; the server may not "
-                    "have registered. Retrying the turn once."
+                    "openscientist-tools was never asked for its tool inventory this "
+                    "turn, so the agent had no MCP tools. Retrying the turn once."
                 )
                 retry = await self._run_omp(prompt)
-                if self._last_mcp_tool_calls == 0:
+                if not self._mcp_handshake_seen():
                     logger.error(
                         "openscientist-tools MCP tools unavailable after a retry; failing "
                         "the turn rather than reporting a run that could not record anything"

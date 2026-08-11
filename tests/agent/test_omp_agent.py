@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from openscientist.agent.base import AgentConfig, IterationResult, TurnOutcome
+from openscientist.agent.base import AgentConfig, TurnOutcome
 from openscientist.agent.omp_agent import OmpAgent
 from openscientist.models import ModelProfile
 from openscientist.providers.base import OmpModelCatalog, self_hosted_omp_model_catalog
@@ -71,7 +71,7 @@ _STREAM: list[dict[str, object]] = [
                 {
                     "type": "toolCall",
                     "id": "call-1",
-                    "name": "mcp__openscientist_tools_execute_code",
+                    "name": "bash",
                     "arguments": {"command": "echo hi"},
                 },
             ],
@@ -83,7 +83,7 @@ _STREAM: list[dict[str, object]] = [
         "message": {
             "role": "toolResult",
             "toolCallId": "call-1",
-            "toolName": "mcp__openscientist_tools_execute_code",
+            "toolName": "bash",
             "content": [{"type": "text", "text": "hi"}],
             "isError": False,
         },
@@ -105,7 +105,9 @@ def _write_stub(path: Path, stream: list[dict[str, object]]) -> None:
     """Write a fake-omp that records argv and emits ``stream``.
 
     Env knobs: ``OMP_STUB_ARGV_OUT``, ``OMP_STUB_SLEEP``, ``OMP_STUB_EXIT``,
-    ``OMP_STUB_EMIT``, ``OMP_STUB_EMIT_FIRST`` (emit before sleeping, so a
+    ``OMP_STUB_EMIT``, ``OMP_STUB_MCP_HANDSHAKE`` (write the marker the
+    tools server writes when asked for its tools; "0" simulates a run where omp
+    never registered it), ``OMP_STUB_EMIT_FIRST`` (emit before sleeping, so a
     timeout still has a partial stream to parse), and ``OMP_STUB_CHILD_PID_OUT``
     (spawn a long-lived grandchild and record its pid, standing in for the MCP
     server children real omp starts).
@@ -122,6 +124,18 @@ if child_out:
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     with open(child_out, "w") as fh:
         fh.write(str(child.pid))
+
+
+def write_mcp_handshake():
+    # Real openscientist-tools touches this when a client asks for its tools.
+    if os.environ.get("OMP_STUB_MCP_HANDSHAKE", "1") != "1":
+        return
+    cwd = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--cwd=")), "")
+    if not cwd:
+        return
+    d = os.path.join(cwd, ".omp")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "mcp_handshake"), "w").close()
 
 
 def write_session():
@@ -149,6 +163,7 @@ def emit():
             print(json.dumps(event), flush=True)
 
 
+write_mcp_handshake()
 emit_first = os.environ.get("OMP_STUB_EMIT_FIRST") == "1"
 if emit_first:
     emit()
@@ -215,76 +230,40 @@ class TestBuildArgs:
 
 
 class TestMissingMcpToolsGuard:
-    """omp sometimes runs a turn without registering openscientist-tools, with no
-    error anywhere (openscientist-io#263). Without a guard the turn "succeeds"
-    having recorded nothing, and the job completes on an empty knowledge state."""
-
-    @staticmethod
-    def _stream(tool_name: str | None) -> list[dict[str, object]]:
-        content: list[dict[str, object]] = [{"type": "text", "text": "done"}]
-        if tool_name:
-            content.insert(0, {"type": "toolCall", "id": "c1", "name": tool_name, "arguments": {}})
-        return [
-            {"type": "session", "id": "SID-guard"},
-            {
-                "type": "message_end",
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                    "usage": {"input": 1, "output": 1},
-                },
-            },
-        ]
+    """omp sometimes runs a turn without ever asking openscientist-tools for its
+    tools, with no error anywhere (openscientist-io#263), leaving the agent unable
+    to analyse or record while the turn still "succeeds". The server touches a
+    marker when asked, so its absence is the signal -- not the agent's own tool
+    choices, since a report turn legitimately calls only the built-in `write`."""
 
     @pytest.mark.asyncio
-    async def test_turn_using_mcp_tools_is_untouched(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_completes_when_the_server_was_asked_for_its_tools(
+        self, tmp_path: Path, stub_bin: Path
     ) -> None:
-        bin_path = tmp_path / "fake_omp"
-        _write_stub(bin_path, self._stream("mcp__openscientist_tools_execute_code"))
-        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
-        monkeypatch.setenv("OMP_STUB_ARGV_OUT", str(tmp_path / "argv.txt"))
         result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
         assert result.outcome is TurnOutcome.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_turn_without_mcp_tools_fails_after_a_retry(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_fails_when_the_server_was_never_asked(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """omp's own built-ins are not enough: a turn that only calls `read` has no
-        way to run analysis or record a finding, so completing is the wrong answer."""
-        bin_path = tmp_path / "fake_omp"
-        _write_stub(bin_path, self._stream("read"))
-        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
-        monkeypatch.setenv("OMP_STUB_ARGV_OUT", str(tmp_path / "argv.txt"))
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE", "0")
         result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
         assert result.outcome is TurnOutcome.FAILED
         assert "MCP tools were not available" in result.error
 
     @pytest.mark.asyncio
-    async def test_retry_recovers_when_the_second_attempt_registers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_a_marker_left_by_an_earlier_turn_is_not_trusted(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The registration failure is intermittent, so a fresh spawn usually works."""
+        """Each turn respawns the server, so the marker must describe this run."""
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE", "0")
         agent = _agent(tmp_path, system_prompt="SYS")
-        calls = {"n": 0}
-        good = IterationResult(
-            outcome=TurnOutcome.COMPLETED, output="ok", tool_calls=1, transcript=[], error=""
-        )
-        empty = IterationResult(
-            outcome=TurnOutcome.COMPLETED, output="", tool_calls=1, transcript=[], error=""
-        )
-
-        async def fake_run(_prompt: str) -> IterationResult:
-            calls["n"] += 1
-            agent._last_mcp_tool_calls = 0 if calls["n"] == 1 else 1
-            return empty if calls["n"] == 1 else good
-
-        monkeypatch.setattr(agent, "_run_omp", fake_run)
+        marker = agent._mcp_handshake_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
         result = await agent.run_iteration("go")
-        assert calls["n"] == 2
-        assert result.outcome is TurnOutcome.COMPLETED
-        assert result.output == "ok"
+        assert result.outcome is TurnOutcome.FAILED
 
 
 class TestOmpConfigOverlay:
