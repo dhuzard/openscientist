@@ -30,6 +30,7 @@ from openscientist.agent.base import (
     TokenUsage,
     TurnOutcome,
 )
+from openscientist.exceptions import McpToolsUnavailableError
 from openscientist.providers.base import LLM_PROXY_URL_ENV, Provider
 from openscientist.settings import get_settings
 from openscientist.transcript import OMP, TranscriptEntry
@@ -593,37 +594,34 @@ class OmpAgent(AbstractAgent[Provider]):
             # process tree and keep the output that already arrived.
             result = await self._run_omp(prompt)
 
-            # omp sometimes issues the model request before the openscientist-tools
-            # MCP server has registered, leaving the agent with only omp's built-ins
-            # and no error on any channel (openscientist-io#263). The turn then
-            # "succeeds" having been unable to run analysis or record anything, so
-            # the job completes with an empty knowledge state and a confident
-            # report. omp respawns the server every turn, so a fresh attempt is
-            # usually enough; a turn that legitimately needs no MCP tool is rare
-            # enough that paying for one retry is cheaper than shipping that.
+            # omp sometimes issues the model request before it has asked
+            # openscientist-tools for its tool list, leaving the agent with only
+            # omp's built-ins and no error on any channel (openscientist-io#263).
+            # The server touches a marker when asked, so its absence means the
+            # agent had no execute_code and no way to record anything.
+            #
+            # This is fatal, not a failed turn: the orchestrator treats a failed
+            # report turn as recoverable and completes the job if a report file
+            # exists, and the agent can still write one with the built-in `write`
+            # -- which is exactly the confident-report-over-nothing outcome this
+            # is meant to stop.
             if result.outcome is TurnOutcome.COMPLETED and not self._mcp_handshake_seen():
                 logger.warning(
                     "openscientist-tools was never asked for its tool inventory this "
                     "turn, so the agent had no MCP tools. Retrying the turn once."
                 )
-                retry = await self._run_omp(prompt)
+                result = await self._run_omp(prompt)
                 if not self._mcp_handshake_seen():
-                    logger.error(
-                        "openscientist-tools MCP tools unavailable after a retry; failing "
-                        "the turn rather than reporting a run that could not record anything"
+                    raise McpToolsUnavailableError(
+                        "openscientist-tools MCP tools were not available to the agent "
+                        "after a retry (see openscientist-io#263)"
                     )
-                    return IterationResult(
-                        outcome=TurnOutcome.FAILED,
-                        output="",
-                        tool_calls=0,
-                        transcript=[],
-                        error=(
-                            "openscientist-tools MCP tools were not available to the agent "
-                            "(see openscientist-io#263)"
-                        ),
-                    )
-                return retry
             return result
+        except McpToolsUnavailableError:
+            # Fatal by design: let it reach the orchestrator so the job fails
+            # rather than completing over an empty knowledge state.
+            logger.error("openscientist-tools MCP tools unavailable; failing the job")
+            raise
         except Exception as e:
             logger.error("omp run failed: %s", e, exc_info=True)
             return IterationResult(

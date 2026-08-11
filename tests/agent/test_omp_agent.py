@@ -16,6 +16,7 @@ import pytest
 
 from openscientist.agent.base import AgentConfig, TurnOutcome
 from openscientist.agent.omp_agent import OmpAgent
+from openscientist.exceptions import McpToolsUnavailableError
 from openscientist.models import ModelProfile
 from openscientist.providers.base import OmpModelCatalog, self_hosted_omp_model_catalog
 from openscientist.transcript import AssistantText, Reasoning, ToolCall, ToolResult, UserPrompt
@@ -248,9 +249,8 @@ class TestMissingMcpToolsGuard:
         self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE", "0")
-        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
-        assert result.outcome is TurnOutcome.FAILED
-        assert "MCP tools were not available" in result.error
+        with pytest.raises(McpToolsUnavailableError, match="not available"):
+            await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
 
     @pytest.mark.asyncio
     async def test_a_marker_left_by_an_earlier_turn_is_not_trusted(
@@ -262,8 +262,8 @@ class TestMissingMcpToolsGuard:
         marker = agent._mcp_handshake_marker()
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
-        result = await agent.run_iteration("go")
-        assert result.outcome is TurnOutcome.FAILED
+        with pytest.raises(McpToolsUnavailableError):
+            await agent.run_iteration("go")
 
 
 class TestOmpConfigOverlay:

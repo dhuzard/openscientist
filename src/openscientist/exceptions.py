@@ -56,3 +56,12 @@ class ProviderError(OpenScientistError):
 
 class PDFGenerationError(OpenScientistError):
     """Raised when PDF report generation fails."""
+
+
+class McpToolsUnavailableError(OpenScientistError):
+    """The agent ran without the openscientist-tools MCP tools.
+
+    Fatal rather than a failed turn: the agent cannot analyse or record
+    anything, and the condition persists across turns, so continuing produces a
+    report with nothing behind it (openscientist-io#263).
+    """
