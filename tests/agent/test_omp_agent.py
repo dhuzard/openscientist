@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from openscientist.agent.base import AgentConfig, TurnOutcome
+from openscientist.agent.base import AgentConfig, IterationResult, TurnOutcome
 from openscientist.agent.omp_agent import OmpAgent
 from openscientist.models import ModelProfile
 from openscientist.providers.base import OmpModelCatalog, self_hosted_omp_model_catalog
@@ -71,7 +71,7 @@ _STREAM: list[dict[str, object]] = [
                 {
                     "type": "toolCall",
                     "id": "call-1",
-                    "name": "bash",
+                    "name": "mcp__openscientist_tools_execute_code",
                     "arguments": {"command": "echo hi"},
                 },
             ],
@@ -83,7 +83,7 @@ _STREAM: list[dict[str, object]] = [
         "message": {
             "role": "toolResult",
             "toolCallId": "call-1",
-            "toolName": "bash",
+            "toolName": "mcp__openscientist_tools_execute_code",
             "content": [{"type": "text", "text": "hi"}],
             "isError": False,
         },
@@ -212,6 +212,79 @@ class TestBuildArgs:
     def test_model_override_wins(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path, model_override="opus-override")
         assert "--model=opus-override" in agent._build_args(tmp_path, tmp_path, tmp_path)
+
+
+class TestMissingMcpToolsGuard:
+    """omp sometimes runs a turn without registering openscientist-tools, with no
+    error anywhere (openscientist-io#263). Without a guard the turn "succeeds"
+    having recorded nothing, and the job completes on an empty knowledge state."""
+
+    @staticmethod
+    def _stream(tool_name: str | None) -> list[dict[str, object]]:
+        content: list[dict[str, object]] = [{"type": "text", "text": "done"}]
+        if tool_name:
+            content.insert(0, {"type": "toolCall", "id": "c1", "name": tool_name, "arguments": {}})
+        return [
+            {"type": "session", "id": "SID-guard"},
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "usage": {"input": 1, "output": 1},
+                },
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_turn_using_mcp_tools_is_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bin_path = tmp_path / "fake_omp"
+        _write_stub(bin_path, self._stream("mcp__openscientist_tools_execute_code"))
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_ARGV_OUT", str(tmp_path / "argv.txt"))
+        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+        assert result.outcome is TurnOutcome.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_turn_without_mcp_tools_fails_after_a_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """omp's own built-ins are not enough: a turn that only calls `read` has no
+        way to run analysis or record a finding, so completing is the wrong answer."""
+        bin_path = tmp_path / "fake_omp"
+        _write_stub(bin_path, self._stream("read"))
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", str(bin_path))
+        monkeypatch.setenv("OMP_STUB_ARGV_OUT", str(tmp_path / "argv.txt"))
+        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+        assert result.outcome is TurnOutcome.FAILED
+        assert "MCP tools were not available" in result.error
+
+    @pytest.mark.asyncio
+    async def test_retry_recovers_when_the_second_attempt_registers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The registration failure is intermittent, so a fresh spawn usually works."""
+        agent = _agent(tmp_path, system_prompt="SYS")
+        calls = {"n": 0}
+        good = IterationResult(
+            outcome=TurnOutcome.COMPLETED, output="ok", tool_calls=1, transcript=[], error=""
+        )
+        empty = IterationResult(
+            outcome=TurnOutcome.COMPLETED, output="", tool_calls=1, transcript=[], error=""
+        )
+
+        async def fake_run(_prompt: str) -> IterationResult:
+            calls["n"] += 1
+            agent._last_mcp_tool_calls = 0 if calls["n"] == 1 else 1
+            return empty if calls["n"] == 1 else good
+
+        monkeypatch.setattr(agent, "_run_omp", fake_run)
+        result = await agent.run_iteration("go")
+        assert calls["n"] == 2
+        assert result.outcome is TurnOutcome.COMPLETED
+        assert result.output == "ok"
 
 
 class TestOmpConfigOverlay:
