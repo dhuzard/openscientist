@@ -54,20 +54,50 @@ def normalize_model_name(model: str) -> str:
     return model
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> float:
     """
     Estimate cost in USD using the litellm pricing database.
 
-    Tries exact key first, then the normalised model name.
-    Returns 0.0 if no pricing entry is found.
+    Prices every billed bucket, not just input and output. Cached reads dominate
+    agentic runs -- each turn resends the conversation -- so omitting them
+    understates cost badly, and the caller cannot tell because the total is still
+    a plausible number. Reasoning tokens are billed as output where a provider
+    reports them separately.
+
+    Falls back to the input rate for cache reads/writes when the entry carries no
+    cache-specific rate: wrong, but closer than charging zero.
+
+    Tries exact key first, then the normalised model name. Returns 0.0 and warns
+    if no pricing entry is found, so a silent zero is at least visible in logs.
     """
     pricing = _get_litellm_pricing()
     entry = pricing.get(model) or pricing.get(normalize_model_name(model))
     if not entry:
+        logger.warning(
+            "No pricing entry for model %r (normalised %r); reporting $0.00. "
+            "Cost tracking for this model is not meaningful until a rate is added.",
+            model,
+            normalize_model_name(model),
+        )
         return 0.0
     in_rate = float(entry.get("input_cost_per_token", 0.0))
     out_rate = float(entry.get("output_cost_per_token", 0.0))
-    return in_rate * input_tokens + out_rate * output_tokens
+    read_rate = float(entry.get("cache_read_input_token_cost", in_rate))
+    write_rate = float(entry.get("cache_creation_input_token_cost", in_rate))
+    return (
+        in_rate * input_tokens
+        + out_rate * output_tokens
+        + read_rate * cache_read_tokens
+        + write_rate * cache_write_tokens
+        + out_rate * reasoning_tokens
+    )
 
 
 # Fallback used only when the remote fetch fails and the cache is empty.
