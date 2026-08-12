@@ -7,7 +7,11 @@ than asserting real rates, which would break whenever litellm updates.
 from __future__ import annotations
 
 import logging
+from contextlib import AbstractContextManager
+from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from openscientist.providers.pricing import estimate_cost_usd, normalize_model_name
 
@@ -19,7 +23,7 @@ _ENTRY = {
 }
 
 
-def _patched(entry: dict[str, float] | None = None) -> object:
+def _patched(entry: dict[str, float] | None = None) -> AbstractContextManager[Any]:
     return patch(
         "openscientist.providers.pricing._get_litellm_pricing",
         return_value={"m": entry if entry is not None else _ENTRY},
@@ -51,13 +55,13 @@ def test_cache_rates_fall_back_to_the_input_rate_when_absent() -> None:
 
 
 def test_unknown_model_warns_rather_than_silently_returning_zero(
-    caplog: object,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A silent 0.0 is indistinguishable from a genuinely free run, which is how
     prod recorded $0 for every Opus job on an unrecognised deployment name."""
-    with _patched(), caplog.at_level(logging.WARNING):  # type: ignore[attr-defined]
+    with _patched(), caplog.at_level(logging.WARNING):
         assert estimate_cost_usd("not-a-model", 1_000_000, 1_000_000) == 0.0
-    assert "No pricing entry" in caplog.text  # type: ignore[attr-defined]
+    assert "No pricing entry" in caplog.text
 
 
 def test_azure_deployment_names_do_not_resolve() -> None:
