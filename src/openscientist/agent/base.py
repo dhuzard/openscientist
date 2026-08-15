@@ -61,7 +61,7 @@ class AgentBackend(enum.Enum):
 class TokenUsage:
     """Normalized token usage across all iterations.
 
-    Categories are non-overlapping and additive: the five fields sum to the
+    Categories are non-overlapping and additive: the six fields sum to the
     total, so cost functions can rate each field without double-counting.
     Backends whose SDK reports hierarchical counts (e.g. OpenAI folds
     ``cached_input_tokens`` into ``input_tokens``) must subtract sub-categories
@@ -75,7 +75,13 @@ class TokenUsage:
     """Visible (non-reasoning) output tokens."""
 
     cache_write_tokens: int = 0
-    """Tokens written to a provider-side prompt cache. Anthropic only."""
+    """Tokens written to a short-lived (five-minute) prompt cache, plus any write
+    the provider does not attribute to a tier. Anthropic only."""
+
+    cache_write_1h_tokens: int = 0
+    """Tokens written to a one-hour prompt cache, which Anthropic bills at twice
+    the input rate against 1.25x for five minutes. Split out because the rates
+    differ, and disjoint from ``cache_write_tokens`` rather than a subset of it."""
 
     cache_read_tokens: int = 0
     """Tokens served from a provider-side prompt cache."""
@@ -88,6 +94,7 @@ class TokenUsage:
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens + other.cache_write_1h_tokens,
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
         )
@@ -96,6 +103,7 @@ class TokenUsage:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_write_tokens += other.cache_write_tokens
+        self.cache_write_1h_tokens += other.cache_write_1h_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.reasoning_tokens += other.reasoning_tokens
         return self
