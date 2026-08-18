@@ -343,7 +343,7 @@ You are running in an **autonomous discovery loop**. Each iteration, you will:
 - `query`: Search terms (e.g., `"hypothermia neuroprotection metabolomics"`)
 - Returns: titles, full abstracts, PMIDs
 - Full abstracts are returned so you can extract exact quotes for citations
-
+{{AIRGAP_SEARCH_NOTE}}
 {{SEARCH_SKILLS_DOC}}**update_knowledge_state** - Record a confirmed finding
 
 - `title`: Concise finding title
@@ -603,6 +603,29 @@ Then call `set_consensus_answer` with a 1–3 sentence direct answer.
     return substitute_fragments(doc, frags)
 
 
+def _airgap_search_note() -> str:
+    """Air-gapped literature guidance, or empty when online.
+
+    Air-gapped runs query a local MEDLINE mirror over a Postgres full-text
+    index, which ANDs every term -- unlike live PubMed, which expands terms via
+    MeSH and ranks partial matches. A 7-term query that NCBI answers happily
+    matches nothing locally: measured on this corpus, 6 of 8 real agent queries
+    returned zero rows. The agent cannot see why, because an empty result is
+    reported as a plain "No papers found".
+    """
+    from openscientist.settings import get_settings
+
+    if not get_settings().airgap.enabled:
+        return ""
+    return (
+        "- This run is air-gapped: search goes to a local MEDLINE mirror, not live PubMed.\n"
+        "  Every term is required (AND), and only titles and abstracts are indexed -- there is\n"
+        "  no MeSH expansion or synonym matching. Long queries therefore often return nothing.\n"
+        "  Use 2-4 specific terms. If a search returns no papers, retry with fewer terms rather\n"
+        "  than concluding the literature does not exist.\n"
+    )
+
+
 def substitute_fragments(doc: str, frags: BackendFragments) -> str:
     """Swap the backend-divergent phrases in a Claude-authored doc.
 
@@ -614,6 +637,7 @@ def substitute_fragments(doc: str, frags: BackendFragments) -> str:
     Shared by the discovery job doc and the chat context so they cannot
     diverge.
     """
+    doc = doc.replace("{{AIRGAP_SEARCH_NOTE}}", _airgap_search_note())
     doc = doc.replace("{{SEARCH_SKILLS_DOC}}", frags.search_skills_doc)
     doc = doc.replace("{{SKILLS_DISCOVERY_NOTE}}", frags.skills_discovery_note)
     doc = doc.replace("`.claude/skills/`", frags.skills_location)
