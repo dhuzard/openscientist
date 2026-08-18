@@ -30,7 +30,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
 
@@ -95,6 +95,31 @@ def _toml_str(value: str) -> str:
         .replace("\t", "\\t")
     )
     return f'"{escaped}"'
+
+
+class _TokenBreakdown(Protocol):
+    """The nested per-turn counts read off the SDK's ``TokenUsageBreakdown``.
+
+    Structural rather than nominal so the mapper stays checkable while tests
+    substitute stubs. Typing these four is what keeps a rename or a change of
+    nesting upstream from silently mis-pricing a turn.
+    """
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def cached_input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def reasoning_output_tokens(self) -> int: ...
+
+
+class _TurnUsage(Protocol):
+    """The SDK's ``ThreadTokenUsage``, of which only ``last`` is per-turn."""
+
+    @property
+    def last(self) -> _TokenBreakdown | None: ...
 
 
 class CodexAgent(AbstractAgent[CodexCompatible]):
@@ -281,23 +306,27 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         return self._thread
 
     @staticmethod
-    def _usage_from_payload(usage: Any) -> TokenUsage:
+    def _usage_from_payload(usage: _TurnUsage) -> TokenUsage:
         """Normalize the turn's token usage to ``TokenUsage``.
 
         The SDK reports per-turn usage as ``usage.last`` (a
-        ``TokenUsageBreakdown``) with ``input_tokens`` inclusive of
-        ``cached_input_tokens`` (Responses-API shape), so the fresh-input count
-        is the difference. ``usage.total`` is the running thread total, which we
-        do not use here since ``_token_usage`` accumulates per turn.
+        ``TokenUsageBreakdown``) whose counts nest: ``input_tokens`` includes
+        ``cached_input_tokens`` and ``output_tokens`` includes
+        ``reasoning_output_tokens`` (Responses-API shape). Both sub-counts are
+        subtracted here so the buckets stay non-overlapping and still sum to
+        the payload's ``total_tokens``. ``usage.total`` is the running thread
+        total, which we do not use since ``_token_usage`` accumulates per turn.
         """
-        last = getattr(usage, "last", None)
+        last = usage.last
         if last is None:
             return TokenUsage()
         return TokenUsage(
             input_tokens=last.input_tokens - last.cached_input_tokens,
-            output_tokens=last.output_tokens,
+            output_tokens=max(last.output_tokens - last.reasoning_output_tokens, 0),
             cache_read_tokens=last.cached_input_tokens,
+            # The SDK exposes no cache-write count in either lifetime tier.
             cache_write_tokens=0,
+            cache_write_1h_tokens=0,
             reasoning_tokens=last.reasoning_output_tokens,
         )
 

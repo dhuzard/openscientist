@@ -610,7 +610,17 @@ async def _persist_job_cost_record(
     from openscientist.database.models import CostRecord
     from openscientist.providers.pricing import estimate_cost_usd
 
-    cost_usd = estimate_cost_usd(model_name, tokens.input_tokens, tokens.output_tokens)
+    # The pricing buckets are keyword-only, since they are easy to transpose and each
+    # is priced differently.
+    cost_usd = estimate_cost_usd(
+        model_name,
+        input_tokens=tokens.input_tokens,
+        output_tokens=tokens.output_tokens,
+        cache_read_tokens=tokens.cache_read_tokens,
+        cache_write_tokens=tokens.cache_write_tokens,
+        cache_write_1h_tokens=tokens.cache_write_1h_tokens,
+        reasoning_tokens=tokens.reasoning_tokens,
+    )
     async with AsyncSessionLocal(thread_safe=True) as session:
         record = CostRecord(
             job_id=UUID(job_id),
@@ -620,6 +630,11 @@ async def _persist_job_cost_record(
             model=model_name,
             input_tokens=tokens.input_tokens,
             output_tokens=tokens.output_tokens,
+            cache_read_tokens=tokens.cache_read_tokens,
+            # The column holds every cache write. Only the price depends on how long
+            # the entry lives, and `cost_usd` already accounts for that.
+            cache_write_tokens=tokens.cache_write_tokens + tokens.cache_write_1h_tokens,
+            reasoning_tokens=tokens.reasoning_tokens,
             cost_usd=cost_usd,
         )
         session.add(record)
@@ -634,9 +649,14 @@ async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> 
     """
     tokens = executor.total_tokens
     logger.info(
-        "Agent executor completed: %d input tokens, %d output tokens",
+        "Agent executor completed: %d input, %d output, %d cache read, "
+        "%d cache write (%d of them one-hour), %d reasoning tokens",
         tokens.input_tokens,
         tokens.output_tokens,
+        tokens.cache_read_tokens,
+        tokens.cache_write_tokens + tokens.cache_write_1h_tokens,
+        tokens.cache_write_1h_tokens,
+        tokens.reasoning_tokens,
     )
     try:
         settings = get_settings()

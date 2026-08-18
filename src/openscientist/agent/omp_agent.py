@@ -331,15 +331,29 @@ class OmpAgent(AbstractAgent[Provider]):
 
     @staticmethod
     def _usage_from_message(message: dict[str, Any]) -> TokenUsage:
-        # omp usage buckets are additive and non-overlapping, so map straight.
+        # omp usage buckets are additive and non-overlapping, so map straight. The
+        # exception is cacheWrite, which is a total that `cttl` breaks down by cache
+        # lifetime (omp's rendering of Anthropic's `cache_creation`). The one-hour
+        # portion bills at twice the input rate against 1.25x for five minutes, so it
+        # is split off here the way omp's own cost function splits it.
         usage = message.get("usage")
         if not isinstance(usage, dict):
             return TokenUsage()
+        cache_write_total = _as_int(usage.get("cacheWrite"))
+        cttl = usage.get("cttl")
+        # Clamped to the total so the two write buckets stay disjoint and sum to it,
+        # which the whole-payload accounting depends on.
+        write_1h = (
+            min(_as_int(cttl.get("ephemeral1h")), cache_write_total)
+            if isinstance(cttl, dict)
+            else 0
+        )
         return TokenUsage(
             input_tokens=_as_int(usage.get("input")),
             output_tokens=_as_int(usage.get("output")),
             cache_read_tokens=_as_int(usage.get("cacheRead")),
-            cache_write_tokens=_as_int(usage.get("cacheWrite")),
+            cache_write_tokens=cache_write_total - write_1h,
+            cache_write_1h_tokens=write_1h,
             reasoning_tokens=_as_int(usage.get("reasoning")),
         )
 
