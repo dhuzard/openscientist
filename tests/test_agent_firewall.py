@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -381,6 +382,18 @@ _REPLICA_PROBE = _HELPERS + dedent(
 )
 
 
+def _wait_listening(container: Any, port: int, timeout: float = 30.0) -> None:
+    """Block until the container accepts on the port. The listener binds after start,
+    and a probe that raced it saw ConnectionRefused on a slow runner."""
+    check = f"import socket; socket.create_connection(('127.0.0.1', {port}), 1).close()"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if container.exec_run(["python3", "-c", check]).exit_code == 0:
+            return
+        time.sleep(0.5)
+    raise AssertionError(f"listener on {port} never came up")
+
+
 class _Lab:
     """A throwaway bridge network and the containers on it. The entrypoint is
     bind-mounted over the image's copy, so probes exercise the working tree."""
@@ -401,6 +414,8 @@ class _Lab:
         self.started.append(container)
         self.network.connect(container, aliases=[alias] if alias else None)
         container.start()
+        for port in ports:
+            _wait_listening(container, port)
         return name
 
     def run_probe(self, allow: str, source: str, target: str) -> dict[str, Any]:
