@@ -64,8 +64,13 @@ COPY src/ src/
 # Reinstall the project so the web image has dependencies added since the base
 # image was built, notably the openai-codex SDK used by the codex agent path
 # (in-page chat + discovery). The pyproject override drops the musl-only
-# openai-codex-cli-bin. The codex binary itself is provisioned above.
-RUN uv pip install --system -e .
+# openai-codex-cli-bin. The codex binary itself is provisioned above. That delta
+# comes from the lock, not a fresh resolve.
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
+        -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt \
+    && uv pip install --system --no-deps -e . \
+    && rm /tmp/requirements.txt
 
 # Create jobs directory
 RUN mkdir -p jobs

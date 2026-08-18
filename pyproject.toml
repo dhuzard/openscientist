@@ -44,8 +44,9 @@ dependencies = [
     "anthropic>=0.78.0",
     "requests>=2.31.0",
 
-    # MCP server
-    "mcp[cli]>=1.0.0",
+    # MCP server. Capped below 2, which renamed FastMCP to MCPServer and so
+    # breaks openscientist_tools.server on import.
+    "mcp[cli]>=1.0.0,<2",
 
     # Environment & config
     "python-dotenv>=1.0.0",

@@ -2851,7 +2851,7 @@ requires-dist = [
     { name = "linkml-store", extras = ["dremio"], specifier = ">=0.2.0" },
     { name = "markdown", specifier = ">=3.5.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.0.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.0.0,<2" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "nicegui", specifier = ">=3.7.1" },
     { name = "numpy", specifier = ">=2.2.0,<2.4" },

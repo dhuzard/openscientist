@@ -35,14 +35,10 @@ COPY pyproject.toml uv.lock README.md ./
 # Stub package so uv can do the editable install
 RUN mkdir -p src/openscientist && touch src/openscientist/__init__.py
 
-# Install deps from the lock — cached until pyproject.toml or uv.lock changes.
-# `uv pip install -e .` re-resolves pyproject and never reads uv.lock, so the
-# image drifted from the dependency set CI tests: mcp floated to 2.x, which
-# dropped mcp.server.fastmcp and took the openscientist-tools MCP server down in
-# every container job while CI stayed green on the locked 1.x. Export pins the
-# locked versions; the project goes in after with --no-deps so it cannot pull
-# anything unlocked back in.
-RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+# Install deps from the lock: `uv pip install -e .` re-resolves pyproject and
+# ignores uv.lock, which floated mcp to 2.x and broke the tools MCP server.
+# --no-deps keeps the project install from pulling anything unlocked back in.
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
         -o /tmp/requirements.txt \
     && uv pip install --system -r /tmp/requirements.txt \
     && uv pip install --system --no-deps -e . \

@@ -57,9 +57,7 @@ RUN useradd --uid 1001 --create-home --shell /bin/bash agent
 
 WORKDIR /app
 
-# Copy project files (README.md required by pyproject.toml readme field).
-# uv.lock is required, not optional: --frozen below must fail loudly rather than
-# silently fall back to a fresh resolve, which is the bug this guards against.
+# Copy project files (README.md required by pyproject.toml readme field)
 COPY pyproject.toml README.md uv.lock ./
 COPY src/ ./src/
 
@@ -67,11 +65,7 @@ COPY src/ ./src/
 # in pyproject.toml). The official openai-codex bundles its codex binary only as
 # a musl wheel, which is dropped via the uv override in pyproject.toml. The
 # binary is provisioned separately below.
-#
-# From the lock, for the reason spelled out in Dockerfile.base: a fresh resolve
-# here is what let mcp reach 2.x and killed the MCP tools server in this very
-# image, invisibly, because CI installs from the lock and stayed green.
-RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
         -o /tmp/requirements.txt \
     && uv pip install --system -r /tmp/requirements.txt \
     && uv pip install --system --no-deps -e . \
