@@ -58,14 +58,18 @@ RUN useradd --uid 1001 --create-home --shell /bin/bash agent
 WORKDIR /app
 
 # Copy project files (README.md required by pyproject.toml readme field)
-COPY pyproject.toml README.md uv.lock* ./
+COPY pyproject.toml README.md uv.lock ./
 COPY src/ ./src/
 
 # Install dependencies including claude-agent-sdk and openai-codex (both listed
 # in pyproject.toml). The official openai-codex bundles its codex binary only as
 # a musl wheel, which is dropped via the uv override in pyproject.toml. The
 # binary is provisioned separately below.
-RUN uv pip install --system -e .
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
+        -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt \
+    && uv pip install --system --no-deps -e . \
+    && rm /tmp/requirements.txt
 
 # Install the open-codex CLI built in the codex-build stage above (namespace
 # tools, function apply_patch, web_search capability gate, and the apply_patch
