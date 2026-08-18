@@ -16,6 +16,7 @@ import pytest
 
 from openscientist.agent.base import AgentConfig, TurnOutcome
 from openscientist.agent.omp_agent import OmpAgent
+from openscientist.exceptions import McpToolsUnavailableError
 from openscientist.models import ModelProfile
 from openscientist.providers.base import OmpModelCatalog, self_hosted_omp_model_catalog
 from openscientist.transcript import AssistantText, Reasoning, ToolCall, ToolResult, UserPrompt
@@ -105,10 +106,12 @@ def _write_stub(path: Path, stream: list[dict[str, object]]) -> None:
     """Write a fake-omp that records argv and emits ``stream``.
 
     Env knobs: ``OMP_STUB_ARGV_OUT``, ``OMP_STUB_SLEEP``, ``OMP_STUB_EXIT``,
-    ``OMP_STUB_EMIT``, ``OMP_STUB_EMIT_FIRST`` (emit before sleeping, so a
-    timeout still has a partial stream to parse), and ``OMP_STUB_CHILD_PID_OUT``
-    (spawn a long-lived grandchild and record its pid, standing in for the MCP
-    server children real omp starts).
+    ``OMP_STUB_EMIT``, ``OMP_STUB_MCP_HANDSHAKE_SKIP`` (spawns that skip the
+    handshake marker), ``OMP_STUB_FAIL_AFTER`` (spawn index that starts failing),
+    ``OMP_STUB_EMIT_FIRST`` (emit before sleeping, so a timeout still has a
+    partial stream to parse), and ``OMP_STUB_CHILD_PID_OUT`` (spawn a long-lived
+    grandchild and record its pid, standing in for the MCP server children real
+    omp starts).
     """
     payload = json.dumps(stream)
     script = f"""#!/usr/bin/env python3
@@ -122,6 +125,34 @@ if child_out:
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     with open(child_out, "w") as fh:
         fh.write(str(child.pid))
+
+
+def spawn_index():
+    cwd = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--cwd=")), "")
+    if not cwd:
+        return 0, ""
+    counter = os.path.join(cwd, ".omp_stub_spawns")
+    try:
+        n = int(open(counter).read())
+    except (OSError, ValueError):
+        n = 0
+    with open(counter, "w") as fh:
+        fh.write(str(n + 1))
+    return n, cwd
+
+
+SPAWN, CWD = spawn_index()
+fail_after = os.environ.get("OMP_STUB_FAIL_AFTER")
+failing = fail_after is not None and SPAWN >= int(fail_after)
+
+
+def write_mcp_handshake():
+    # Imitates the real server touching this on tools/list.
+    if not CWD or SPAWN < int(os.environ.get("OMP_STUB_MCP_HANDSHAKE_SKIP", "0")):
+        return
+    d = os.path.join(CWD, ".omp")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "mcp_handshake"), "w").close()
 
 
 def write_session():
@@ -143,12 +174,14 @@ def write_session():
 
 
 def emit():
-    if os.environ.get("OMP_STUB_EMIT", "1") == "1":
-        write_session()
-        for event in json.loads({payload!r}):
-            print(json.dumps(event), flush=True)
+    if failing or os.environ.get("OMP_STUB_EMIT", "1") != "1":
+        return
+    write_session()
+    for event in json.loads({payload!r}):
+        print(json.dumps(event), flush=True)
 
 
+write_mcp_handshake()
 emit_first = os.environ.get("OMP_STUB_EMIT_FIRST") == "1"
 if emit_first:
     emit()
@@ -157,7 +190,7 @@ if sleep:
     time.sleep(sleep)
 if not emit_first:
     emit()
-sys.exit(int(os.environ.get("OMP_STUB_EXIT", "0")))
+sys.exit(1 if failing else int(os.environ.get("OMP_STUB_EXIT", "0")))
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -212,6 +245,55 @@ class TestBuildArgs:
     def test_model_override_wins(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path, model_override="opus-override")
         assert "--model=opus-override" in agent._build_args(tmp_path, tmp_path, tmp_path)
+
+
+class TestMissingMcpToolsGuard:
+    """Keys off the server's handshake marker, not the agent's own tool calls."""
+
+    @pytest.mark.asyncio
+    async def test_completes_when_the_server_was_asked_for_its_tools(
+        self, tmp_path: Path, stub_bin: Path
+    ) -> None:
+        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+        assert result.outcome is TurnOutcome.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_fails_when_the_server_was_never_asked(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE_SKIP", "99")
+        with pytest.raises(McpToolsUnavailableError, match="not available"):
+            await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+
+    @pytest.mark.asyncio
+    async def test_a_marker_left_by_an_earlier_turn_is_not_trusted(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each turn respawns the server, so the marker must describe this run."""
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE_SKIP", "99")
+        agent = _agent(tmp_path, system_prompt="SYS")
+        marker = agent._mcp_handshake_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        with pytest.raises(McpToolsUnavailableError):
+            await agent.run_iteration("go")
+
+    @pytest.mark.asyncio
+    async def test_a_retry_that_gets_its_tools_completes(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE_SKIP", "1")
+        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+        assert result.outcome is TurnOutcome.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_a_retry_that_fails_is_not_blamed_on_missing_tools(
+        self, tmp_path: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OMP_STUB_MCP_HANDSHAKE_SKIP", "99")
+        monkeypatch.setenv("OMP_STUB_FAIL_AFTER", "1")
+        result = await _agent(tmp_path, system_prompt="SYS").run_iteration("go")
+        assert result.outcome is TurnOutcome.FAILED
 
 
 class TestOmpConfigOverlay:

@@ -30,6 +30,7 @@ from openscientist.agent.base import (
     TokenUsage,
     TurnOutcome,
 )
+from openscientist.exceptions import McpToolsUnavailableError
 from openscientist.providers.base import LLM_PROXY_URL_ENV, Provider
 from openscientist.settings import get_settings
 from openscientist.transcript import OMP, TranscriptEntry
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MCP_SERVER_NAME = "openscientist-tools"
+
+#: Written by the tools server on tools/list.
+MCP_HANDSHAKE_MARKER = "mcp_handshake"
 
 # Wall-clock bound on one turn; a stuck turn is cut and the loop advances.
 _TURN_TIMEOUT_SECONDS = int(os.environ.get("OPENSCIENTIST_OMP_TURN_TIMEOUT", "900"))
@@ -371,6 +375,18 @@ class OmpAgent(AbstractAgent[Provider]):
         ]
         return "".join(parts)
 
+    def _mcp_handshake_marker(self) -> Path:
+        return self._omp_dir() / MCP_HANDSHAKE_MARKER
+
+    def _mcp_handshake_seen(self) -> bool:
+        return self._mcp_handshake_marker().exists()
+
+    def _clear_mcp_handshake(self) -> None:
+        self._mcp_handshake_marker().unlink(missing_ok=True)
+
+    def _missing_mcp_tools(self, result: IterationResult) -> bool:
+        return result.outcome is TurnOutcome.COMPLETED and not self._mcp_handshake_seen()
+
     @staticmethod
     def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
         count = 0
@@ -444,6 +460,7 @@ class OmpAgent(AbstractAgent[Provider]):
         system_prompt_path = self._write_system_prompt()
         self._write_mcp_config()
         config_path = self._write_omp_config()
+        self._clear_mcp_handshake()
         prompt_path = self._write_turn_prompt(prompt)
         args = self._build_args(system_prompt_path, prompt_path, config_path)
 
@@ -586,7 +603,23 @@ class OmpAgent(AbstractAgent[Provider]):
         try:
             # No wait_for here: _run_omp owns the timeout so it can stop the
             # process tree and keep the output that already arrived.
-            return await self._run_omp(prompt)
+            result = await self._run_omp(prompt)
+
+            # omp sometimes requests the model before asking for the tool list,
+            # silently leaving the agent on built-ins. Fatal, not FAILED: a failed
+            # report turn still completes the job when a report file exists.
+            if self._missing_mcp_tools(result):
+                logger.warning("tools server was never asked for its tools, retrying the turn")
+                result = await self._run_omp(prompt)
+                if self._missing_mcp_tools(result):
+                    raise McpToolsUnavailableError(
+                        "openscientist-tools MCP tools were not available to the agent "
+                        "after a retry"
+                    )
+            return result
+        except McpToolsUnavailableError:
+            logger.error("openscientist-tools MCP tools unavailable, failing the job")
+            raise
         except Exception as e:
             logger.error("omp run failed: %s", e, exc_info=True)
             return IterationResult(
