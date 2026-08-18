@@ -631,6 +631,13 @@ class TestAirgapFirewallLaunch:
         assert "openscientist:8081" in entries
         assert "host.docker.internal:11434" not in entries
 
+    def test_airgap_launch_passes_no_command(self) -> None:
+        """The firewall entrypoint execs its arguments and falls back to the agent
+        entrypoint only when it gets none, so a command here would silently replace
+        the agent with whatever was passed."""
+        run_kwargs = self._launch(self._settings(airgap=True))
+        assert "command" not in run_kwargs or run_kwargs["command"] is None
+
     def test_non_airgap_launch_has_no_firewall(self) -> None:
         run_kwargs = self._launch(self._settings(airgap=False))
         assert run_kwargs["cap_add"] is None
