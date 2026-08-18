@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 _MCP_SERVER_NAME = "openscientist-tools"
 
+#: Written by the tools server on tools/list.
+MCP_HANDSHAKE_MARKER = "mcp_handshake"
+
 # Wall-clock bound on one turn; a stuck turn is cut and the loop advances.
 _TURN_TIMEOUT_SECONDS = int(os.environ.get("OPENSCIENTIST_OMP_TURN_TIMEOUT", "900"))
 
@@ -359,22 +362,16 @@ class OmpAgent(AbstractAgent[Provider]):
         return "".join(parts)
 
     def _mcp_handshake_marker(self) -> Path:
-        """Touched by the tools server when a client asks for its tool inventory."""
-        return self._omp_dir() / "mcp_handshake"
+        return self._omp_dir() / MCP_HANDSHAKE_MARKER
 
     def _mcp_handshake_seen(self) -> bool:
-        """True if openscientist-tools was asked for its tools during this run.
-
-        Counting the agent's own MCP calls cannot answer this: a report turn
-        legitimately writes the file with the built-in ``write`` and calls no MCP
-        tool at all, and omp exposes no way to ask which servers it connected to.
-        The server records the handshake itself instead.
-        """
         return self._mcp_handshake_marker().exists()
 
     def _clear_mcp_handshake(self) -> None:
-        """Drop any marker from an earlier turn so it only describes this run."""
         self._mcp_handshake_marker().unlink(missing_ok=True)
+
+    def _missing_mcp_tools(self, result: IterationResult) -> bool:
+        return result.outcome is TurnOutcome.COMPLETED and not self._mcp_handshake_seen()
 
     @staticmethod
     def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
@@ -594,33 +591,20 @@ class OmpAgent(AbstractAgent[Provider]):
             # process tree and keep the output that already arrived.
             result = await self._run_omp(prompt)
 
-            # omp sometimes issues the model request before it has asked
-            # openscientist-tools for its tool list, leaving the agent with only
-            # omp's built-ins and no error on any channel (openscientist-io#263).
-            # The server touches a marker when asked, so its absence means the
-            # agent had no execute_code and no way to record anything.
-            #
-            # This is fatal, not a failed turn: the orchestrator treats a failed
-            # report turn as recoverable and completes the job if a report file
-            # exists, and the agent can still write one with the built-in `write`
-            # -- which is exactly the confident-report-over-nothing outcome this
-            # is meant to stop.
-            if result.outcome is TurnOutcome.COMPLETED and not self._mcp_handshake_seen():
-                logger.warning(
-                    "openscientist-tools was never asked for its tool inventory this "
-                    "turn, so the agent had no MCP tools. Retrying the turn once."
-                )
+            # omp sometimes requests the model before asking for the tool list,
+            # silently leaving the agent on built-ins. Fatal, not FAILED: a failed
+            # report turn still completes the job when a report file exists.
+            if self._missing_mcp_tools(result):
+                logger.warning("tools server was never asked for its tools, retrying the turn")
                 result = await self._run_omp(prompt)
-                if not self._mcp_handshake_seen():
+                if self._missing_mcp_tools(result):
                     raise McpToolsUnavailableError(
                         "openscientist-tools MCP tools were not available to the agent "
-                        "after a retry (see openscientist-io#263)"
+                        "after a retry"
                     )
             return result
         except McpToolsUnavailableError:
-            # Fatal by design: let it reach the orchestrator so the job fails
-            # rather than completing over an empty knowledge state.
-            logger.error("openscientist-tools MCP tools unavailable; failing the job")
+            logger.error("openscientist-tools MCP tools unavailable, failing the job")
             raise
         except Exception as e:
             logger.error("omp run failed: %s", e, exc_info=True)

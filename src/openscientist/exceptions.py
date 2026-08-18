@@ -59,9 +59,4 @@ class PDFGenerationError(OpenScientistError):
 
 
 class McpToolsUnavailableError(OpenScientistError):
-    """The agent ran without the openscientist-tools MCP tools.
-
-    Fatal rather than a failed turn: the agent cannot analyse or record
-    anything, and the condition persists across turns, so continuing produces a
-    report with nothing behind it (openscientist-io#263).
-    """
+    """Raised when a turn ran without the openscientist-tools MCP tools."""
