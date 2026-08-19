@@ -183,6 +183,17 @@ def _register_share_routes() -> None:
         logger.warning("Failed to register share routes: %s", e)
 
 
+def _register_download_routes() -> None:
+    """Register the session-authenticated artifact download route."""
+    try:
+        from openscientist.webapp_components.artifact_routes import router as download_router
+
+        app.include_router(download_router)
+        logger.info("Artifact download route registered at /web/jobs")
+    except Exception as e:
+        logger.warning("Failed to register artifact download routes: %s", e)
+
+
 def _register_review_routes() -> None:
     """Register review token redemption route on the NiceGUI app."""
     try:
@@ -502,6 +513,7 @@ def _configure_host_app(host_app: FastAPI, jobs_dir: Path) -> None:
     _register_api_routes(host_app)
     _register_oauth_routes()
     _register_share_routes()
+    _register_download_routes()
     _register_review_routes()
 
     _initialize_job_manager_runtime(jobs_dir)

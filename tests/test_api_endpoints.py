@@ -1588,9 +1588,6 @@ class TestJobEndpoints:
         test_job_db: Job,
         tmp_path,
     ):
-        """Building the ZIP must run via run_in_threadpool, not directly on
-        the event loop -- a slow build otherwise blocks this shared
-        FastAPI/NiceGUI process for every other connected user."""
         _, full_key = test_api_key_db
 
         job_dir = tmp_path / "jobs" / str(test_job_db.id)

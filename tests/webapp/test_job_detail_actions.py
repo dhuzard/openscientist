@@ -93,41 +93,9 @@ class TestTimelineHeaderText:
         assert job_detail._timeline_header_text("Found X", "", True) == "Found X [in progress]"
 
 
-class TestDownloadArtifactsZipOffloadsToWorkerThread:
-    """Building the artifacts ZIP reads/compresses the whole job dir, which
-    can take a while for data-heavy jobs. It must run via nicegui.run.io_bound
-    (a worker thread) rather than directly on the shared event loop, or one
-    slow download blocks the entire app for every connected user."""
+class TestDownloadArtifactsZipStreamsOverHttp:
+    def test_triggers_http_download_of_session_route(self) -> None:
+        with patch.object(job_detail, "ui") as mock_ui:
+            job_detail._download_artifacts_zip("job-1")
 
-    @pytest.mark.asyncio
-    async def test_zip_creation_runs_via_io_bound(self, tmp_path) -> None:
-        fake_buffer = MagicMock()
-        fake_buffer.getvalue.return_value = b"zip-bytes"
-
-        async def fake_io_bound(func, *args):
-            assert func is job_detail.create_artifacts_zip
-            assert args == (tmp_path, "job-1")
-            return fake_buffer
-
-        with (
-            patch.object(job_detail.run, "io_bound", side_effect=fake_io_bound) as mock_io_bound,
-            patch.object(job_detail, "ui") as mock_ui,
-        ):
-            await job_detail._download_artifacts_zip(tmp_path, "job-1")
-
-        mock_io_bound.assert_called_once()
-        mock_ui.download.assert_called_once_with(b"zip-bytes", filename="job-1_artifacts.zip")
-
-    @pytest.mark.asyncio
-    async def test_zip_creation_failure_notifies_without_crashing(self, tmp_path) -> None:
-        async def failing_io_bound(func, *args):
-            raise OSError("disk full")
-
-        with (
-            patch.object(job_detail.run, "io_bound", side_effect=failing_io_bound),
-            patch.object(job_detail, "ui") as mock_ui,
-        ):
-            await job_detail._download_artifacts_zip(tmp_path, "job-1")
-
-        mock_ui.notify.assert_called_once()
-        mock_ui.download.assert_not_called()
+        mock_ui.download.assert_called_once_with("/web/jobs/job-1/artifacts.zip")

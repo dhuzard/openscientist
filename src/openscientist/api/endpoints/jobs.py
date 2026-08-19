@@ -707,10 +707,6 @@ async def download_artifacts(
         archive_path = Path(tmp_file.name)
 
     try:
-        # Building the ZIP reads and compresses every file in job_dir, which
-        # can take a while for data-heavy jobs -- run it in a worker thread
-        # so it doesn't block the shared event loop (this FastAPI app and the
-        # NiceGUI UI run on the same process/loop) for everyone else.
         await run_in_threadpool(
             create_artifacts_zip_file,
             job_dir=job_dir,
