@@ -604,14 +604,10 @@ Then call `set_consensus_answer` with a 1–3 sentence direct answer.
 
 
 def _airgap_search_note() -> str:
-    """Air-gapped literature guidance, or empty when online.
+    """The air-gapped search_pubmed guidance, or empty when online.
 
-    Air-gapped runs query a local MEDLINE mirror over a Postgres full-text
-    index, which ANDs every term -- unlike live PubMed, which expands terms via
-    MeSH and ranks partial matches. A 7-term query that NCBI answers happily
-    matches nothing locally: measured on this corpus, 6 of 8 real agent queries
-    returned zero rows. The agent cannot see why, because an empty result is
-    reported as a plain "No papers found".
+    The local mirror ANDs every term over a title and abstract index, so long
+    queries that live PubMed answers via MeSH expansion match nothing locally.
     """
     from openscientist.settings import get_settings
 
