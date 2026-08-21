@@ -767,8 +767,9 @@ class KnowledgeState:
         Set version/environment metadata in config.
 
         Args:
-            version_info: Dict with keys like 'claude_model', 'claude_code_version',
-                         'openscientist_commit', 'docker_image_id'
+            version_info: Dict with keys like 'claude_code_version',
+                         'claude_agent_sdk_version', 'openscientist_commit',
+                         'docker_container_id'
         """
         self.data["config"]["version_info"] = version_info
 

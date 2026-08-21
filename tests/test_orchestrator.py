@@ -6,6 +6,7 @@ unit testing.
 """
 
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -56,6 +57,30 @@ class TestGetVersionMetadata:
         mock_path_cls.return_value.exists.return_value = False
         info = get_version_metadata()
         assert isinstance(info, dict)
+
+    def test_records_sdk_versions(self):
+        info = get_version_metadata()
+        assert info["claude_code_version"]
+        assert info["claude_agent_sdk_version"]
+
+    def test_sdk_version_break_keeps_cli_version(self):
+        with patch.dict(sys.modules, {"claude_agent_sdk._version": None}):
+            info = get_version_metadata()
+        assert info["claude_code_version"]
+        assert "claude_agent_sdk_version" not in info
+
+    def test_cli_version_break_keeps_sdk_version(self):
+        with patch.dict(sys.modules, {"claude_agent_sdk._cli_version": None}):
+            info = get_version_metadata()
+        assert info["claude_agent_sdk_version"]
+        assert "claude_code_version" not in info
+
+    def test_both_version_modules_break_fails_soft(self):
+        broken = {"claude_agent_sdk._cli_version": None, "claude_agent_sdk._version": None}
+        with patch.dict(sys.modules, broken):
+            info = get_version_metadata()
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
 
 
 # ─── update_job_status ────────────────────────────────────────────────

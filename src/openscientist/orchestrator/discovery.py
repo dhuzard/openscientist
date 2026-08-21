@@ -596,6 +596,21 @@ def get_version_metadata() -> dict[str, str]:
     except OSError:
         pass
 
+    # Private modules of an unpinned SDK; omit each key if its module moves.
+    try:
+        from claude_agent_sdk._cli_version import __cli_version__
+
+        metadata["claude_code_version"] = __cli_version__
+    except Exception:
+        pass
+
+    try:
+        from claude_agent_sdk._version import __version__
+
+        metadata["claude_agent_sdk_version"] = __version__
+    except Exception:
+        pass
+
     return metadata
 
 
