@@ -6,6 +6,7 @@ unit testing.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from openscientist.orchestrator import (
     increment_ks_iteration,
     update_job_status,
 )
+from openscientist.settings import clear_settings_cache
 
 # ─── get_version_metadata ─────────────────────────────────────────────
 
@@ -58,29 +60,122 @@ class TestGetVersionMetadata:
         info = get_version_metadata()
         assert isinstance(info, dict)
 
-    def test_records_sdk_versions(self):
+    def test_records_sdk_versions(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
         info = get_version_metadata()
         assert info["claude_code_version"]
         assert info["claude_agent_sdk_version"]
 
-    def test_sdk_version_break_keeps_cli_version(self):
+    def test_sdk_version_break_keeps_cli_version(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
         with patch.dict(sys.modules, {"claude_agent_sdk._version": None}):
             info = get_version_metadata()
         assert info["claude_code_version"]
         assert "claude_agent_sdk_version" not in info
 
-    def test_cli_version_break_keeps_sdk_version(self):
+    def test_cli_version_break_keeps_sdk_version(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
         with patch.dict(sys.modules, {"claude_agent_sdk._cli_version": None}):
             info = get_version_metadata()
         assert info["claude_agent_sdk_version"]
         assert "claude_code_version" not in info
 
-    def test_both_version_modules_break_fails_soft(self):
+    def test_both_version_modules_break_fails_soft(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
         broken = {"claude_agent_sdk._cli_version": None, "claude_agent_sdk._version": None}
         with patch.dict(sys.modules, broken):
             info = get_version_metadata()
         assert "claude_code_version" not in info
         assert "claude_agent_sdk_version" not in info
+
+
+@pytest.fixture
+def pinned_harness(monkeypatch):
+    """Pin provider + harness env and rebuild settings so factory resolution is real.
+
+    Also pins OPENSCIENTIST_COMMIT so get_commit() never shells out, keeping the
+    subprocess monkeypatches below scoped to the harness version probe.
+    """
+
+    def pin(provider: str, harness: str) -> None:
+        monkeypatch.setenv("OPENSCIENTIST_PROVIDER", provider)
+        monkeypatch.setenv("OPENSCIENTIST_HARNESS", harness)
+        monkeypatch.setenv("OPENSCIENTIST_COMMIT", "0123456789ab")
+        clear_settings_cache()
+
+    yield pin
+    clear_settings_cache()
+
+
+class TestVersionMetadataHarness:
+    """The resolved harness id and its version in the provenance metadata."""
+
+    def test_claude_code_records_sdk_versions_without_probing(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "claude_code")
+        monkeypatch.setattr(
+            subprocess, "run", MagicMock(side_effect=AssertionError("no CLI probe expected"))
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "claude_code"
+        assert info["agent_harness_version"] == info["claude_code_version"]
+        assert info["claude_agent_sdk_version"]
+
+    def test_auto_resolves_to_provider_family(self, pinned_harness):
+        pinned_harness("anthropic", "auto")
+        info = get_version_metadata()
+        assert info["agent_harness"] == "claude_code"
+
+    def test_omp_probes_the_binary_the_agent_runs(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", "/opt/pinned/omp")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="omp/17.1.5\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert info["agent_harness_version"] == "17.1.5"
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
+        assert calls == [["/opt/pinned/omp", "--version"]]
+
+    def test_codex_probes_the_binary_the_agent_runs(self, pinned_harness, monkeypatch):
+        pinned_harness("openai", "codex")
+        monkeypatch.setenv("OPENSCIENTIST_CODEX_BIN", "/opt/pinned/codex")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.0.0\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "codex"
+        assert info["agent_harness_version"] == "0.0.0"
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
+        assert calls == [["/opt/pinned/codex", "--version"]]
+
+    def test_missing_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setattr(subprocess, "run", MagicMock(side_effect=FileNotFoundError("omp")))
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
+
+    def test_hanging_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("openai", "codex")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.TimeoutExpired(cmd=["codex", "--version"], timeout=3)),
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "codex"
+        assert "agent_harness_version" not in info
 
 
 # ─── update_job_status ────────────────────────────────────────────────
