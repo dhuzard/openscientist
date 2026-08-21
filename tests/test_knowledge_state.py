@@ -314,6 +314,25 @@ class TestVersionInfo:
 
         assert job.version_info is None
 
+    async def test_reloaded_state_does_not_null_recorded_version_info(self, ks, db_session):
+        job = Job(research_question="What drives metabolite X?", status="running")
+        db_session.add(job)
+        await db_session.commit()
+
+        recorded = {"agent_harness": "omp", "agent_harness_version": "17.4.0"}
+        ks.set_version_info(recorded)
+        await ks.save_to_database(str(job.id), session=db_session)
+        await db_session.refresh(job)
+
+        # Report regeneration reloads state from the DB (its config carries no
+        # version_info) and saves again. The recorded provenance must survive.
+        reloaded = KnowledgeState._new_from_job_record(str(job.id), job)
+        assert "version_info" not in reloaded.data["config"]
+        await reloaded.save_to_database(str(job.id), session=db_session)
+        await db_session.refresh(job)
+
+        assert job.version_info == recorded
+
 
 class TestGetReportSummary:
     """Tests for the comprehensive report summary generation."""

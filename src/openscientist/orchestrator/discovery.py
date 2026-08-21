@@ -577,8 +577,8 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
 
 
 def _harness_binary(harness: AgentBackend) -> str:
-    """The binary the harness agent will launch, via the agents' own (private)
-    resolvers so env overrides like OPENSCIENTIST_OMP_BIN stay honoured.
+    """The binary the harness agent will launch, via the agents' own resolvers
+    so env overrides stay honoured.
     """
     if harness is AgentBackend.CODEX:
         from openscientist.agent.codex_agent import _resolve_codex_bin
@@ -625,9 +625,8 @@ def get_version_metadata() -> dict[str, str]:
     except OSError:
         pass
 
-    # The harness that will actually drive the job (resolved, never the literal
-    # "auto"). A resolution failure surfaces fatally at agent build; here it just
-    # leaves the harness keys unrecorded.
+    # The resolved harness driving the job, never the literal "auto". A failure
+    # here also aborts agent build, so best-effort: leave the keys unrecorded.
     try:
         harness = agent_class_for_provider_id(get_settings().provider.provider_id).backend
     except Exception:

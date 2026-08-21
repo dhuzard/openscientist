@@ -177,6 +177,39 @@ class TestVersionMetadataHarness:
         assert info["agent_harness"] == "codex"
         assert "agent_harness_version" not in info
 
+    def test_failing_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.CalledProcessError(1, ["omp", "--version"])),
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
+
+    def test_unparseable_version_records_the_raw_line(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", "/opt/pinned/omp")
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="omp nightly build\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness_version"] == "omp nightly build"
+
+    def test_blank_version_output_records_nothing(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
+
 
 # ─── update_job_status ────────────────────────────────────────────────
 
