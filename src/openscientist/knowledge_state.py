@@ -811,6 +811,9 @@ class KnowledgeState:
             return
         job.current_iteration = int(self.data.get("iteration", 1))
         job.data_summary = _sanitize_for_json(self.data.get("data_summary") or {})
+        # States loaded from the DB carry no version_info; don't null a recorded value.
+        if version_info := self.data["config"].get("version_info"):
+            job.version_info = _sanitize_for_json(version_info)
         job.agent_status = self.data.get("agent_status")
         updated_at_raw = self.data.get("agent_status_updated_at")
         if isinstance(updated_at_raw, str):
