@@ -43,6 +43,8 @@ ${accept_rules}    }
 }
 NFT
 
+# setpriv keeps Docker's HOME=/root (root entrypoint), unreadable by the agent uid.
+export HOME=/home/agent
 if [ "$#" -eq 0 ]; then
     set -- python /agent-entrypoint.py
 fi
