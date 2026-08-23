@@ -110,9 +110,19 @@ class BedrockProvider(ClaudeCompatible):
             }
         return {}
 
-    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+    def proxied_container_env(
+        self,
+        *,
+        proxy_base_url: str,
+        placeholder: str,
+        gcp_credentials_container_path: str | None = None,
+    ) -> dict[str, str]:
         # Strip any SigV4 credential: bearer mode routes through the proxy.
-        env = super().proxied_container_env(proxy_base_url=proxy_base_url, placeholder=placeholder)
+        env = super().proxied_container_env(
+            proxy_base_url=proxy_base_url,
+            placeholder=placeholder,
+            gcp_credentials_container_path=gcp_credentials_container_path,
+        )
         if env.get("ANTHROPIC_BEDROCK_BASE_URL") == proxy_base_url:
             for key in (
                 "AWS_ACCESS_KEY_ID",
