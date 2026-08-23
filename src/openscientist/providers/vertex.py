@@ -80,15 +80,16 @@ class VertexProvider(ClaudeCompatible):
                 ]
             )
         )
-        if provider.google_application_credentials:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = (
-                gcp_credentials_container_path or provider.google_application_credentials
-            )
+        if gcp_credentials_container_path:
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = gcp_credentials_container_path
         return env
 
     def claude_sdk_env(self) -> dict[str, str]:
         """Vertex routing/auth env for the claude-agent-sdk CLI (its container env)."""
-        return type(self).container_env(get_settings().provider)
+        provider = get_settings().provider
+        return type(self).container_env(
+            provider, gcp_credentials_container_path=provider.google_application_credentials
+        )
 
     def harness_env(self, *, proxy: str | None) -> dict[str, str]:
         """Route omp at Vertex.
