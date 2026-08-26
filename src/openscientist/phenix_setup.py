@@ -1,7 +1,9 @@
 """Phenix environment setup for structural biology tools."""
 
 import os
+import posixpath
 import sys
+from pathlib import PureWindowsPath
 from typing import Any
 
 from openscientist.settings import get_settings
@@ -26,7 +28,7 @@ def validate_phenix_path(phenix_path: str) -> list[str]:
     """
     errors = []
 
-    if not phenix_path.startswith("/"):
+    if not phenix_path.startswith("/") and not PureWindowsPath(phenix_path).is_absolute():
         errors.append(
             f"PHENIX_PATH must be an absolute path (starting with '/'), "
             f"got: '{phenix_path}'\n"
@@ -80,7 +82,11 @@ def setup_phenix_env(*, raise_on_error: bool = False) -> dict[str, Any] | None:
         print(f"Warning: {error_msg}", file=sys.stderr)
         return None
 
-    bin_dir = os.path.join(phenix_path, "bin")
+    bin_dir = (
+        posixpath.join(phenix_path, "bin")
+        if phenix_path.startswith("/")
+        else os.path.join(phenix_path, "bin")
+    )
     if not os.path.isdir(bin_dir) or not os.path.exists(os.path.join(bin_dir, "phenix.about")):
         msg = (
             f"Phenix installation at {phenix_path} is missing bin/phenix.about. "

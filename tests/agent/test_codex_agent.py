@@ -16,9 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from openai_codex import ApprovalMode, Sandbox
+from openai_codex.generated.v2_all import ItemCompletedNotification, TurnCompletedNotification
 
 from openscientist.agent.base import AbstractAgent, AgentConfig, TokenUsage, TurnOutcome
 from openscientist.agent.codex_agent import CodexAgent
+from openscientist.transcript import ShellExecution, TaskNotification
+from openscientist.transcript.io import load_transcript
 from tests.helpers import StubCodexProvider
 
 
@@ -31,11 +34,18 @@ class _Provider(StubCodexProvider):
     def codex_model_provider_id(self) -> str:
         return "openai"
 
-    def codex_model_name(self) -> str:
+    def codex_model_name(self) -> str | None:
         return "gpt-test"
 
     def codex_sdk_env(self) -> dict[str, str]:
         return {"OPENAI_API_KEY": "sk-secret"}
+
+
+class _ImplicitModelProvider(_Provider):
+    """OpenAI-like provider that lets Codex select its account default."""
+
+    def codex_model_name(self) -> str | None:
+        return None
 
 
 class _Item:
@@ -50,12 +60,15 @@ class _Item:
 
 def _usage(*, input_tokens: int, cached: int, output: int, reasoning: int = 0) -> SimpleNamespace:
     """Build a usage payload shaped like the SDK's ThreadTokenUsage (``.last``
-    is the per-turn TokenUsageBreakdown)."""
+    is the per-turn TokenUsageBreakdown). The counts nest the way the SDK
+    reports them: cached sits inside input, reasoning inside output, and
+    ``total_tokens`` counts each token once."""
     last = SimpleNamespace(
         input_tokens=input_tokens,
         cached_input_tokens=cached,
         output_tokens=output,
         reasoning_output_tokens=reasoning,
+        total_tokens=input_tokens + output,
     )
     return SimpleNamespace(last=last, total=last)
 
@@ -116,6 +129,30 @@ def test_mcp_env_merges_tool_server_env(tmp_path: Path) -> None:
     assert agent._mcp_env()["OPENSCIENTIST_EXEC_TOKEN"] == "job-9.tok"
 
 
+def test_mcp_env_never_serializes_dvc_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DVC_API_KEY", "must-never-enter-codex-config")
+    monkeypatch.setenv("DVC_BASE_URL", "https://vendor.example")
+    monkeypatch.setenv("DVC_CONNECTION_LAB_API_KEY", "named-secret")
+    agent = _agent(
+        tmp_path,
+        tool_server_env={
+            "OPENSCIENTIST_DVC_CAPABILITY": "job-1.capability",
+            "OPENSCIENTIST_DVC_GATEWAY_URL": "http://web:8083",
+        },
+    )
+
+    agent._write_codex_config()
+
+    config_text = (tmp_path / ".codex" / "config.toml").read_text()
+    env = tomllib.loads(config_text)["mcp_servers"]["openscientist-tools"]["env"]
+    assert "must-never-enter-codex-config" not in config_text
+    assert "named-secret" not in config_text
+    assert not any(key.startswith("DVC_") for key in env)
+    assert env["OPENSCIENTIST_DVC_CAPABILITY"] == "job-1.capability"
+
+
 # ── run loop ───────────────────────────────────────────────────────────
 
 
@@ -133,6 +170,76 @@ async def test_run_iteration_success(tmp_path: Path) -> None:
     assert result.tool_calls == 1
     assert [e.type for e in result.transcript] == ["assistant_text", "shell_execution"]
     thread.run.assert_awaited_once_with("hello")
+
+
+@pytest.mark.asyncio
+async def test_streaming_turn_persists_completed_items_live(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    item_event = ItemCompletedNotification.model_validate(
+        {
+            "completedAtMs": 1,
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "type": "commandExecution",
+                "id": "shell-1",
+                "command": "python inspect.py",
+                "commandActions": [],
+                "cwd": "/job",
+                "status": "completed",
+                "aggregatedOutput": "QC complete",
+                "exitCode": 0,
+            },
+        }
+    )
+    completed_event = TurnCompletedNotification.model_validate(
+        {
+            "threadId": "thread-1",
+            "turn": {"id": "turn-1", "items": [], "status": "completed"},
+        }
+    )
+
+    async def notifications():
+        yield SimpleNamespace(payload=item_event)
+        yield SimpleNamespace(payload=completed_event)
+
+    stream = notifications()
+    turn = SimpleNamespace(id="turn-1", stream=MagicMock(return_value=stream))
+    thread = SimpleNamespace(turn=AsyncMock(return_value=turn))
+
+    result = await agent._run_streaming_turn(thread, "inspect")  # type: ignore[arg-type]
+
+    assert len(result.items) == 1
+    live_path = tmp_path / "provenance" / "current_turn_transcript.json"
+    assert live_path.exists()
+    assert any(isinstance(entry, ShellExecution) for entry in load_transcript(live_path))
+
+
+async def test_warm_model_profile_resolves_codex_account_default(tmp_path: Path) -> None:
+    agent = CodexAgent(AgentConfig(job_dir=tmp_path), _ImplicitModelProvider())
+    mock_codex_cls = MagicMock(name="AsyncCodex")
+    mock_codex_cls.return_value.models = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[
+                SimpleNamespace(
+                    is_default=True,
+                    model="gpt-5.5",
+                    id="gpt-5.5",
+                )
+            ]
+        )
+    )
+
+    settings = SimpleNamespace(provider=SimpleNamespace(model_context_tokens=None))
+    with (
+        patch("openscientist.agent.codex_agent.AsyncCodex", mock_codex_cls),
+        patch("openscientist.settings.get_settings", return_value=settings),
+    ):
+        await agent.warm_model_profile()
+
+    assert agent.effective_model_name == "gpt-5.5"
+    assert agent.model_profile.id == "gpt-5.5"
+    assert agent.model_profile.context_window_tokens == 1_050_000
 
 
 async def test_run_iteration_cuts_runaway_turn(
@@ -167,8 +274,53 @@ async def test_run_iteration_cuts_runaway_turn(
     assert result.outcome is TurnOutcome.TIMED_OUT
     assert result.success is False
     assert result.tool_calls == 0
-    assert result.transcript == []
+    assert len(result.transcript) == 1
+    assert isinstance(result.transcript[0], TaskNotification)
+    assert result.transcript[0].status == "timed_out"
     inst.close.assert_awaited()  # runaway turn torn down
+
+
+@pytest.mark.asyncio
+async def test_timeout_preserves_partial_streamed_tool_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed tool items survive a timeout and are exposed to the UI."""
+    import asyncio
+
+    from openai_codex import AsyncThread
+
+    from openscientist.agent import codex_agent
+
+    monkeypatch.setattr(codex_agent, "_TURN_TIMEOUT_SECONDS", 0.01)
+    agent = _agent(tmp_path)
+    thread = AsyncThread(MagicMock(), "thread-1")
+    monkeypatch.setattr(agent, "_ensure_thread", AsyncMock(return_value=thread))
+
+    async def partial_turn(_thread: AsyncThread, _prompt: str) -> object:
+        agent._partial_items.append(
+            _Item(
+                id="c1",
+                type="commandExecution",
+                command="python inspect.py",
+                aggregated_output="HTTP 500 from executor",
+                exit_code=1,
+                status="failed",
+            )
+        )
+        agent._persist_partial_transcript()
+        await asyncio.sleep(5)
+        return _turn()
+
+    monkeypatch.setattr(agent, "_run_streaming_turn", partial_turn)
+
+    result = await agent.run_iteration("go")
+
+    assert result.outcome is TurnOutcome.TIMED_OUT
+    assert result.tool_calls == 1
+    assert any(isinstance(entry, ShellExecution) for entry in result.transcript)
+    assert isinstance(result.transcript[-1], TaskNotification)
+    assert result.transcript[-1].status == "timed_out"
+    assert (tmp_path / "provenance" / "current_turn_transcript.json").exists()
 
 
 async def test_usage_subtraction_accumulates(tmp_path: Path) -> None:
@@ -188,11 +340,24 @@ async def test_usage_subtraction_accumulates(tmp_path: Path) -> None:
 
 
 def test_usage_from_payload_math() -> None:
+    """Both nested sub-counts leave their parent, so the buckets are disjoint
+    and sum to the payload's own total of 37 rather than over-counting to 40."""
     tu = CodexAgent._usage_from_payload(_usage(input_tokens=30, cached=12, output=7, reasoning=3))
     assert tu == TokenUsage(
         input_tokens=18,
-        output_tokens=7,
+        output_tokens=4,
         cache_read_tokens=12,
+        cache_write_tokens=0,
+        reasoning_tokens=3,
+    )
+
+
+def test_usage_from_payload_clamps_malformed_overlapping_counts() -> None:
+    tu = CodexAgent._usage_from_payload(_usage(input_tokens=5, cached=8, output=2, reasoning=3))
+    assert tu == TokenUsage(
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=8,
         cache_write_tokens=0,
         reasoning_tokens=3,
     )

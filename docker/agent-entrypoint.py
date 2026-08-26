@@ -65,6 +65,10 @@ async def main() -> int:
             from openscientist.skill_authoring import run_skill_authoring_turn_async
 
             result = await run_skill_authoring_turn_async(job_dir)
+        elif run_mode == "chat":
+            from openscientist.job_chat import run_chat_turn_async
+
+            result = await run_chat_turn_async(job_dir)
         elif run_mode == "report_only":
             result = await regenerate_report_async(job_dir)
         else:

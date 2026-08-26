@@ -7,6 +7,7 @@ without full page reloads.
 
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,19 +16,57 @@ from typing import Any
 from uuid import UUID
 
 from nicegui import ui
+from sqlalchemy import select
 
-from openscientist.agent.factory import backend_for_provider_id
-from openscientist.artifact_packager import create_artifacts_zip
+from openscientist.agent.factory import agent_class_for_provider_id
+from openscientist.agent_task_provenance import build_job_agent_task_provenance
+from openscientist.artifact_packager import create_assay_evidence_bundle_zip
+from openscientist.assays import AssayAdapter, get_assay_registry
+from openscientist.assays.review import (
+    AssayReviewItem,
+    create_assay_review_approval,
+    list_assay_reviews,
+    load_assay_review_context,
+)
 from openscientist.async_tasks import run_sync
-from openscientist.auth import get_current_user_id, is_current_user_admin, require_auth
+from openscientist.auth import (
+    can_current_user_start_jobs,
+    get_current_user_id,
+    is_current_user_admin,
+    require_auth,
+)
+from openscientist.database.models import CostRecord
 from openscientist.database.rls import set_current_user
-from openscientist.database.session import get_session_ctx
+from openscientist.database.session import get_session_ctx, get_thread_safe_session_ctx
+from openscientist.dvc.governance_status import (
+    DVCGovernanceEvidence,
+    DVCGovernanceStatus,
+    derive_dvc_governance_status,
+)
 from openscientist.job.types import JobInfo, JobStatus
-from openscientist.job_chat import get_chat_history, send_chat_message
+from openscientist.job_chat import (
+    extract_chat_artifact_images,
+    get_chat_history,
+    send_chat_message,
+)
+from openscientist.job_guidance import (
+    MAX_JOB_GUIDANCE_LENGTH,
+    JobGuidanceError,
+    queue_job_guidance,
+)
 from openscientist.job_manager import _db_get_job, _db_get_share_permission
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
 from openscientist.pdf_generator import markdown_to_pdf
+from openscientist.preclinical_context.models import PreclinicalStudyContext
+from openscientist.scientific_persistence import persist_job_scientific_state
+from openscientist.skill_provenance import build_job_skill_provenance
+from openscientist.transcript.io import load_transcript
+from openscientist.usage_summary import (
+    aggregate_model_usage,
+    aggregate_operation_usage,
+    summarize_usage,
+)
 from openscientist.webapp_components.error_handler import get_user_friendly_error
 from openscientist.webapp_components.ui_components import (
     STATUS_COLORS,
@@ -50,6 +89,10 @@ from openscientist.webapp_components.utils import (
     is_client_connected,
     safe_run_javascript,
     setup_timer_cleanup,
+)
+from openscientist.webapp_components.utils.transcript_parser import (
+    extract_agent_activity,
+    extract_agent_notifications,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +123,24 @@ def _load_knowledge_state(job_id: str, user_id: str) -> tuple[dict[str, Any] | N
     except Exception as e:
         logger.warning("Failed to load knowledge state from database for %s: %s", job_id, e)
         return None, "Knowledge state is unavailable. Please refresh the page."
+
+
+async def _load_job_cost_records(job_id: str, user_id: str) -> list[CostRecord]:
+    """Load model-turn usage visible to this user through job-scoped RLS."""
+    try:
+        async with get_thread_safe_session_ctx() as session:
+            await set_current_user(session, UUID(user_id))
+            result = await session.execute(
+                select(CostRecord)
+                .where(CostRecord.job_id == UUID(job_id))
+                .order_by(CostRecord.created_at.asc())
+            )
+            return list(result.scalars().all())
+    except (TypeError, ValueError):
+        logger.warning("Invalid job or user ID while loading usage for job %s", job_id)
+    except Exception:
+        logger.warning("Failed to load model usage for job %s", job_id, exc_info=True)
+    return []
 
 
 def _show_no_timeline_activity() -> None:
@@ -733,6 +794,7 @@ class _JobDetailContext:
     job_dir: Path
     ks_data: dict[str, Any] | None
     ks_load_error: str | None
+    cost_records: list[CostRecord]
     state: dict[str, Any]
     active_timers: list[Any]
     share_dialog: Any
@@ -811,6 +873,7 @@ def _build_job_detail_context(job_id: str) -> _JobDetailContext | None:
 
     job_dir = job_manager.jobs_dir / job_id
     ks_data, ks_load_error = _load_knowledge_state(job_id, user_id)
+    cost_records = run_sync(_load_job_cost_records(job_id, user_id))
 
     # Derive progress from already-loaded KS data instead of loading it again via get_job()
     iterations_completed, findings_count = _derive_progress_from_ks(
@@ -835,6 +898,7 @@ def _build_job_detail_context(job_id: str) -> _JobDetailContext | None:
         job_dir=job_dir,
         ks_data=ks_data,
         ks_load_error=ks_load_error,
+        cost_records=cost_records,
         state=_initial_job_state(job_info, ks_data),
         active_timers=active_timers,
         share_dialog=share_dialog,
@@ -872,20 +936,81 @@ def _render_job_status_notices(context: _JobDetailContext) -> None:
         _render_cancelled_notice(context.job_info)
     if context.job_info.status == JobStatus.PAUSED:
         _render_paused_notice()
+    if _can_restart_job(context):
+        ui.button(
+            "Restart Job",
+            icon="restart_alt",
+            on_click=lambda: _confirm_restart_job(context),
+        ).props("color=primary").classes("mb-4")
     if context.ks_load_error:
         _render_ks_loading_notice(context.ks_load_error)
 
 
-_PROVIDER_DISPLAY = {
-    "anthropic": "Anthropic",
-    "cborg": "CBORG",
-    "vertex": "Vertex AI",
-    "bedrock": "AWS Bedrock",
-    "foundry": "Azure AI Foundry",
-    "openai": "OpenAI",
-    "azure-openai": "Azure OpenAI",
-    "ollama": "Ollama (local)",
-}
+def _can_restart_job(context: _JobDetailContext) -> bool:
+    return bool(
+        context.can_edit
+        and can_current_user_start_jobs()
+        and context.job_info.status in {JobStatus.FAILED, JobStatus.CANCELLED}
+    )
+
+
+def _restart_job(context: _JobDetailContext) -> None:
+    """Re-authorize and restart a terminal job from persisted progress."""
+    user_id = get_current_user_id()
+    if not user_id or not can_current_user_start_jobs():
+        ui.notify("You are not authorized to restart jobs.", type="negative")
+        return
+
+    db_job = _load_db_job_for_user(context.job_id, user_id)
+    if db_job is None:
+        ui.notify("Job not found or access denied.", type="negative")
+        return
+    _, can_edit = _resolve_job_permissions(context.job_id, user_id, db_job)
+    if not can_edit:
+        ui.notify("You do not have permission to restart this job.", type="negative")
+        return
+
+    try:
+        context.job_manager.restart_job(context.job_id)
+    except ValueError as exc:
+        ui.notify(str(exc), type="negative")
+        return
+    except Exception:
+        logger.exception("Failed to restart job %s", context.job_id)
+        ui.notify("Failed to restart job. Please try again.", type="negative")
+        return
+
+    ui.notify("Job restarted from its last recorded iteration.", type="positive")
+    ui.navigate.to(f"/job/{context.job_id}")
+
+
+def _confirm_restart_job(context: _JobDetailContext) -> None:
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Restart job?").classes("text-lg font-bold")
+        ui.label(
+            "The job will continue from its last recorded iteration. Existing "
+            "findings and artifacts will be kept, and the interrupted iteration "
+            "may be repeated."
+        ).classes("text-sm text-gray-600")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def _confirm() -> None:
+                dialog.close()
+                _restart_job(context)
+
+            ui.button("Restart", icon="restart_alt", on_click=_confirm).props("color=primary")
+    dialog.open()
+
+
+def _provider_display_name(provider_id: str) -> str:
+    """The provider's own display name, or a titled id for an unknown provider."""
+    from openscientist.providers import provider_class
+
+    try:
+        return provider_class(provider_id).display_name
+    except ValueError:
+        return provider_id.title()
 
 
 def _format_model_name(llm_model: str | None) -> str | None:
@@ -928,11 +1053,9 @@ def _stats_badges(latest_job: Any, lit_count: int, hyp_count: int = 0) -> list[A
         badges.append(("Hypotheses", hyp_count, "orange"))
     provider_id = getattr(latest_job, "llm_provider", None)
     if provider_id:
-        backend = backend_for_provider_id(provider_id)
-        badges.append(("Agent", backend.display_name, "indigo"))
-        badges.append(
-            ("Provider", _PROVIDER_DISPLAY.get(provider_id.lower(), provider_id.title()), "teal")
-        )
+        agent_cls = agent_class_for_provider_id(provider_id)
+        badges.append(("Agent", agent_cls.display_name, "indigo"))
+        badges.append(("Provider", _provider_display_name(provider_id), "teal"))
     # Show the model as its own badge when known. This is independent of the
     # provider badge: the provider is where the model is hosted, the model is
     # which one ran. Codex on an account default records no model id, so the
@@ -1028,7 +1151,31 @@ def _confirm_stop_and_report(context: _JobDetailContext) -> None:
                     "Discovery stopped. Generating the report from saved work.",
                 )
 
-            ui.button("Stop and report", on_click=confirm).props("color=negative")
+            ui.button("Stop and Report", on_click=confirm).props("color=warning")
+    dialog.open()
+
+
+def _confirm_abort_job(context: _JobDetailContext) -> None:
+    """Confirm immediate termination without starting report generation."""
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Abort this job?").classes("text-lg font-bold text-red-800")
+        ui.label(
+            "No report will be generated. The active agent and its container will be stopped "
+            "immediately. Saved transcripts, findings, and artifacts will remain available, "
+            "and the cancelled job can be restarted later."
+        ).classes("text-sm text-gray-600 max-w-lg")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Keep running", on_click=dialog.close).props("flat color=grey")
+
+            def confirm() -> None:
+                dialog.close()
+                _run_owner_job_action(
+                    context,
+                    "cancel_job",
+                    "Job aborted. Agent execution stopped; no report will be generated.",
+                )
+
+            ui.button("Abort", icon="cancel", on_click=confirm).props("color=negative")
     dialog.open()
 
 
@@ -1063,6 +1210,64 @@ def _show_iteration_limit_dialog(context: _JobDetailContext) -> None:
     dialog.open()
 
 
+def _queue_job_idea(context: _JobDetailContext, content: str) -> bool:
+    """Queue owner-authored guidance without changing the active run state."""
+    if not context.is_owner:
+        ui.notify("Only the job owner can add ideas to this run.", type="negative")
+        return False
+
+    user_id = get_current_user_id()
+    if not user_id:
+        ui.notify("You must be signed in to add an idea.", type="negative")
+        return False
+
+    try:
+        run_sync(queue_job_guidance(context.job_id, UUID(user_id), content))
+    except JobGuidanceError as exc:
+        ui.notify(str(exc), type="warning")
+        return False
+    except Exception:
+        logger.exception("Failed to queue scientist idea for job %s", context.job_id)
+        ui.notify("The idea could not be queued. Please try again.", type="negative")
+        return False
+
+    ui.notify("Idea queued for the next iteration.", type="positive")
+    return True
+
+
+def _show_add_idea_dialog(context: _JobDetailContext) -> None:
+    """Collect non-blocking guidance for the next safe discovery boundary."""
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-xl"):
+        ui.label("Add an idea for the next iteration").classes("text-lg font-bold")
+        ui.label(
+            "The current turn will finish normally. Your idea will be included at the next "
+            "safe iteration boundary, and the run will not pause."
+        ).classes("text-sm text-gray-600")
+        ui.label("This is guidance for the investigation, not a scientific approval.").classes(
+            "text-sm text-amber-700"
+        )
+        idea_input = (
+            ui.textarea(
+                label="Idea or guidance",
+                placeholder=(
+                    "e.g., Compare activity by cage and inspect whether event timing explains "
+                    "the observed pattern..."
+                ),
+            )
+            .props(f"outlined autogrow counter maxlength={MAX_JOB_GUIDANCE_LENGTH}")
+            .classes("w-full")
+        )
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def queue_idea() -> None:
+                if _queue_job_idea(context, str(idea_input.value or "")):
+                    dialog.close()
+
+            ui.button("Queue idea", icon="lightbulb", on_click=queue_idea).props("color=primary")
+    dialog.open()
+
+
 def _available_run_controls(context: _JobDetailContext) -> set[str]:
     """Return lifecycle controls available to this user and job state."""
     if not context.is_owner:
@@ -1071,6 +1276,10 @@ def _available_run_controls(context: _JobDetailContext) -> set[str]:
     controls: set[str] = set()
     if status in {JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK}:
         controls.add("pause")
+    if status == JobStatus.RUNNING:
+        current_iteration = max(context.job_info.iterations_completed + 1, 1)
+        if current_iteration < context.job_info.max_iterations:
+            controls.add("add_idea")
     if status == JobStatus.PAUSED:
         controls.add("resume")
     if status in {
@@ -1089,6 +1298,15 @@ def _available_run_controls(context: _JobDetailContext) -> set[str]:
         JobStatus.PAUSED,
     }:
         controls.add("stop_and_report")
+    if status in {
+        JobStatus.PENDING,
+        JobStatus.QUEUED,
+        JobStatus.RUNNING,
+        JobStatus.AWAITING_FEEDBACK,
+        JobStatus.PAUSED,
+        JobStatus.GENERATING_REPORT,
+    }:
+        controls.add("abort")
     return controls
 
 
@@ -1107,6 +1325,12 @@ def _render_job_runtime_controls(context: _JobDetailContext) -> None:
                     "take effect."
                 ).classes("text-xs text-gray-600")
             with ui.row().classes("gap-2 flex-wrap"):
+                if "add_idea" in controls:
+                    ui.button(
+                        "Add idea",
+                        icon="lightbulb",
+                        on_click=lambda: _show_add_idea_dialog(context),
+                    ).props("color=primary")
                 if "pause" in controls:
                     ui.button(
                         "Pause",
@@ -1135,10 +1359,16 @@ def _render_job_runtime_controls(context: _JobDetailContext) -> None:
                     ).props("color=primary outline")
                 if "stop_and_report" in controls:
                     ui.button(
-                        "Stop and report",
+                        "Stop and Report",
                         icon="stop_circle",
                         on_click=lambda: _confirm_stop_and_report(context),
-                    ).props("color=negative outline")
+                    ).props("color=warning outline")
+                if "abort" in controls:
+                    ui.button(
+                        "Abort",
+                        icon="cancel",
+                        on_click=lambda: _confirm_abort_job(context),
+                    ).props("color=negative")
 
 
 def _render_timeline_content_for_context(context: _JobDetailContext) -> None:
@@ -1270,6 +1500,7 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
 
     render_job_stats()
     _render_research_question_card(context)
+    _render_assay_pending_approvals_banner(context)
     _render_job_runtime_controls(context)
     ui.label("Investigation Timeline").classes("text-h6 font-bold mb-2")
     render_timeline()
@@ -1297,13 +1528,214 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
         context.active_timers.append(stats_timer_holder["timer"])
 
 
-def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
+def _show_assay_approval_dialog(
+    context: _JobDetailContext,
+    review: AssayReviewItem,
+) -> None:
+    """Render a review dialog from an assay adapter's declared panel contract."""
+    adapter = review.adapter
+    checkpoint = review.checkpoint
+    checkpoint_id = checkpoint["checkpoint_id"]
+    dataset_id = checkpoint["dataset_id"]
+    context_sha256 = checkpoint.get("context_sha256", "")
+    assessments = checkpoint.get("assessments", [])
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
+        with ui.row().classes("w-full items-center gap-2 border-b pb-2"):
+            ui.icon("verified_user", size="md").classes("text-indigo-600")
+            with ui.column().classes("gap-0"):
+                ui.label(f"Review & Approve {adapter.display_name}").classes("text-lg font-bold")
+                ui.label(f"Dataset: {dataset_id} · Checkpoint: {checkpoint_id}").classes(
+                    "text-xs text-gray-500 font-mono"
+                )
+
+        ui.label(
+            "Execution requires an explicit, run-bound scientific decision. The approval "
+            "is cryptographically bound to the registered operation contract, context, and parameters."
+        ).classes("text-sm text-gray-600 mt-1")
+
+        with ui.expansion("Contract review summary", icon="fact_check", value=True).classes(
+            "w-full mt-2"
+        ):
+            for field_name in adapter.review_panel.summary_fields:
+                if field_name not in checkpoint:
+                    continue
+                value = checkpoint[field_name]
+                rendered = (
+                    json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+                )
+                ui.label(f"{field_name}: {rendered}").classes("text-xs font-mono")
+
+        if assessments:
+            with ui.expansion(
+                "Pre-analysis Assessment Findings", icon="assessment", value=True
+            ).classes("w-full mt-2"):
+                for assessment in assessments:
+                    framework = str(assessment.get("framework", "Framework"))
+                    satisfied = assessment.get("satisfied_count", 0)
+                    missing = assessment.get("missing_count", 0)
+                    partial = assessment.get("partial_count", 0)
+                    with ui.row().classes("items-center gap-2 mb-1"):
+                        ui.label(framework.upper()).classes("font-semibold text-sm")
+                        ui.badge(f"{satisfied} satisfied", color="green").props("outline")
+                        if partial:
+                            ui.badge(f"{partial} partial", color="orange").props("outline")
+                        if missing:
+                            ui.badge(f"{missing} missing", color="red").props("outline")
+
+        with ui.column().classes("w-full gap-2 mt-3"):
+            ui.label("Approved Operation & Parameters").classes("font-semibold text-sm")
+            bound_operation = checkpoint.get("operation_id")
+            operation_options = (
+                [str(bound_operation)]
+                if bound_operation
+                else [
+                    operation_id
+                    for operation_id, contract in adapter.operation_contracts.items()
+                    if contract.approval_required
+                ]
+            )
+            default_operation = operation_options[0]
+            operation_select = (
+                ui.select(
+                    options=operation_options,
+                    value=default_operation,
+                    label="Governed Assay Operation",
+                )
+                .props("outlined dense")
+                .classes("w-full")
+            )
+
+            params_input = (
+                ui.textarea(
+                    label="Parameters (JSON)",
+                    value='{"aggregation": "HOUR"}',
+                )
+                .props("outlined dense rows=2")
+                .classes("w-full font-mono text-xs")
+            )
+            rationale_input = (
+                ui.textarea(label="Scientific rationale")
+                .props("outlined dense rows=2")
+                .classes("w-full")
+                if "rationale" in adapter.review_panel.decision_fields
+                else None
+            )
+
+        with ui.row().classes("items-center gap-2 text-xs text-gray-500 font-mono mt-2"):
+            ui.label(f"Context SHA-256: {context_sha256[:16]}..." if context_sha256 else "")
+
+        with ui.row().classes("w-full justify-end gap-2 mt-4 pt-2 border-t"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def submit_approval() -> None:
+                try:
+                    params = json.loads(params_input.value or "{}")
+                    if not isinstance(params, dict):
+                        raise ValueError("Parameters must be a JSON object.")
+                except Exception as e:
+                    ui.notify(f"Invalid parameters JSON: {e}", type="negative")
+                    return
+
+                user_id = get_current_user_id()
+                identity = str(user_id) if user_id else "authenticated_user"
+
+                study_context = load_assay_review_context(context.job_dir, adapter, checkpoint_id)
+                if study_context is None:
+                    study_context = PreclinicalStudyContext(
+                        study_id=context.job_id,
+                    )
+
+                try:
+                    create_assay_review_approval(
+                        job_dir=context.job_dir,
+                        adapter=adapter,
+                        checkpoint=checkpoint,
+                        operation=str(operation_select.value),
+                        context=study_context,
+                        parameters=params,
+                        approved_by=identity,
+                        created_via="web_ui",
+                        rationale=(
+                            str(rationale_input.value).strip() or None
+                            if rationale_input is not None
+                            else None
+                        ),
+                    )
+                    run_sync(
+                        persist_job_scientific_state(
+                            context.job_id,
+                            context.job_dir,
+                        )
+                    )
+                    dialog.close()
+                    ui.notify(
+                        f"Approved {operation_select.value} for dataset {dataset_id}.",
+                        type="positive",
+                    )
+                    ui.navigate.to(f"/job/{context.job_id}")
+                except Exception as exc:
+                    logger.exception("Approval creation failed: %s", exc)
+                    ui.notify(f"Approval failed: {exc}", type="negative")
+
+            ui.button("Approve Execution", icon="check_circle", on_click=submit_approval).props(
+                "color=positive"
+            )
+
+    dialog.open()
+
+
+def _render_assay_pending_approvals_banner(context: _JobDetailContext) -> None:
+    """Display pending approvals discovered through registered review contracts."""
+    unapproved = [
+        review
+        for review in list_assay_reviews(context.job_dir)
+        if not review.checkpoint.get("approved")
+    ]
+    if not unapproved:
+        return
+
+    with (
+        ui.card()
+        .classes("w-full mb-4 border-l-4 border-amber-500 bg-amber-50")
+        .props("flat bordered")
+    ):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            with ui.column().classes("gap-0"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("verified_user", size="sm").classes("text-amber-700")
+                    ui.label(
+                        f"Governed Assay Analysis Pending Approval ({len(unapproved)})"
+                    ).classes("font-bold text-amber-900")
+                ui.label(
+                    "Pre-analysis assessment is complete. Review findings and grant cryptographic approval "
+                    "for the agent to execute governed UDWA analytics."
+                ).classes("text-xs text-amber-800")
+            with ui.row().classes("gap-2"):
+                for review in unapproved:
+                    checkpoint = review.checkpoint
+                    ui.button(
+                        f"Review {review.adapter.adapter_id}: "
+                        f"{str(checkpoint['dataset_id'])[:12]}...",
+                        icon="fact_check",
+                        on_click=lambda item=review: _show_assay_approval_dialog(context, item),
+                    ).props("color=amber-9 text-white dense")
+
+
+def _download_artifacts_zip(job_id: str) -> None:
+    ui.download(f"/web/jobs/{job_id}/artifacts.zip")
+
+
+def _download_assay_evidence_bundle_zip(job_dir: Path, job_id: str, adapter: AssayAdapter) -> None:
     try:
-        zip_buffer = create_artifacts_zip(job_dir, job_id)
-        ui.download(zip_buffer.getvalue(), filename=f"{job_id}_artifacts.zip")
+        zip_buffer = create_assay_evidence_bundle_zip(job_dir, job_id, adapter.adapter_id)
+        ui.download(
+            zip_buffer.getvalue(),
+            filename=f"{job_id}_{adapter.adapter_id}_evidence_bundle.zip",
+        )
     except Exception as exc:
-        logger.error("Failed to create artifacts ZIP: %s", exc, exc_info=True)
-        ui.notify("Failed to create ZIP. Please try again.", type="negative")
+        logger.error("Failed to create assay evidence ZIP: %s", exc, exc_info=True)
+        ui.notify("Failed to create assay evidence bundle. Please try again.", type="negative")
 
 
 def _download_pdf_report(report_path: Path, pdf_path: Path, job_id: str) -> None:
@@ -1386,8 +1818,16 @@ def _confirm_regenerate_report(context: _JobDetailContext) -> None:
     dialog.open()
 
 
+def _assay_evidence_present(job_dir: Path, adapter: AssayAdapter) -> bool:
+    return any(
+        candidate.is_file()
+        for pattern in adapter.evidence_patterns
+        for candidate in job_dir.glob(pattern.glob)
+    )
+
+
 def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_path: Path) -> None:
-    with ui.row().classes("w-full justify-end mb-4 gap-2"):
+    with ui.row().classes("w-full justify-end mb-4 gap-2 flex-wrap"):
         if pdf_path.exists() or report_path.exists():
             ui.button(
                 "Download PDF",
@@ -1397,9 +1837,20 @@ def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_pa
         else:
             ui.button("PDF Unavailable", icon="picture_as_pdf").props("color=grey outline disabled")
 
+        for adapter in get_assay_registry().list():
+            if not _assay_evidence_present(context.job_dir, adapter):
+                continue
+            ui.button(
+                f"Download {adapter.display_name} Evidence",
+                on_click=lambda selected=adapter: _download_assay_evidence_bundle_zip(
+                    context.job_dir, context.job_id, selected
+                ),
+                icon="verified_user",
+            ).props("color=positive outline")
+
         ui.button(
             "Download All Artifacts",
-            on_click=lambda: _download_artifacts_zip(context.job_dir, context.job_id),
+            on_click=lambda: _download_artifacts_zip(context.job_id),
             icon="folder_zip",
         ).props("color=accent outline")
 
@@ -1478,7 +1929,878 @@ def _render_missing_report_state(context: _JobDetailContext) -> None:
     ui.label("Report will be available when job completes").classes("text-gray-500 italic")
 
 
+def _render_job_agent_usage(cost_records: list[CostRecord]) -> None:
+    """Render transparent model/task usage alongside the scientific report."""
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Agentic Model Usage").classes("text-h6 font-bold")
+        ui.label(
+            "Token and estimated cost totals for completed model turns in this job. "
+            "This updates after each turn; an in-progress turn is not included yet."
+        ).classes("text-sm text-gray-600")
+
+        if not cost_records:
+            ui.label("No completed model turns have been recorded yet.").classes(
+                "text-sm text-gray-500 italic"
+            )
+            return
+
+        totals = summarize_usage(cost_records)
+        render_stat_badges(
+            [
+                ("Estimated Cost", f"${totals.cost_usd:.4f}", "green"),
+                ("Fresh Input", f"{totals.input_tokens:,}", "blue"),
+                ("Visible Output", f"{totals.output_tokens:,}", "orange"),
+                ("Cache Read", f"{totals.cache_read_tokens:,}", "teal"),
+                ("Cache Write", f"{totals.cache_write_tokens:,}", "cyan"),
+                ("Reasoning", f"{totals.reasoning_tokens:,}", "deep-purple"),
+                ("Total Tokens", f"{totals.total_tokens:,}", "indigo"),
+                ("Model Turns", f"{totals.turn_count:,}", "purple"),
+                ("Models", f"{totals.model_count:,}", "cyan"),
+            ]
+        )
+
+        ui.label("Model Totals").classes("font-bold mt-2")
+        model_columns = [
+            {"name": "model", "label": "Model", "field": "model", "align": "left"},
+            {"name": "provider", "label": "Provider", "field": "provider", "align": "left"},
+            {"name": "turns", "label": "Turns", "field": "turns", "align": "right"},
+            {"name": "input", "label": "Fresh Input", "field": "input", "align": "right"},
+            {
+                "name": "output",
+                "label": "Visible Output",
+                "field": "output",
+                "align": "right",
+            },
+            {
+                "name": "cache_read",
+                "label": "Cache Read",
+                "field": "cache_read",
+                "align": "right",
+            },
+            {
+                "name": "cache_write",
+                "label": "Cache Write",
+                "field": "cache_write",
+                "align": "right",
+            },
+            {
+                "name": "reasoning",
+                "label": "Reasoning",
+                "field": "reasoning",
+                "align": "right",
+            },
+            {"name": "total", "label": "Total", "field": "total", "align": "right"},
+            {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+        ]
+        model_rows = [
+            {
+                "id": f"{index}:{usage.provider}:{usage.model}",
+                "model": usage.model,
+                "provider": usage.provider,
+                "turns": usage.turn_count,
+                "input": f"{usage.input_tokens:,}",
+                "output": f"{usage.output_tokens:,}",
+                "cache_read": f"{usage.cache_read_tokens:,}",
+                "cache_write": f"{usage.cache_write_tokens:,}",
+                "reasoning": f"{usage.reasoning_tokens:,}",
+                "total": f"{usage.total_tokens:,}",
+                "cost": f"${usage.cost_usd:.4f}",
+            }
+            for index, usage in enumerate(aggregate_model_usage(cost_records))
+        ]
+        ui.table(columns=model_columns, rows=model_rows, row_key="id").classes("w-full")
+
+        ui.label("Usage by Task / Operation").classes("font-bold mt-2")
+        operation_columns = [
+            {
+                "name": "operation",
+                "label": "Task / Operation",
+                "field": "operation",
+                "align": "left",
+            },
+            {"name": "model", "label": "Model", "field": "model", "align": "left"},
+            {"name": "iterations", "label": "Iterations", "field": "iterations", "align": "right"},
+            {"name": "turns", "label": "Turns", "field": "turns", "align": "right"},
+            {"name": "input", "label": "Fresh Input", "field": "input", "align": "right"},
+            {
+                "name": "output",
+                "label": "Visible Output",
+                "field": "output",
+                "align": "right",
+            },
+            {
+                "name": "cache_read",
+                "label": "Cache Read",
+                "field": "cache_read",
+                "align": "right",
+            },
+            {
+                "name": "cache_write",
+                "label": "Cache Write",
+                "field": "cache_write",
+                "align": "right",
+            },
+            {
+                "name": "reasoning",
+                "label": "Reasoning",
+                "field": "reasoning",
+                "align": "right",
+            },
+            {"name": "total", "label": "Total", "field": "total", "align": "right"},
+            {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+        ]
+        operation_rows = [
+            {
+                "id": f"{index}:{usage.provider}:{usage.model}:{usage.operation_type}",
+                "operation": usage.operation_type or "Unspecified",
+                "model": usage.model,
+                "iterations": usage.iteration_label,
+                "turns": usage.turn_count,
+                "input": f"{usage.input_tokens:,}",
+                "output": f"{usage.output_tokens:,}",
+                "cache_read": f"{usage.cache_read_tokens:,}",
+                "cache_write": f"{usage.cache_write_tokens:,}",
+                "reasoning": f"{usage.reasoning_tokens:,}",
+                "total": f"{usage.total_tokens:,}",
+                "cost": f"${usage.cost_usd:.4f}",
+            }
+            for index, usage in enumerate(aggregate_operation_usage(cost_records))
+        ]
+        ui.table(columns=operation_columns, rows=operation_rows, row_key="id").classes("w-full")
+
+        with ui.expansion("Completed model turns", icon="receipt_long").classes("w-full mt-2"):
+            turn_columns = [
+                {
+                    "name": "operation",
+                    "label": "Task / Operation",
+                    "field": "operation",
+                    "align": "left",
+                },
+                {
+                    "name": "iteration",
+                    "label": "Iteration",
+                    "field": "iteration",
+                    "align": "right",
+                },
+                {"name": "model", "label": "Model", "field": "model", "align": "left"},
+                {"name": "provider", "label": "Provider", "field": "provider", "align": "left"},
+                {
+                    "name": "input",
+                    "label": "Fresh Input",
+                    "field": "input",
+                    "align": "right",
+                },
+                {
+                    "name": "output",
+                    "label": "Visible Output",
+                    "field": "output",
+                    "align": "right",
+                },
+                {
+                    "name": "cache_read",
+                    "label": "Cache Read",
+                    "field": "cache_read",
+                    "align": "right",
+                },
+                {
+                    "name": "cache_write",
+                    "label": "Cache Write",
+                    "field": "cache_write",
+                    "align": "right",
+                },
+                {
+                    "name": "reasoning",
+                    "label": "Reasoning",
+                    "field": "reasoning",
+                    "align": "right",
+                },
+                {"name": "cost", "label": "Cost (USD)", "field": "cost", "align": "right"},
+                {"name": "completed", "label": "Completed", "field": "completed", "align": "left"},
+            ]
+            turn_rows = [
+                {
+                    "id": str(record.id),
+                    "operation": record.operation_type or "Unspecified",
+                    "iteration": record.iteration if record.iteration is not None else "—",
+                    "model": record.model or "Unknown model",
+                    "provider": record.provider or "Unknown provider",
+                    "input": f"{record.input_tokens:,}",
+                    "output": f"{record.output_tokens:,}",
+                    "cache_read": f"{record.cache_read_tokens:,}",
+                    "cache_write": f"{record.cache_write_tokens:,}",
+                    "reasoning": f"{record.reasoning_tokens:,}",
+                    "cost": f"${record.cost_usd:.4f}",
+                    "completed": record.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                for record in cost_records
+            ]
+            ui.table(columns=turn_columns, rows=turn_rows, row_key="id").classes("w-full")
+
+        if any(not row.model or row.model.casefold() == "unknown" for row in cost_records):
+            ui.label(
+                "At least one legacy turn was saved before exact model resolution. Its token "
+                "counts remain valid, but the historical model and cost cannot be reconstructed "
+                "reliably. Current turns persist the resolved model before work begins."
+            ).classes("text-sm text-yellow-800 mt-2")
+
+
+def _render_job_agent_task_trace(
+    provenance: dict[str, Any],
+    cost_records: list[CostRecord],
+) -> None:
+    """Render exact runtime identity and transcript-backed subagent tasks."""
+    runtime = provenance.get("runtime") or {}
+    subagents = provenance.get("subagents") or []
+    observed_models = sorted(
+        {
+            record.model
+            for record in cost_records
+            if record.model and record.model.casefold() != "unknown"
+        }
+    )
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("LLM Task & Subagent Trace").classes("text-h6 font-bold")
+        ui.label(
+            "The runtime model is recorded as soon as the agent starts. Parent-turn totals and "
+            "subagent evidence remain on this page after the job completes."
+        ).classes("text-sm text-gray-600")
+
+        if runtime:
+            render_stat_badges(
+                [
+                    ("Runtime Model", str(runtime.get("model") or "Unknown"), "indigo"),
+                    ("Provider", str(runtime.get("provider") or "Unknown"), "blue"),
+                    ("Agent Backend", str(runtime.get("backend") or "Unknown"), "purple"),
+                    (
+                        "Context Window",
+                        (
+                            f"{int(runtime['context_window_tokens']):,}"
+                            if runtime.get("context_window_tokens")
+                            else "Not exposed"
+                        ),
+                        "teal",
+                    ),
+                ]
+            )
+            ui.label(
+                "Resolved before the first LLM turn; this is the primary model used by the job."
+            ).classes("text-sm text-green-700")
+        elif observed_models:
+            ui.label(
+                "This job predates the runtime identity manifest. Exact models observed on "
+                f"completed turns: {', '.join(observed_models)}."
+            ).classes("text-sm text-yellow-800")
+        else:
+            ui.label(
+                "No exact model identity was persisted for this legacy job. The model cannot be "
+                "reconstructed from token totals alone."
+            ).classes("text-sm text-yellow-800")
+
+        ui.label(
+            "Parent tasks are itemized by operation and iteration in Agentic Model Usage below."
+        ).classes("text-sm text-gray-600 mt-2")
+
+        if not subagents:
+            ui.label(
+                "No subagent spawn is recorded. This job used only its primary agent, or its "
+                "legacy provider transcript did not expose subagent lifecycle events."
+            ).classes("text-sm text-gray-500 italic mt-2")
+            return
+
+        columns = [
+            {"name": "agent", "label": "Agent / Thread", "field": "agent", "align": "left"},
+            {"name": "task", "label": "Task Type", "field": "task", "align": "left"},
+            {"name": "location", "label": "Parent Task", "field": "location", "align": "left"},
+            {"name": "model", "label": "Exact Model", "field": "model", "align": "left"},
+            {"name": "source", "label": "Model Evidence", "field": "source", "align": "left"},
+            {"name": "status", "label": "Status", "field": "status", "align": "left"},
+            {"name": "tokens", "label": "Task Tokens", "field": "tokens", "align": "right"},
+        ]
+        rows = []
+        for index, task in enumerate(subagents):
+            iteration = task.get("iteration")
+            phase = str(task.get("phase") or "unknown")
+            rows.append(
+                {
+                    "id": f"{index}:{task.get('agent_id')}",
+                    "agent": str(task.get("agent_id") or "Unknown"),
+                    "task": str(task.get("task_type") or "subagent"),
+                    "location": phase if iteration is None else f"{phase} / iteration {iteration}",
+                    "model": str(task.get("model") or "Not exposed"),
+                    "source": str(task.get("model_source") or "not_exposed"),
+                    "status": str(task.get("status") or "unknown"),
+                    "tokens": (
+                        f"{int(task['total_tokens']):,}"
+                        if task.get("total_tokens") is not None
+                        else "Included in parent total"
+                    ),
+                }
+            )
+        ui.table(columns=columns, rows=rows, row_key="id").classes("w-full mt-2")
+
+        ui.label(
+            "When a provider does not expose per-subagent tokens, they are shown as included in "
+            "the parent turn total rather than estimated or double-counted."
+        ).classes("text-sm text-gray-600")
+
+        with ui.expansion("Subagent prompts and results", icon="account_tree").classes(
+            "w-full mt-2"
+        ):
+            for index, task in enumerate(subagents, start=1):
+                name = str(task.get("agent_id") or f"subagent-{index}")
+                with ui.expansion(f"{index}. {name}", icon="smart_toy").classes("w-full"):
+                    ui.label("Task / prompt").classes("font-medium")
+                    ui.label(
+                        str(
+                            task.get("prompt_summary")
+                            or task.get("description")
+                            or "No prompt text was exposed."
+                        )
+                    ).classes("text-sm whitespace-pre-wrap")
+                    ui.label("Result summary").classes("font-medium mt-2")
+                    ui.label(
+                        str(task.get("result_summary") or "No result summary was exposed.")
+                    ).classes("text-sm whitespace-pre-wrap")
+
+
+def _load_job_skill_usage(job_dir: Path) -> dict[str, Any]:
+    """Load transcript-backed skill usage plus assignment snapshot state."""
+    usage = build_job_skill_provenance(job_dir)
+    usage["assignment_snapshot_available"] = (
+        job_dir / ".openscientist_skill_manifest.json"
+    ).exists()
+    return usage
+
+
+def _render_job_skill_usage(usage: dict[str, Any]) -> None:
+    """Render assigned skills separately from evidence-backed invocations."""
+    assigned = usage.get("assigned_skills") or []
+    used = usage.get("used_skills") or []
+    invocations = usage.get("invocations") or []
+    used_keys = {str(skill.get("key")) for skill in used if isinstance(skill, dict)}
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Skill Assignment & Usage").classes("text-h6 font-bold")
+        ui.label(
+            "Assigned means the skill was available to this job. Used means its invocation "
+            "was found in the saved agent transcript; availability alone is never counted as use."
+        ).classes("text-sm text-gray-600")
+
+        render_stat_badges(
+            [
+                ("Assigned Skills", f"{len(assigned):,}", "blue"),
+                ("Used Skills", f"{len(used):,}", "green"),
+                ("Invocations", f"{len(invocations):,}", "purple"),
+            ]
+        )
+
+        if not usage.get("assignment_snapshot_available"):
+            ui.label(
+                "No assignment snapshot is available. This is expected for older jobs that "
+                "predate per-job skill assignment, or jobs whose workspace has not been prepared."
+            ).classes("text-sm text-yellow-800")
+        elif not assigned:
+            ui.label("This job was explicitly created without assigned skills.").classes(
+                "text-sm text-gray-500 italic"
+            )
+        else:
+            with ui.expansion(
+                f"Assigned skills ({len(assigned)})",
+                icon="assignment",
+                value=True,
+            ).classes("w-full mt-2"):
+                for skill in assigned:
+                    if not isinstance(skill, dict):
+                        continue
+                    key = str(skill.get("key") or skill.get("name") or "Unknown skill")
+                    name = str(skill.get("name") or key)
+                    category = str(skill.get("category") or "uncategorized")
+                    version = skill.get("version")
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(name).classes("font-medium")
+                        ui.badge(category, color="gray").props("outline")
+                        if version is not None:
+                            ui.badge(f"v{version}", color="blue").props("outline")
+                        if key in used_keys:
+                            ui.badge("Used", color="green")
+                        else:
+                            ui.badge("Available, not observed", color="gray").props("outline")
+
+        if not invocations:
+            ui.label("No transcript-backed skill invocation has been recorded yet.").classes(
+                "text-sm text-gray-500 italic mt-2"
+            )
+            return
+
+        with ui.expansion(
+            f"Skill invocation evidence ({len(invocations)})",
+            icon="fact_check",
+        ).classes("w-full mt-2"):
+            for index, invocation in enumerate(invocations, start=1):
+                if not isinstance(invocation, dict):
+                    continue
+                name = str(
+                    invocation.get("skill_name") or invocation.get("skill_key") or "Unknown skill"
+                )
+                phase = str(invocation.get("phase") or "unknown phase")
+                iteration = invocation.get("iteration")
+                location = phase if iteration is None else f"{phase}, iteration {iteration}"
+                succeeded = bool(invocation.get("success", False))
+                with ui.expansion(
+                    f"{index}. {name} — {location}",
+                    icon="check_circle" if succeeded else "error",
+                ).classes("w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.badge(
+                            "Succeeded" if succeeded else "Failed",
+                            color="green" if succeeded else "red",
+                        )
+                        ui.badge(
+                            str(invocation.get("source") or "unknown evidence"),
+                            color="gray",
+                        ).props("outline")
+
+                    evidence_sections = [
+                        (
+                            "Invocation prompt / context",
+                            invocation.get("prompt_summary"),
+                            "No invocation context was captured.",
+                        ),
+                        (
+                            "Skill instructions / tool answer",
+                            invocation.get("instruction_summary"),
+                            "No instruction or tool-result text was captured.",
+                        ),
+                        (
+                            "Produced agent response",
+                            invocation.get("produced_result_summary"),
+                            "No subsequent agent response was captured.",
+                        ),
+                    ]
+                    for title, value, empty_text in evidence_sections:
+                        ui.label(title).classes("font-medium mt-2")
+                        ui.label(str(value) if value else empty_text).classes(
+                            "text-sm whitespace-pre-wrap"
+                        )
+
+
+_ITER_TRANSCRIPT_RE = re.compile(r"iter(\d+)_transcript\.json$")
+_ATTEMPT_TRANSCRIPT_RE = re.compile(
+    r"(?:(?:iter(?P<iteration>\d+))|(?P<phase>report|consensus))_attempt"
+    r"(?P<attempt>\d+)_transcript\.json$"
+)
+_RAW_CODEX_FAILURE_RE = re.compile(
+    r"HTTP(?:/\S+)?\s+5\d\d|HTTP\s+5\d\d|❌\s*ERROR|"
+    r"Process exited with code\s+(?!0\b)\d+",
+    re.IGNORECASE,
+)
+_RAW_CODEX_HTTP_5XX_RE = re.compile(
+    r"HTTP(?:/\S+)?\s+5\d\d|HTTP\s+5\d\d",
+    re.IGNORECASE,
+)
+
+
+def _raw_codex_session_activity(job_dir: Path) -> list[dict[str, Any]]:
+    """Recover calls from Codex rollout JSONL when timeout transcripts are empty."""
+    session_root = job_dir / ".codex" / "sessions"
+    actions: list[dict[str, Any]] = []
+    for session_number, path in enumerate(sorted(session_root.rglob("rollout-*.jsonl")), start=1):
+        calls: list[dict[str, Any]] = []
+        outputs: dict[str, str] = {}
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        # A live rollout may end with one partially-written line.
+                        continue
+                    if record.get("type") != "response_item":
+                        continue
+                    payload = record.get("payload") or {}
+                    if payload.get("type") == "function_call":
+                        calls.append(payload)
+                    elif payload.get("type") == "function_call_output":
+                        outputs[str(payload.get("call_id") or "")] = str(
+                            payload.get("output") or ""
+                        )
+        except OSError as exc:
+            logger.warning("Could not recover raw Codex activity from %s: %s", path, exc)
+            continue
+
+        for call in calls:
+            call_id = str(call.get("call_id") or "")
+            name = str(call.get("name") or "unknown_tool")
+            raw_arguments = call.get("arguments")
+            try:
+                arguments = (
+                    json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                )
+            except json.JSONDecodeError:
+                arguments = {"raw": raw_arguments}
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+            output = outputs.get(call_id, "")
+            failed = bool(output and _RAW_CODEX_FAILURE_RE.search(output))
+            description = str(
+                arguments.get("description")
+                or arguments.get("cmd")
+                or arguments.get("query")
+                or arguments.get("title")
+                or name
+            )
+            actions.append(
+                {
+                    "kind": "shell" if name in {"exec_command", "write_stdin"} else "tool",
+                    "name": name,
+                    "description": description,
+                    "input": arguments,
+                    "output": output,
+                    "success": None if not output else not failed,
+                    "status": "running" if not output else "failed" if failed else "completed",
+                    "error": output if failed else "",
+                    "http_5xx": bool(_RAW_CODEX_HTTP_5XX_RE.search(output)),
+                    "legacy_error_response": failed,
+                    "location": f"Raw Codex session {session_number}",
+                }
+            )
+    return actions
+
+
+def _legacy_timeout_notifications(job_dir: Path) -> list[dict[str, str]]:
+    """Recover timeout alarms from the legacy human-readable iteration log."""
+    log_path = job_dir / "claude_iterations.log"
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [
+        {
+            "status": "timed_out",
+            "summary": "Turn exceeded the configured wall-clock limit; partial raw activity recovered.",
+            "task_id": "codex-turn",
+            "location": f"Iteration {iteration}",
+        }
+        for iteration in re.findall(
+            r"=== Iteration (\d+) ===.*?Timed out: yes", content, flags=re.DOTALL
+        )
+    ]
+
+
+def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
+    """Load numbered and live transcripts into one troubleshooting trace."""
+    provenance_dir = job_dir / "provenance"
+    attempt_paths = [
+        path
+        for path in provenance_dir.glob("*_attempt*_transcript.json")
+        if _ATTEMPT_TRANSCRIPT_RE.fullmatch(path.name)
+    ]
+    attempt_paths.sort(key=lambda path: path.name)
+    if attempt_paths:
+        paths = attempt_paths
+    else:
+        paths = [
+            path
+            for path in provenance_dir.glob("iter*_transcript.json")
+            if _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+        ]
+
+        def iteration_number(path: Path) -> int:
+            match = _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+            if match is None:  # Defensive: paths are filtered immediately above.
+                raise ValueError(f"Invalid iteration transcript name: {path.name}")
+            return int(match.group(1))
+
+        paths.sort(key=iteration_number)
+    live_path = provenance_dir / "current_turn_transcript.json"
+    if live_path.exists():
+        paths.append(live_path)
+
+    actions: list[dict[str, Any]] = []
+    notifications: list[dict[str, str]] = []
+    unreadable: list[str] = []
+    attempts: list[dict[str, Any]] = []
+    for path in paths:
+        match = _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+        attempt_match = _ATTEMPT_TRANSCRIPT_RE.fullmatch(path.name)
+        if attempt_match:
+            logical = (
+                f"Iteration {attempt_match.group('iteration')}"
+                if attempt_match.group("iteration")
+                else str(attempt_match.group("phase")).title()
+            )
+            location = f"{logical} · Attempt {attempt_match.group('attempt')}"
+        else:
+            location = f"Iteration {match.group(1)}" if match else "Current turn (live)"
+        try:
+            transcript = load_transcript(path)
+        except Exception as exc:
+            logger.warning("Could not load agent transcript %s: %s", path, exc)
+            unreadable.append(f"{path.name}: {exc}")
+            continue
+        attempt_actions = [
+            {**action, "location": location} for action in extract_agent_activity(transcript)
+        ]
+        attempt_notifications = [
+            {**notification, "location": location}
+            for notification in extract_agent_notifications(transcript)
+        ]
+        actions.extend(attempt_actions)
+        notifications.extend(attempt_notifications)
+        if attempt_match:
+            status_path = path.with_name(path.name.replace("_transcript.json", "_status.json"))
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                status = {"state": "active", "outcome": "running"}
+            attempts.append(
+                {
+                    **status,
+                    "location": location,
+                    "actions": attempt_actions,
+                    "notifications": attempt_notifications,
+                }
+            )
+
+    # Releases before live transcript streaming saved [] on timeout. Codex's
+    # own rollout JSONL is still present, so reconstruct those calls instead of
+    # continuing to tell the user that no activity occurred.
+    if not actions:
+        actions = _raw_codex_session_activity(job_dir)
+    if not notifications:
+        notifications = _legacy_timeout_notifications(job_dir)
+
+    failures = [action for action in actions if action.get("success") is False]
+    unfinished = [action for action in actions if action.get("success") is None]
+    http_5xx = [action for action in actions if action.get("http_5xx")]
+    timeouts = [item for item in notifications if item.get("status") in {"timed_out", "timeout"}]
+    return {
+        "actions": actions,
+        "notifications": notifications,
+        "failures": failures,
+        "unfinished": unfinished,
+        "http_5xx": http_5xx,
+        "timeouts": timeouts,
+        "attempts": attempts,
+        "attempt_states": {
+            state: sum(
+                1
+                for attempt in attempts
+                if (
+                    attempt.get("outcome") == "timed_out"
+                    if state == "timed_out"
+                    else attempt.get("state") == state
+                )
+            )
+            for state in ("accepted", "retrying", "timed_out", "failed", "active")
+        },
+        "unreadable": unreadable,
+    }
+
+
+def _agent_activity_preview(value: Any, *, limit: int = 20_000) -> str:
+    if isinstance(value, str):
+        rendered = value
+    else:
+        rendered = json.dumps(value, indent=2, ensure_ascii=False, default=str)
+    if len(rendered) <= limit:
+        return rendered
+    return f"{rendered[:limit]}\n… truncated ({len(rendered) - limit:,} more characters)"
+
+
+def _render_job_agent_activity(trace: dict[str, Any]) -> None:
+    """Render live calls, failures, and timeout alarms for troubleshooting."""
+    actions = trace.get("actions") or []
+    failures = trace.get("failures") or []
+    unfinished = trace.get("unfinished") or []
+    http_5xx = trace.get("http_5xx") or []
+    timeouts = trace.get("timeouts") or []
+    attempts = trace.get("attempts") or []
+    attempt_states = trace.get("attempt_states") or {}
+
+    with ui.card().classes("w-full mb-4"):
+        ui.label("Live Agent Activity & Troubleshooting").classes("text-h6 font-bold")
+        ui.label(
+            "Completed Codex actions are streamed here while a turn is running and remain "
+            "available after completion or timeout. Expand an action to inspect its exact input "
+            "and result."
+        ).classes("text-sm text-gray-600")
+        render_stat_badges(
+            [
+                ("Recorded Actions", f"{len(actions):,}", "blue"),
+                ("Failures", f"{len(failures):,}", "red" if failures else "green"),
+                ("In Progress", f"{len(unfinished):,}", "orange" if unfinished else "gray"),
+                ("Timed-out Turns", f"{len(timeouts):,}", "orange" if timeouts else "green"),
+            ]
+        )
+
+        if attempts:
+            with ui.expansion(
+                f"Attempts grouped by logical iteration ({len(attempts)})",
+                icon="account_tree",
+                value=bool(attempt_states.get("failed") or timeouts),
+            ).classes("w-full mt-3"):
+                for attempt in attempts:
+                    policy_state = str(attempt.get("state") or "active")
+                    state = policy_state
+                    outcome = str(attempt.get("outcome") or "running")
+                    if outcome == "timed_out":
+                        state = "timed_out"
+                    color = {
+                        "accepted": "green",
+                        "retrying": "orange",
+                        "timed_out": "orange",
+                        "failed": "red",
+                        "active": "blue",
+                    }.get(state, "gray")
+                    with ui.expansion(
+                        f"{attempt.get('location')} — {state.replace('_', ' ').upper()}",
+                        icon="history",
+                    ).classes("w-full"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.badge(state.replace("_", " ").upper(), color=color)
+                            if state == "timed_out" and policy_state == "retrying":
+                                ui.badge("RETRYING", color="orange").props("outline")
+                            ui.badge(
+                                f"{int(attempt.get('tool_calls') or len(attempt.get('actions') or []))} calls",
+                                color="gray",
+                            ).props("outline")
+                        if attempt.get("error"):
+                            ui.label(str(attempt["error"])).classes("text-sm text-red-800")
+                        for action in attempt.get("actions") or []:
+                            success = action.get("success")
+                            action_state = (
+                                "FAILED"
+                                if success is False
+                                else "RUNNING"
+                                if success is None
+                                else "SUCCEEDED"
+                            )
+                            ui.label(
+                                f"{action_state} · {action.get('name')}: "
+                                f"{str(action.get('description') or '')[:100]}"
+                            ).classes("text-sm")
+
+        if http_5xx:
+            with ui.card().classes("w-full border-l-4 border-red-600 bg-red-50 mt-3"):
+                ui.label("HTTP 5xx tool failure detected").classes("font-bold text-red-900")
+                ui.label(
+                    f"{len(http_5xx)} agent action(s) encountered a server-side HTTP error. "
+                    "The affected computation did not complete; inspect the failed actions below."
+                ).classes("text-sm text-red-800")
+        elif failures:
+            with ui.card().classes("w-full border-l-4 border-red-500 bg-red-50 mt-3"):
+                ui.label("Agent tool failures detected").classes("font-bold text-red-900")
+                ui.label(
+                    f"{len(failures)} action(s) failed. Their errors and inputs are preserved below."
+                ).classes("text-sm text-red-800")
+
+        if timeouts:
+            with ui.card().classes("w-full border-l-4 border-orange-500 bg-orange-50 mt-3"):
+                ui.label("Codex turn timeout detected").classes("font-bold text-orange-900")
+                for timeout in timeouts:
+                    ui.label(f"{timeout.get('location')}: {timeout.get('summary')}").classes(
+                        "text-sm text-orange-800"
+                    )
+
+        if trace.get("unreadable"):
+            ui.label(
+                "Some transcript files could not be read: " + "; ".join(trace["unreadable"])
+            ).classes("text-sm text-red-800 mt-2")
+
+        if not actions:
+            ui.label("No completed agent actions have been streamed yet.").classes(
+                "text-sm text-gray-500 italic mt-3"
+            )
+            return
+
+        with ui.expansion(
+            f"Agent action details ({len(actions)})",
+            icon="troubleshoot",
+            value=bool(failures or timeouts),
+        ).classes("w-full mt-3"):
+            for index, action in enumerate(actions, start=1):
+                success = action.get("success")
+                if success is False:
+                    icon = "error"
+                    state = "FAILED"
+                    color = "red"
+                elif success is None:
+                    icon = "pending"
+                    state = "IN PROGRESS"
+                    color = "orange"
+                else:
+                    icon = "check_circle"
+                    state = "SUCCEEDED"
+                    color = "green"
+                title = (
+                    f"{index}. {action.get('location')} — {action.get('name')}: "
+                    f"{str(action.get('description') or '')[:120]}"
+                )
+                with ui.expansion(title, icon=icon).classes("w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.badge(state, color=color)
+                        ui.badge(str(action.get("kind") or "tool"), color="gray").props("outline")
+                        if action.get("http_5xx"):
+                            ui.badge("HTTP 5xx", color="red")
+                        if action.get("legacy_error_response"):
+                            ui.badge("Legacy error response", color="orange").props("outline")
+                    ui.label("Input / arguments").classes("font-medium mt-2")
+                    ui.code(
+                        _agent_activity_preview(action.get("input") or {}), language="json"
+                    ).classes("w-full text-xs")
+                    ui.label("Result / output").classes("font-medium mt-2")
+                    result_text = (
+                        action.get("error") or action.get("output") or "No result captured yet."
+                    )
+                    ui.code(_agent_activity_preview(result_text)).classes("w-full text-xs")
+
+
+def _render_agentic_info_tab(context: _JobDetailContext) -> None:
+    """Render per-job model, token, subagent, and skill provenance."""
+    skill_usage = {"value": _load_job_skill_usage(context.job_dir)}
+    agent_task_usage = {"value": build_job_agent_task_provenance(context.job_dir)}
+    agent_activity = {"value": _load_job_agent_activity(context.job_dir)}
+
+    @ui.refreshable
+    def render_agent_activity() -> None:
+        _render_job_agent_activity(agent_activity["value"])
+
+    @ui.refreshable
+    def render_agent_task_usage() -> None:
+        _render_job_agent_task_trace(agent_task_usage["value"], context.cost_records)
+
+    @ui.refreshable
+    def render_skill_usage() -> None:
+        _render_job_skill_usage(skill_usage["value"])
+
+    @ui.refreshable
+    def render_agent_usage() -> None:
+        _render_job_agent_usage(context.cost_records)
+
+    render_agent_activity()
+    render_agent_task_usage()
+    render_skill_usage()
+    render_agent_usage()
+
+    @guard_client
+    async def refresh_agent_transparency() -> None:
+        context.cost_records = await _load_job_cost_records(context.job_id, context.user_id)
+        skill_usage["value"] = _load_job_skill_usage(context.job_dir)
+        agent_task_usage["value"] = build_job_agent_task_provenance(context.job_dir)
+        agent_activity["value"] = _load_job_agent_activity(context.job_dir)
+        render_agent_activity.refresh()
+        render_agent_task_usage.refresh()
+        render_skill_usage.refresh()
+        render_agent_usage.refresh()
+
+    if context.job_info.status in _polling_statuses():
+        context.active_timers.append(ui.timer(5.0, refresh_agent_transparency))
+
+
 def _render_report_tab(context: _JobDetailContext) -> None:
+    """Render only the scientific report and its artifact actions."""
     report_path = context.job_dir / "final_report.md"
     html_path = context.job_dir / "final_report.html"
     pdf_path = context.job_dir / "final_report.pdf"
@@ -1493,8 +2815,14 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         _render_missing_report_state(context)
         return
 
+    _render_assay_contract_panels(context.job_dir)
+    dvc_governance = derive_dvc_governance_status(context.job_dir)
+    if dvc_governance is not None:
+        _render_dvc_governance_status(dvc_governance)
+
     if report_path.exists():
         _render_report_actions(context, report_path, pdf_path)
+        _render_report_version_history(context)
         # Prefer HTML report (with embedded figures) over raw markdown
         if html_path.exists():
             _render_report_html_iframe(context.job_dir)
@@ -1503,6 +2831,155 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         return
 
     _render_missing_report_state(context)
+
+
+def _render_assay_contract_panels(job_dir: Path) -> None:
+    """Render assay review summaries directly from registered contracts."""
+
+    for adapter in get_assay_registry().list():
+        if not _assay_evidence_present(job_dir, adapter):
+            continue
+        panel = adapter.review_panel
+        with ui.expansion(panel.title, icon="policy").classes("w-full mb-3"):
+            ui.label(
+                f"Adapter {adapter.adapter_id} v{adapter.adapter_version} · "
+                f"{len(adapter.operation_contracts)} governed operations"
+            ).classes("text-sm text-gray-600")
+            for contract in adapter.operation_contracts.values():
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    ui.label(contract.display_name).classes("text-sm font-medium")
+                    ui.badge(f"contract v{contract.contract_version}", color="gray").props(
+                        "outline"
+                    )
+                    if contract.approval_required:
+                        ui.badge("approval required", color="amber")
+                    for validator_id in contract.validator_ids:
+                        ui.badge(f"validator: {validator_id}", color="blue").props("outline")
+                if contract.required_context:
+                    ui.label("Required context: " + ", ".join(contract.required_context)).classes(
+                        "text-xs text-gray-500"
+                    )
+
+
+def _render_dvc_governance_status(status: DVCGovernanceStatus) -> None:
+    """Render evidence-derived DVC scope without trusting report prose."""
+    palette = {
+        "approved": (
+            "border-green-500 bg-green-50",
+            "verified_user",
+            "Verified governed DVC analysis",
+        ),
+        "diagnostic": ("border-blue-500 bg-blue-50", "fact_check", "DVC validation evidence"),
+        "exploratory": (
+            "border-orange-500 bg-orange-50",
+            "science",
+            "Unapproved exploratory DVC computation",
+        ),
+        "blocked": ("border-red-500 bg-red-50", "gpp_bad", "Governed DVC analysis blocked"),
+        "mixed": ("border-orange-500 bg-orange-50", "rule", "Mixed DVC governance scope"),
+    }
+    classes, icon, title = palette[status.primary_state]
+    with ui.card().classes(f"w-full mb-4 border-l-4 {classes}").props("flat bordered"):
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.icon(icon, size="sm")
+            ui.label(title).classes("font-semibold")
+        ui.label(status.summary).classes("text-sm")
+
+        with ui.row().classes("items-center gap-2 flex-wrap"):
+            if status.datasets:
+                ui.badge("DVC dataset imported", color="gray").props("outline")
+            if status.validation_diagnostics:
+                ui.badge("Validation diagnostics", color="blue").props("outline")
+            if status.exploratory_computations:
+                ui.badge("Exploratory — not approved", color="orange")
+            if status.governance_blocks:
+                ui.badge("Governance blocked", color="red")
+            if status.approved_governed_analyses:
+                ui.badge("Approved governed analysis", color="green")
+            if status.unverified_analyses:
+                ui.badge("Unverified analysis artifacts", color="red").props("outline")
+
+        with ui.expansion("Machine-readable evidence", icon="policy").classes("w-full"):
+            if status.datasets:
+                ui.label("Imported datasets").classes("font-medium")
+                for dataset_id in status.datasets:
+                    ui.label(dataset_id).classes("text-sm font-mono")
+            _render_dvc_governance_evidence(
+                "Validation diagnostics",
+                status.validation_diagnostics,
+            )
+            _render_dvc_governance_evidence(
+                "Exploratory computations (not approval evidence)",
+                status.exploratory_computations,
+            )
+            _render_dvc_governance_evidence(
+                "Governance blockers",
+                status.governance_blocks,
+            )
+            _render_dvc_governance_evidence(
+                "Approved governed analyses",
+                status.approved_governed_analyses,
+            )
+            _render_dvc_governance_evidence(
+                "Unverified analysis artifacts",
+                status.unverified_analyses,
+            )
+
+
+def _render_dvc_governance_evidence(
+    title: str,
+    evidence: tuple[DVCGovernanceEvidence, ...],
+) -> None:
+    if not evidence:
+        return
+    ui.label(title).classes("font-medium mt-2")
+    for item in evidence:
+        identity = f" — {item.identifier}" if item.identifier else ""
+        ui.label(f"{item.operation}{identity}").classes("text-sm font-mono")
+        ui.label(f"Evidence: {item.source}").classes("text-xs text-gray-600")
+        if item.detail:
+            ui.label(item.detail).classes("text-xs text-gray-700 whitespace-pre-wrap")
+
+
+def _render_report_version_history(context: _JobDetailContext) -> None:
+    """Show the latest report version and its immutable revision history."""
+    from openscientist.report.revisions import load_report_version_manifest
+
+    manifest = load_report_version_manifest(context.job_dir)
+    if not manifest:
+        return
+    versions = manifest.get("versions", [])
+    if not versions:
+        return
+
+    current = int(manifest.get("current_version", versions[-1].get("version", 1)))
+    latest = versions[-1]
+    with ui.card().classes("w-full mb-4"):
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.icon("history", size="sm").classes("text-indigo-600")
+            ui.label(f"Scientific Report v{current}").classes("font-semibold")
+            if latest.get("source") == "job-chat":
+                ui.label("Updated from Chat").classes(
+                    "text-xs text-indigo-700 bg-indigo-50 rounded px-2 py-1"
+                )
+        section = latest.get("section")
+        if section:
+            ui.label(f"Latest addition: {section}").classes("text-sm text-gray-600")
+
+        with ui.expansion("Version history", icon="history").classes("w-full"):
+            for item in reversed(versions):
+                version = int(item.get("version", 0))
+                with ui.row().classes("w-full items-center gap-3 py-1"):
+                    ui.label(f"v{version}").classes("font-medium w-10")
+                    ui.label(str(item.get("summary", "Report revision"))).classes(
+                        "text-sm text-gray-600 flex-grow"
+                    )
+                    version_base = f"/jobs/{context.job_id}/report_versions/v{version}"
+                    files = item.get("files", [])
+                    if "final_report.md" in files:
+                        ui.link("Markdown", f"{version_base}/final_report.md", new_tab=True)
+                    if "final_report.pdf" in files:
+                        ui.link("PDF", f"{version_base}/final_report.pdf", new_tab=True)
 
 
 _CHAT_STYLES = """
@@ -1740,7 +3217,14 @@ class _ChatTabController:
         with ui.row().classes("items-start gap-2 mb-3"):
             ui.html(_CHAT_AVATAR_HTML)
             with ui.element("div").classes("chat-bubble-assistant"):
-                ui.markdown(content).classes("text-sm")
+                text, images = extract_chat_artifact_images(content, self.context.job_id)
+                if text:
+                    ui.markdown(text).classes("text-sm")
+                for artifact in images:
+                    ui.image(artifact.url).classes(
+                        "w-full rounded-lg border border-cyan-200 mt-2"
+                    ).props("fit=contain")
+                    ui.label(artifact.alt).classes("text-xs text-gray-600 italic mt-1")
 
     def _render_empty_state(self) -> None:
         with ui.column().classes("w-full items-center py-8"):
@@ -1890,13 +3374,16 @@ def _render_chat_tab(context: _JobDetailContext) -> None:
 
 def _render_job_tabs(context: _JobDetailContext) -> None:
     with ui.tabs().classes("w-full") as tabs:
-        timeline_tab = ui.tab("Research Log")
-        report_tab = ui.tab("Report")
-        chat_tab = ui.tab("Chat")
+        timeline_tab = ui.tab("Research Log", icon="timeline")
+        agentic_info_tab = ui.tab("Agentic Info", icon="smart_toy")
+        report_tab = ui.tab("Scientific Report", icon="science")
+        chat_tab = ui.tab("Chat", icon="chat")
 
     with ui.tab_panels(tabs, value=timeline_tab).classes("w-full"):
         with ui.tab_panel(timeline_tab):
             _render_timeline_tab(context)
+        with ui.tab_panel(agentic_info_tab):
+            _render_agentic_info_tab(context)
         with ui.tab_panel(report_tab):
             _render_report_tab(context)
         with ui.tab_panel(chat_tab):

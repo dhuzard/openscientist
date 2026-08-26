@@ -52,6 +52,10 @@ def test_default_model_profile_uses_known_table():
     )
 
 
+def test_gpt_5_5_context_window_uses_specific_model_entry():
+    assert default_model_profile("gpt-5.5", override=None).context_window_tokens == 1_050_000
+
+
 def test_default_model_profile_falls_back_to_default():
     profile = default_model_profile("mystery-model", override=None)
     assert profile.context_window_tokens == models._DEFAULT_CONTEXT_TOKENS
@@ -73,9 +77,7 @@ def test_base_provider_model_profile_delegates_to_default():
         def id(self) -> str:
             return "fake"
 
-        @property
-        def display_name(self) -> str:
-            return "Fake"
+        display_name = "Fake"
 
         def validate_required_config(self) -> list[str]:
             return []
@@ -90,6 +92,9 @@ def test_base_provider_model_profile_delegates_to_default():
 
         def effective_model_name(self) -> str | None:
             return "claude-sonnet-4-6"
+
+        def harness_env(self, *, proxy: str | None) -> dict[str, str]:
+            return {}
 
     provider = _FakeProvider()
     with patch(

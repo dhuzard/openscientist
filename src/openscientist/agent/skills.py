@@ -1,15 +1,10 @@
-"""Per-job skill-file writers, shared by the concrete agents.
-
-Each backend materialises the enabled skills in its own on-disk layout from
-its ``prepare_job_workspace``: Claude writes ``.claude/CLAUDE.md`` plus
-``.claude/skills/*.md``. Codex writes native ``.agents/skills/*/SKILL.md``
-files it auto-discovers. These live in the agent layer (not the orchestrator)
-so the agents do not depend back on ``orchestrator.discovery``.
-"""
+"""SKILL.md rendering shared by the agents that materialise skills."""
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
 
 from openscientist.database.models import Skill
@@ -19,6 +14,31 @@ from openscientist.prompts import generate_job_claude_md, get_enabled_skills
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _replace_skill_directory(skills_dir: Path) -> None:
+    """Remove a prior materialization before writing the current assignment."""
+    if skills_dir.exists():
+        shutil.rmtree(skills_dir)
+
+
+def _write_skill_manifest(job_dir: Path, skills: list[Skill]) -> None:
+    """Write a non-secret assignment snapshot used by provenance readers."""
+    manifest = [
+        {
+            "id": str(skill.id),
+            "key": f"{skill.category}--{skill.slug}",
+            "name": skill.name,
+            "category": skill.category,
+            "slug": skill.slug,
+            "version": skill.version if isinstance(skill.version, int) else None,
+        }
+        for skill in skills
+    ]
+    (job_dir / ".openscientist_skill_manifest.json").write_text(
+        json.dumps(manifest, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _write_job_claude_md(claude_dir: Path, *, use_hypotheses: bool = False) -> None:
@@ -37,8 +57,13 @@ def _write_job_claude_md(claude_dir: Path, *, use_hypotheses: bool = False) -> N
         logger.warning("Failed to write job CLAUDE.md: %s", e)
 
 
-async def write_skills_to_claude_dir(job_dir: Path, *, use_hypotheses: bool = False) -> None:
-    """Write CLAUDE.md and enabled skill files into ``job_dir/.claude/``."""
+async def write_skills_to_claude_dir(
+    job_dir: Path,
+    *,
+    use_hypotheses: bool = False,
+    skill_ids: tuple[str, ...] | None = None,
+) -> None:
+    """Write the job's assigned, enabled skills into ``job_dir/.claude/``."""
     claude_dir = job_dir / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
 
@@ -47,38 +72,42 @@ async def write_skills_to_claude_dir(job_dir: Path, *, use_hypotheses: bool = Fa
 
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
-            skills = await get_enabled_skills(session)
+            skills = await get_enabled_skills(session, skill_ids)
         skills = filter_skills_for_plan(job_dir, skills)
-        if not skills:
-            logger.info("No enabled skills to write")
-            return
         skills_dir = claude_dir / "skills"
+        _replace_skill_directory(skills_dir)
+        _write_skill_manifest(job_dir, skills)
+        if not skills:
+            logger.info("No assigned, enabled skills to write")
+            return
         skills_dir.mkdir(parents=True, exist_ok=True)
         for skill in skills:
             filename = f"{skill.category}--{skill.slug}.md"
             path = skills_dir / filename
-            header = f"# {skill.name}\n*Category: {skill.category}*\n"
-            if skill.description:
-                header += f"\n{skill.description}\n"
-            path.write_text(header + "\n" + skill.content, encoding="utf-8")
+            path.write_text(claude_skill_markdown(skill), encoding="utf-8")
         logger.info("Wrote %d skill files to %s", len(skills), skills_dir)
     except Exception as e:
         logger.warning("Failed to write skills to .claude dir: %s", e)
 
 
 def _yaml_quote(value: str) -> str:
-    """Render a YAML double-quoted scalar so colons and other special
-    characters cannot break SKILL.md frontmatter parsing."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def claude_skill_markdown(skill: Skill) -> str:
+    """Render one enabled skill in Claude's flat Markdown skill layout."""
+    header = f"# {skill.name}\n*Category: {skill.category}*\n"
+    if skill.description:
+        header += f"\n{skill.description}\n"
+    return header + "\n" + skill.content
 
 
 def codex_skill_markdown(skill: Skill) -> str:
     """Render one enabled skill as a codex ``SKILL.md`` (frontmatter + body).
 
-    Codex caps the frontmatter ``name`` at 64 chars and DROPS any skill whose
-    ``description`` is empty, so the name is truncated and the description is
-    collapsed to a single line, bounded to 1024 chars, with a non-empty
-    fallback.
+    The ``name`` is capped at 64 chars and ``description`` collapsed to one line
+    (max 1024) with a non-empty fallback, since some providers drop a skill whose
+    description is empty.
     """
     name = f"{skill.category}--{skill.slug}"[:64]
     description = " ".join((skill.description or "").split())[:1024]
@@ -88,8 +117,15 @@ def codex_skill_markdown(skill: Skill) -> str:
     return frontmatter + skill.content
 
 
-async def write_skills_to_codex_dir(job_dir: Path) -> None:
-    """Write enabled skills as codex ``SKILL.md`` files into
+def render_skill_md(skill: Skill) -> str:
+    """Render a skill in the shared Agent Skills ``SKILL.md`` layout."""
+    return codex_skill_markdown(skill)
+
+
+async def write_skills_to_codex_dir(
+    job_dir: Path, *, skill_ids: tuple[str, ...] | None = None
+) -> None:
+    """Write assigned, enabled skills as codex ``SKILL.md`` files into
     ``job_dir/.agents/skills/``.
 
     The codex agent runs with the job dir as its cwd (a git repo), so codex
@@ -100,12 +136,14 @@ async def write_skills_to_codex_dir(job_dir: Path) -> None:
     """
     try:
         async with AsyncSessionLocal(thread_safe=True) as session:
-            skills = await get_enabled_skills(session)
+            skills = await get_enabled_skills(session, skill_ids)
         skills = filter_skills_for_plan(job_dir, skills)
-        if not skills:
-            logger.info("No enabled skills to write")
-            return
         skills_root = job_dir / ".agents" / "skills"
+        _replace_skill_directory(skills_root)
+        _write_skill_manifest(job_dir, skills)
+        if not skills:
+            logger.info("No assigned, enabled skills to write")
+            return
         for skill in skills:
             skill_dir = skills_root / f"{skill.category}--{skill.slug}"
             skill_dir.mkdir(parents=True, exist_ok=True)

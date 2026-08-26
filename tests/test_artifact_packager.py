@@ -1,23 +1,35 @@
 """Tests for openscientist.artifact_packager module."""
 
+import hashlib
 import stat
 import zipfile
 
 import pytest
 
-from openscientist.artifact_packager import create_artifacts_zip, create_artifacts_zip_file
+from openscientist.artifact_packager import (
+    EXCLUDED_FILES_MANIFEST,
+    MAX_ARTIFACT_FILE_SIZE_BYTES,
+    create_artifacts_zip_file,
+)
 
 
-class TestCreateArtifactsZip:
-    """Tests for create_artifacts_zip()."""
+def _open_zip(job_dir) -> zipfile.ZipFile:
+    archive_path = job_dir / "artifacts.zip"
+    create_artifacts_zip_file(job_dir, archive_path, "j1")
+    return zipfile.ZipFile(archive_path)
 
+
+class TestCreateArtifactsZipFile:
     def test_creates_valid_zip(self, tmp_path):
         (tmp_path / "report.md").write_text("# Report")
         (tmp_path / "config.json").write_text('{"job_id": "j1"}')
+        archive_path = tmp_path / "artifacts.zip"
 
-        buf = create_artifacts_zip(tmp_path, "j1")
+        written = create_artifacts_zip_file(tmp_path, archive_path, "j1")
 
-        with zipfile.ZipFile(buf) as zf:
+        assert written == 1
+        assert archive_path.exists()
+        with zipfile.ZipFile(archive_path) as zf:
             names = zf.namelist()
             assert "report.md" in names
             assert "config.json" not in names
@@ -29,9 +41,7 @@ class TestCreateArtifactsZip:
         (tmp_path / "__pycache__" / "mod.pyc").write_bytes(b"\x00")
         (tmp_path / "keep.txt").write_text("keep")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             names = zf.namelist()
             assert "keep.txt" in names
             assert not any(".git" in n for n in names)
@@ -44,12 +54,46 @@ class TestCreateArtifactsZip:
         (codex_home / "auth.json").write_text('{"tokens": "placeholder"}')
         (tmp_path / "report.md").write_text("# Report")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             names = zf.namelist()
             assert "report.md" in names
             assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
+
+    def test_excludes_omp_runtime_state_and_credential_vault(self, tmp_path):
+        """The omp harness writes its MCP config and a copy of the credential
+        vault into the job dir, so neither may reach a downloadable archive."""
+        omp_dir = tmp_path / ".omp"
+        omp_dir.mkdir()
+        (omp_dir / "mcp.json").write_text('{"env": {"OPENSCIENTIST_EXEC_TOKEN": "job-1.tok"}}')
+        (omp_dir / "session").mkdir()
+        (omp_dir / "session" / "turn.jsonl").write_text("{}")
+        vault = tmp_path / ".omp-home"
+        vault.mkdir()
+        (vault / "agent.db").write_bytes(b"SQLite format 3\x00")
+        (tmp_path / "report.md").write_text("# Report")
+
+        with _open_zip(tmp_path) as zf:
+            names = zf.namelist()
+        assert "report.md" in names
+        assert not any(n == ".omp" or n.startswith(".omp/") for n in names)
+        assert not any(n == ".omp-home" or n.startswith(".omp-home/") for n in names)
+
+    def test_no_excluded_directory_ever_reaches_the_archive(self, tmp_path):
+        """Guards the denylist itself: every entry must actually be pruned, so a
+        future harness cannot add a directory here and leave it unenforced."""
+        from openscientist.artifact_packager import _EXCLUDE_DIRS
+
+        for name in _EXCLUDE_DIRS:
+            excluded = tmp_path / name
+            excluded.mkdir()
+            (excluded / "secret.txt").write_text("credential")
+        (tmp_path / "report.md").write_text("# Report")
+
+        with _open_zip(tmp_path) as zf:
+            names = zf.namelist()
+        assert "report.md" in names
+        for name in _EXCLUDE_DIRS:
+            assert not any(n == name or n.startswith(f"{name}/") for n in names), name
 
     def test_excludes_symlinks_to_runtime_state(self, tmp_path):
         codex_home = tmp_path / ".codex"
@@ -62,9 +106,7 @@ class TestCreateArtifactsZip:
         except OSError:
             pytest.skip("symlink creation is not available on this platform")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             assert "result.json" not in zf.namelist()
 
     def test_excludes_directory_symlinks_to_runtime_state(self, tmp_path):
@@ -77,9 +119,7 @@ class TestCreateArtifactsZip:
         except OSError:
             pytest.skip("directory symlink creation is not available on this platform")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             assert not any(name.startswith("results/") for name in zf.namelist())
 
     def test_excludes_pytest_cache_and_node_modules(self, tmp_path):
@@ -89,9 +129,7 @@ class TestCreateArtifactsZip:
         (tmp_path / "node_modules" / "pkg").write_text("pkg")
         (tmp_path / "data.csv").write_text("a,b")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             names = zf.namelist()
             assert "data.csv" in names
             assert not any(".pytest_cache" in n for n in names)
@@ -103,20 +141,14 @@ class TestCreateArtifactsZip:
         (sub / "file.csv").write_text("x,y")
         (tmp_path / "report.md").write_text("# R")
 
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             names = zf.namelist()
-            # Paths should be relative to job_dir, using forward slashes
             assert "data/file.csv" in names
             assert "report.md" in names
-            # No absolute paths
             assert not any(n.startswith("/") for n in names)
 
     def test_empty_directory(self, tmp_path):
-        buf = create_artifacts_zip(tmp_path, "j1")
-
-        with zipfile.ZipFile(buf) as zf:
+        with _open_zip(tmp_path) as zf:
             assert zf.namelist() == []
 
     def test_unreadable_file_skipped(self, tmp_path):
@@ -127,35 +159,110 @@ class TestCreateArtifactsZip:
         bad.chmod(0o000)
 
         try:
-            buf = create_artifacts_zip(tmp_path, "j1")
-
-            with zipfile.ZipFile(buf) as zf:
+            with _open_zip(tmp_path) as zf:
                 names = zf.namelist()
                 assert "good.txt" in names
-                # bad.txt should be skipped (logged warning), not crash
         finally:
-            # Restore permissions for cleanup
             bad.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
-    def test_buffer_seeked_to_zero(self, tmp_path):
-        (tmp_path / "f.txt").write_text("data")
-        buf = create_artifacts_zip(tmp_path, "j1")
-        assert buf.tell() == 0
 
-    def test_create_artifacts_zip_file(self, tmp_path):
-        (tmp_path / "report.md").write_text("# Report")
-        (tmp_path / "config.json").write_text('{"job_id":"j1"}')
-        (tmp_path / ".codex").mkdir()
-        (tmp_path / ".codex" / "config.toml").write_text('DATABASE_URL = "placeholder"')
-        (tmp_path / ".codex" / "auth.json").write_text('{"tokens": "placeholder"}')
+class TestOversizedFileExclusion:
+    def test_oversized_file_excluded_small_file_kept(self, tmp_path):
+        sub = tmp_path / "data"
+        sub.mkdir()
+        small = sub / "small.csv"
+        small.write_text("a,b\n1,2\n")
+        huge = sub / "huge_reference_data.jsonl"
+        with open(huge, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES + 1024)
+            f.write(b"\0")
         archive_path = tmp_path / "artifacts.zip"
 
         written = create_artifacts_zip_file(tmp_path, archive_path, "j1")
 
         assert written == 1
-        assert archive_path.exists()
         with zipfile.ZipFile(archive_path) as zf:
             names = zf.namelist()
-            assert "report.md" in names
+            assert "data/small.csv" in names
+            assert "data/huge_reference_data.jsonl" not in names
+            assert EXCLUDED_FILES_MANIFEST in names
+            manifest = zf.read(EXCLUDED_FILES_MANIFEST).decode()
+            assert "data/huge_reference_data.jsonl" in manifest
+
+    def test_no_manifest_when_nothing_excluded(self, tmp_path):
+        (tmp_path / "report.md").write_text("# Report")
+
+        with _open_zip(tmp_path) as zf:
+            assert EXCLUDED_FILES_MANIFEST not in zf.namelist()
+
+    def test_file_at_exactly_the_limit_is_kept(self, tmp_path):
+        exact = tmp_path / "exact.bin"
+        with open(exact, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES - 1)
+            f.write(b"\0")
+
+        with _open_zip(tmp_path) as zf:
+            assert "exact.bin" in zf.namelist()
+
+
+class TestManifestNameCollision:
+    def test_preexisting_file_with_manifest_name_is_not_bundled(self, tmp_path):
+        (tmp_path / EXCLUDED_FILES_MANIFEST).write_text("not the real manifest")
+        huge = tmp_path / "huge.bin"
+        with open(huge, "wb") as f:
+            f.seek(MAX_ARTIFACT_FILE_SIZE_BYTES + 1024)
+            f.write(b"\0")
+
+        with _open_zip(tmp_path) as zf:
+            assert zf.namelist().count(EXCLUDED_FILES_MANIFEST) == 1
+            manifest = zf.read(EXCLUDED_FILES_MANIFEST).decode()
+            assert "huge.bin" in manifest
+            assert "not the real manifest" not in manifest
+
+
+class TestCreateDVCEvidenceBundleZip:
+    """Tests for create_dvc_evidence_bundle_zip()."""
+
+    def test_creates_dvc_evidence_bundle_with_manifest(self, tmp_path):
+        import json
+
+        from openscientist.artifact_packager import create_dvc_evidence_bundle_zip
+
+        datasets_dir = tmp_path / "dvc_datasets" / "dvc-1"
+        datasets_dir.mkdir(parents=True)
+        (datasets_dir / "manifest.json").write_text('{"dataset_id": "dvc-1"}')
+        (datasets_dir / "measurements.csv").write_text(
+            "cage,time,value\nC1,2026-01-01T00:00:00Z,10\n"
+        )
+        assessments_dir = tmp_path / "dvc_assessments"
+        assessments_dir.mkdir(parents=True)
+        (assessments_dir / "dvc-assess-1.json").write_text('{"checkpoint": "pre_analysis"}')
+        (tmp_path / "final_report.md").write_text("# DVC Analysis Report")
+        (tmp_path / "dvc_workflow.json").write_text('{"version": 1}')
+        (tmp_path / ".dvc_workflow.lock").write_text("")
+        (tmp_path / "config.json").write_text('{"secret": "do_not_bundle"}')
+
+        buf = create_dvc_evidence_bundle_zip(tmp_path, "job-dvc-1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            assert "dvc_datasets/dvc-1/manifest.json" in names
+            assert "dvc_datasets/dvc-1/measurements.csv" in names
+            assert "dvc_assessments/dvc-assess-1.json" in names
+            assert "final_report.md" in names
+            assert "dvc_workflow.json" in names
+            assert ".dvc_workflow.lock" not in names
             assert "config.json" not in names
-            assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
+            assert "DVC_EVIDENCE_MANIFEST.json" in names
+
+            manifest = json.loads(zf.read("DVC_EVIDENCE_MANIFEST.json").decode("utf-8"))
+            assert manifest["schema"] == "openscientist-dvc-evidence-bundle/0.1"
+            assert manifest["job_id"] == "job-dvc-1"
+            assert manifest["total_files"] == 5
+            file_paths = [entry["path"] for entry in manifest["files"]]
+            assert "final_report.md" in file_paths
+            assert "dvc_datasets/dvc-1/measurements.csv" in file_paths
+            for entry in manifest["files"]:
+                content = zf.read(entry["path"])
+                assert entry["sha256"] == hashlib.sha256(content).hexdigest()
+                assert entry["bytes"] == len(content)

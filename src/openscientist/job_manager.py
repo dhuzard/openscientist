@@ -20,7 +20,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openscientist.container_manager import get_container_manager
-from openscientist.database.models import User
+from openscientist.database.models import Skill, User
 from openscientist.database.models.job import Job as JobModel
 from openscientist.database.models.job_share import JobShare
 from openscientist.database.rls import set_current_user
@@ -50,8 +50,8 @@ def _effective_model(settings: Any) -> str | None:
     on the job so the UI can show a model badge.
 
     ``OPENSCIENTIST_MODEL`` (and the anthropic default) are checked first, but
-    codex providers carry their model in provider-specific config (for example
-    ``OLLAMA_MODEL`` or the Azure deployment), so when those are unset we ask
+    codex providers may carry their model in provider-specific config (for example
+    the Azure deployment) or in a provider default, so when those are unset we ask
     the provider itself. Returns None when nothing resolves (for example codex
     on the account default), leaving the job with a provider badge only.
     """
@@ -119,6 +119,7 @@ async def _db_create_job(
     space_group: str | None = None,
     llm_provider: str | None = None,
     llm_config: dict[str, Any] | None = None,
+    assigned_skill_ids: list[str] | None = None,
 ) -> JobModel:
     """Create a job in the database (thread-safe for worker threads).
 
@@ -155,11 +156,39 @@ async def _db_create_job(
             space_group=space_group,
             llm_provider=llm_provider,
             llm_config=llm_config,
+            assigned_skill_ids=assigned_skill_ids,
         )
         session.add(job)
         await session.commit()
         await session.refresh(job)
         return job
+
+
+async def _db_validate_skill_ids(skill_ids: list[str]) -> list[str]:
+    """Validate and normalize an explicit per-job skill selection.
+
+    Disabled and unknown skills are rejected rather than silently broadening
+    the assignment. Order is retained and duplicates are removed.
+    """
+    try:
+        normalized = list(dict.fromkeys(str(UUID(skill_id)) for skill_id in skill_ids))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Every selected skill ID must be a valid UUID") from exc
+    if not normalized:
+        return []
+
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        stmt = select(Skill.id).where(
+            Skill.id.in_([UUID(skill_id) for skill_id in normalized]),
+            Skill.is_enabled.is_(True),
+        )
+        result = await session.execute(stmt)
+        enabled = {str(skill_id) for skill_id in result.scalars().all()}
+
+    unavailable = [skill_id for skill_id in normalized if skill_id not in enabled]
+    if unavailable:
+        raise ValueError("Selected skills are unavailable or disabled: " + ", ".join(unavailable))
+    return normalized
 
 
 async def _db_get_job(job_id: str, user_id: UUID | None = None) -> JobModel | None:
@@ -240,6 +269,37 @@ async def _db_update_job_status(
                     result.ntfy_topic = user_row.ntfy_topic
 
     return result
+
+
+async def _db_prepare_job_restart(
+    job_id: str,
+    scheduled_status: JobStatus,
+) -> int:
+    """Prepare a failed or cancelled job for another worker run.
+
+    Returns the persisted iteration at which discovery should resume.
+    """
+    if scheduled_status not in {JobStatus.PENDING, JobStatus.QUEUED}:
+        raise ValueError(f"Invalid restart status: {scheduled_status.value}")
+
+    async with AsyncSessionLocal(thread_safe=True) as session:
+        stmt = select(JobModel).where(JobModel.id == UUID(job_id))
+        result = await session.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+
+        current_status = JobStatus(job.status)
+        if current_status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
+            raise ValueError(f"Job {job_id} cannot be restarted from status {current_status.value}")
+
+        resume_iteration = max(1, min(int(job.current_iteration or 1), job.max_iterations))
+        job.status = scheduled_status.value
+        job.resume_iteration = resume_iteration
+        job.error_message = None
+        job.cancellation_reason = None
+        await session.commit()
+        return resume_iteration
 
 
 async def _db_apply_job_control(
@@ -457,6 +517,7 @@ class JobManager:
         space_group: str | None,
         llm_provider: str | None = None,
         llm_config: dict[str, Any] | None = None,
+        assigned_skill_ids: list[str] | None = None,
     ) -> UUID | None:
         owner_uuid = UUID(owner_id) if owner_id else None
         try:
@@ -474,6 +535,7 @@ class JobManager:
                     space_group=space_group,
                     llm_provider=llm_provider,
                     llm_config=llm_config,
+                    assigned_skill_ids=assigned_skill_ids,
                 )
             )
         except Exception as e:
@@ -535,6 +597,7 @@ class JobManager:
         description: str | None = None,
         pdb_code: str | None = None,
         space_group: str | None = None,
+        skill_ids: list[str] | None = None,
         evidence_plan: dict[str, Any] | None = None,
     ) -> JobInfo:
         """
@@ -553,6 +616,9 @@ class JobManager:
             description: Optional job description
             pdb_code: Optional PDB code metadata
             space_group: Optional crystal space group metadata
+            skill_ids: Explicit enabled skill UUIDs to assign. ``None`` keeps
+                the legacy/default behavior (all enabled skills); ``[]``
+                intentionally assigns no skills.
             evidence_plan: Optional human-approved evidence and skill-composition plan
 
         Returns:
@@ -572,6 +638,9 @@ class JobManager:
         llm_provider = settings.provider.provider_id.lower()
         model = _effective_model(settings)
         llm_config = {"model": model} if model else None
+        assigned_skill_ids = (
+            _run_async(_db_validate_skill_ids(skill_ids)) if skill_ids is not None else None
+        )
 
         # Create job in database
         logger.info("Creating job %s in database", job_id)
@@ -588,6 +657,7 @@ class JobManager:
             space_group=space_group,
             llm_provider=llm_provider,
             llm_config=llm_config,
+            assigned_skill_ids=assigned_skill_ids,
         )
 
         # Create job directory and files
@@ -678,6 +748,49 @@ class JobManager:
                 kwargs={"run_mode": "report_only"},
                 daemon=True,
             )
+            self._running_jobs[job_id] = thread
+            thread.start()
+
+    def restart_job(self, job_id: str) -> None:
+        """Resume a failed or cancelled job from its last persisted iteration.
+
+        The interrupted iteration is intentionally run again because an agent
+        process may have stopped midway through a turn. Findings and artifacts
+        persisted before the interruption remain available to the new agent.
+
+        Raises:
+            ValueError: If the job is missing, not restartable, still stopping,
+                or the provider budget does not allow another run.
+        """
+        self._check_budget_before_creation()
+
+        with self._lock:
+            job_info = self.get_job(job_id)
+            if job_info is None:
+                raise ValueError(f"Job {job_id} not found")
+            if job_info.status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
+                raise ValueError(
+                    f"Job {job_id} cannot be restarted from status {job_info.status.value}"
+                )
+            if job_id in self._running_jobs:
+                raise ValueError(f"Job {job_id} is still stopping; try again shortly")
+
+            if self._get_active_job_count() >= self.max_concurrent:
+                resume_iteration = _run_async(_db_prepare_job_restart(job_id, JobStatus.QUEUED))
+                logger.info(
+                    "Restart of job %s queued from iteration %d",
+                    job_id,
+                    resume_iteration,
+                )
+                return
+
+            resume_iteration = _run_async(_db_prepare_job_restart(job_id, JobStatus.PENDING))
+            logger.info(
+                "Restarting job %s from iteration %d",
+                job_id,
+                resume_iteration,
+            )
+            thread = threading.Thread(target=self._run_job, args=(job_id,), daemon=True)
             self._running_jobs[job_id] = thread
             thread.start()
 
@@ -811,8 +924,13 @@ class JobManager:
             # control waits and then stops that exact container.
             with self._lock:
                 current = self.get_job(job_id)
+                # Abort wins over both discovery and report-only launches. This
+                # closes the narrow transition window after discovery stops but
+                # before the early-report container starts.
+                if current is not None and current.status == JobStatus.CANCELLED:
+                    raise _ControlledJobStopError
                 if run_mode == "discovery" and current is not None:
-                    if current.status in {JobStatus.PAUSED, JobStatus.CANCELLED}:
+                    if current.status == JobStatus.PAUSED:
                         raise _ControlledJobStopError
                     if current.status == JobStatus.GENERATING_REPORT:
                         raise _EarlyReportTransitionError
@@ -919,7 +1037,7 @@ class JobManager:
 
     def cancel_job(self, job_id: str) -> None:
         """
-        Cancel a pending, running, or queued job.
+        Abort a pending, queued, paused, running, feedback-waiting, or reporting job.
 
         Args:
             job_id: Job ID
@@ -937,9 +1055,11 @@ class JobManager:
             JobStatus.QUEUED,
             JobStatus.PAUSED,
             JobStatus.AWAITING_FEEDBACK,
+            JobStatus.GENERATING_REPORT,
         ]:
             raise ValueError(
-                f"Job {job_id} is not pending, running, queued, paused, or awaiting feedback"
+                f"Job {job_id} is not pending, queued, running, paused, awaiting feedback, "
+                "or generating a report"
             )
 
         # Update status with reason
@@ -955,7 +1075,11 @@ class JobManager:
 
         # Send SIGTERM to the agent container immediately so it doesn't
         # keep burning resources until the polling loop notices the DB change.
-        if job_info.status in [JobStatus.RUNNING, JobStatus.AWAITING_FEEDBACK]:
+        if job_info.status in [
+            JobStatus.RUNNING,
+            JobStatus.AWAITING_FEEDBACK,
+            JobStatus.GENERATING_REPORT,
+        ]:
             try:
                 from openscientist.job_container import JobContainerRunner
 
@@ -1147,7 +1271,7 @@ class JobManager:
         # Get project-level cost info from provider
         try:
             provider = get_provider()
-            cost_info = provider.get_cost_info(lookback_hours=24)
+            cost_info = provider.get_budget_cost_info(lookback_hours=24)
             budget_check = provider.evaluate_budget(cost_info)
         except (ValueError, ProviderError) as e:
             logger.warning("Could not fetch cost info: %s", e)

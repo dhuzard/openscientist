@@ -29,10 +29,19 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
+from openai_codex.generated.v2_all import (
+    ItemCompletedNotification,
+    ItemStartedNotification,
+    ThreadTokenUsageUpdatedNotification,
+    TurnCompletedNotification,
+)
+from openai_codex.models import Notification
 
 from openscientist.agent.base import (
     AbstractAgent,
@@ -43,8 +52,12 @@ from openscientist.agent.base import (
     TranscriptEntry,
     TurnOutcome,
 )
+from openscientist.dvc_gateway_client import without_dvc_credentials
+from openscientist.models import default_model_profile
 from openscientist.providers.base import CodexCompatible
 from openscientist.transcript import CODEX
+from openscientist.transcript.io import save_transcript
+from openscientist.transcript.variants import TaskNotification
 
 if TYPE_CHECKING:
     from openscientist.prompts.common import BackendFragments
@@ -54,9 +67,18 @@ logger = logging.getLogger(__name__)
 
 _MCP_SERVER_NAME = "openscientist-tools"
 
-# Item types that are messages or reasoning rather than tool actions. Everything
-# else (commandExecution, mcpToolCall, fileChange, ...) counts as a tool call.
-_NON_TOOL_ITEM_TYPES = frozenset({"userMessage", "agentMessage", "reasoning"})
+# Positive allowlist: new informational SDK item types must not silently inflate
+# the troubleshooting call count.
+_TOOL_ITEM_TYPES = frozenset(
+    {
+        "commandExecution",
+        "mcpToolCall",
+        "fileChange",
+        "webSearch",
+        "imageGeneration",
+        "collabAgentToolCall",
+    }
+)
 
 # Hard wall-clock bound on a single agent turn. A weak model can get stuck
 # retrying an unsupported tool call (e.g. apply_patch) and never end the turn,
@@ -97,6 +119,31 @@ def _toml_str(value: str) -> str:
     return f'"{escaped}"'
 
 
+class _TokenBreakdown(Protocol):
+    """The nested per-turn counts read off the SDK's ``TokenUsageBreakdown``.
+
+    Structural rather than nominal so the mapper stays checkable while tests
+    substitute stubs. Typing these four is what keeps a rename or a change of
+    nesting upstream from silently mis-pricing a turn.
+    """
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def cached_input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def reasoning_output_tokens(self) -> int: ...
+
+
+class _TurnUsage(Protocol):
+    """The SDK's ``ThreadTokenUsage``, of which only ``last`` is per-turn."""
+
+    @property
+    def last(self) -> _TokenBreakdown | None: ...
+
+
 class CodexAgent(AbstractAgent[CodexCompatible]):
     """Agent that drives the Codex app-server via the official ``openai-codex``."""
 
@@ -104,9 +151,17 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         super().__init__(config, provider)
         self._codex: AsyncCodex | None = None
         self._thread: AsyncThread | None = None
+        self._active_turn: Any | None = None
+        self._partial_items: list[Any] = []
+        self._partial_usage: Any | None = None
+        self._resolved_model_name = provider.codex_model_name()
 
     backend = AgentBackend.CODEX
     file_write_tool = "apply_patch"
+    display_name = "Codex"
+    # codex discovers ``.agents/skills/<name>/SKILL.md`` under its cwd; the base
+    # class writes them there via the default SKILL.md layout.
+    skills_subdir = ".agents/skills"
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -123,9 +178,16 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         return cls.job_doc(use_hypotheses=use_hypotheses, phenix_available=phenix_available)
 
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
+        if self._config.assigned_skill_ids is None:
+            await super().prepare_job_workspace(use_hypotheses=use_hypotheses)
+            return
+
         from openscientist.agent.skills import write_skills_to_codex_dir
 
-        await write_skills_to_codex_dir(self._config.job_dir)
+        await write_skills_to_codex_dir(
+            self._config.job_dir,
+            skill_ids=self._config.assigned_skill_ids,
+        )
 
     # apply_runtime_environment, chat_system_prompt, write_chat_context, and
     # chat_model_override use the AbstractAgent defaults: codex configures its
@@ -180,21 +242,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         OPENSCIENTIST_SECRET_KEY, provider creds, executor image, ...) that the
         tools need, then overlay the per-job ``OPENSCIENTIST_*`` values.
         """
-        config = self._config
-        job_dir = self._job_dir()
-        env = dict(os.environ)
-        env.update(
-            {
-                "OPENSCIENTIST_JOB_ID": job_dir.name,
-                "OPENSCIENTIST_JOB_DIR": str(job_dir),
-                "OPENSCIENTIST_USE_HYPOTHESES": "1" if config.use_hypotheses else "0",
-            }
-        )
-        if config.data_file is not None:
-            env["OPENSCIENTIST_DATA_FILE"] = str(config.data_file)
-        if config.data_files:
-            env["OPENSCIENTIST_DATA_FILES"] = os.pathsep.join(str(p) for p in config.data_files)
-        env.update(config.tool_server_env)
+        # Never serialize trusted DVC connection settings into per-job
+        # CODEX_HOME/config.toml. Only gateway values may cross this boundary.
+        env = without_dvc_credentials(dict(os.environ))
+        env.update(self._job_env_overlay(self._job_dir()))
         return env
 
     def _write_codex_config(self) -> None:
@@ -211,7 +262,7 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             f"command = {_toml_str(sys.executable)}",
             'args = ["-m", "openscientist_tools"]',
             f"[mcp_servers.{_MCP_SERVER_NAME}.env]",
-            *(f"{key} = {_toml_str(value)}" for key, value in self._mcp_env().items()),
+            *(f"{_toml_str(key)} = {_toml_str(value)}" for key, value in self._mcp_env().items()),
         ]
         (home / "config.toml").write_text("\n".join(lines) + "\n")
 
@@ -253,6 +304,52 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             )
         )
 
+    def _ensure_codex_client(self) -> AsyncCodex:
+        """Create the configured SDK client without necessarily starting a thread."""
+        if self._codex is None:
+            self._write_codex_config()
+            self._write_agents_md()
+            self._ensure_auth()
+            self._codex = self._make_codex()
+        return self._codex
+
+    async def warm_model_profile(self) -> None:
+        """Resolve Codex's account default before prompt budgeting starts.
+
+        When no explicit model is configured, Codex chooses an account/config
+        default. Its public model catalog marks that entry with ``is_default``;
+        resolving it here keeps cost attribution and context budgeting aligned
+        with the model the subsequent thread will use.
+        """
+        if self._resolved_model_name:
+            await super().warm_model_profile()
+            return
+
+        try:
+            catalog = await self._ensure_codex_client().models()
+            default = next((model for model in catalog.data if model.is_default), None)
+            if default is None:
+                raise LookupError("Codex model catalog did not identify a default model")
+            self._resolved_model_name = default.model or default.id
+
+            from openscientist.settings import get_settings
+
+            self._model_profile = default_model_profile(
+                self._resolved_model_name,
+                get_settings().provider.model_context_tokens,
+            )
+            logger.info("Resolved Codex account default model: %s", self._resolved_model_name)
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve Codex account default model; using provider fallback: %s",
+                exc,
+            )
+            await super().warm_model_profile()
+
+    @property
+    def effective_model_name(self) -> str | None:
+        return self._resolved_model_name or super().effective_model_name
+
     async def _close_codex(self) -> None:
         """Tear down the app-server client and drop the thread."""
         if self._codex is not None:
@@ -271,13 +368,9 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         """
         if reset_session:
             self._thread = None
-        if self._codex is None:
-            self._write_codex_config()
-            self._write_agents_md()
-            self._ensure_auth()
-            self._codex = self._make_codex()
+        codex = self._ensure_codex_client()
         if self._thread is None:
-            self._thread = await self._codex.thread_start(
+            self._thread = await codex.thread_start(
                 model=self._provider.codex_model_name(),
                 model_provider=self._provider.codex_model_provider_id(),
                 # The agent already runs locked down in its own ephemeral
@@ -295,24 +388,27 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         return self._thread
 
     @staticmethod
-    def _usage_from_payload(usage: Any) -> TokenUsage:
+    def _usage_from_payload(usage: _TurnUsage) -> TokenUsage:
         """Normalize the turn's token usage to ``TokenUsage``.
 
         The SDK reports per-turn usage as ``usage.last`` (a
-        ``TokenUsageBreakdown``) with ``input_tokens`` inclusive of
-        ``cached_input_tokens`` (Responses-API shape), so the fresh-input count
-        is the difference. ``usage.total`` is the running thread total, which we
-        do not use here since ``_token_usage`` accumulates per turn.
+        ``TokenUsageBreakdown``) whose counts nest: ``input_tokens`` includes
+        ``cached_input_tokens`` and ``output_tokens`` includes
+        ``reasoning_output_tokens`` (Responses-API shape). Both sub-counts are
+        subtracted here so the buckets stay non-overlapping and still sum to
+        the payload's ``total_tokens``. ``usage.total`` is the running thread
+        total, which we do not use since ``_token_usage`` accumulates per turn.
         """
-        last = getattr(usage, "last", None)
+        last = usage.last
         if last is None:
             return TokenUsage()
         return TokenUsage(
-            input_tokens=last.input_tokens - last.cached_input_tokens,
-            output_tokens=last.output_tokens,
-            cache_read_tokens=last.cached_input_tokens,
+            input_tokens=max(0, last.input_tokens - last.cached_input_tokens),
+            output_tokens=max(0, last.output_tokens - last.reasoning_output_tokens),
+            cache_read_tokens=max(0, last.cached_input_tokens),
             cache_write_tokens=0,
-            reasoning_tokens=last.reasoning_output_tokens,
+            cache_write_1h_tokens=0,
+            reasoning_tokens=max(0, last.reasoning_output_tokens),
         )
 
     @staticmethod
@@ -330,40 +426,206 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         ]
         return CODEX.deserialize(events)
 
+    def _live_transcript_path(self) -> Path:
+        """Return the atomically-updated transcript shown while a turn runs."""
+        return self._job_dir() / "provenance" / "current_turn_transcript.json"
+
+    def _persist_partial_transcript(self) -> None:
+        """Expose completed turn items to the UI before the turn itself finishes."""
+        try:
+            save_transcript(
+                self._live_transcript_path(),
+                self._to_transcript(self._partial_items),
+            )
+        except Exception:
+            # Telemetry must never make the scientific turn fail. The final
+            # transcript persistence path remains the authoritative fallback.
+            logger.warning("Failed to persist live Codex transcript", exc_info=True)
+
+    def _upsert_partial_item(self, item: Any) -> None:
+        """Retain started calls and replace them with completed forms by id."""
+        item_id = item.model_dump(mode="json").get("id")
+        if item_id:
+            for index, existing in enumerate(self._partial_items):
+                if existing.model_dump(mode="json").get("id") == item_id:
+                    self._partial_items[index] = item
+                    break
+            else:
+                self._partial_items.append(item)
+        else:
+            self._partial_items.append(item)
+        self._persist_partial_transcript()
+
+    @staticmethod
+    def _final_response_from_items(items: list[Any]) -> str:
+        """Extract the last final/phase-less Codex assistant message."""
+        fallback = ""
+        for item in reversed(items):
+            payload = item.model_dump(mode="json")
+            if payload.get("type") != "agentMessage":
+                continue
+            text = str(payload.get("text") or "")
+            phase = payload.get("phase")
+            if phase == "finalAnswer":
+                return text
+            if not fallback and phase is None:
+                fallback = text
+        return fallback
+
+    async def _run_streaming_turn(self, thread: AsyncThread, prompt: str) -> Any:
+        """Run a Codex turn while retaining every completed item incrementally.
+
+        ``AsyncThread.run`` only returns items after the terminal event. Using
+        the public turn stream lets timeout handling return and persist the
+        work that happened before the wall-clock cut.
+        """
+        self._partial_items = []
+        self._partial_usage = None
+
+        turn = await thread.turn(prompt)
+        self._active_turn = turn
+        completed: TurnCompletedNotification | None = None
+        # ``AsyncTurn.stream`` is implemented as an async generator, although
+        # the SDK exposes the narrower AsyncIterator return annotation. Keep
+        # the cast local so the stream can be closed deterministically when a
+        # turn is cancelled or times out.
+        stream = cast(AsyncGenerator[Notification, None], turn.stream())
+        try:
+            async for event in stream:
+                payload = event.payload
+                if (
+                    isinstance(payload, ItemStartedNotification)
+                    and payload.turn_id == turn.id
+                    and payload.item is not None
+                ):
+                    self._upsert_partial_item(payload.item)
+                if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn.id:
+                    self._upsert_partial_item(payload.item)
+                elif (
+                    isinstance(payload, ThreadTokenUsageUpdatedNotification)
+                    and payload.turn_id == turn.id
+                ):
+                    self._partial_usage = payload.token_usage
+                elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
+                    completed = payload
+        finally:
+            await stream.aclose()
+            self._active_turn = None
+
+        if completed is None:
+            raise RuntimeError("turn completed event not received")
+        status = getattr(completed.turn.status, "value", str(completed.turn.status))
+        if status == "failed":
+            error = completed.turn.error
+            message = getattr(error, "message", None) if error is not None else None
+            raise RuntimeError(message or "Codex turn failed")
+
+        return SimpleNamespace(
+            items=list(self._partial_items),
+            final_response=self._final_response_from_items(self._partial_items),
+            usage=self._partial_usage,
+        )
+
+    @staticmethod
+    def _tool_call_count(items: list[Any]) -> int:
+        return sum(
+            1 for item in items if item.model_dump(mode="json").get("type") in _TOOL_ITEM_TYPES
+        )
+
+    def _partial_transcript_with_notification(
+        self, *, status: str, summary: str
+    ) -> list[TranscriptEntry]:
+        transcript = self._to_transcript(self._partial_items)
+        transcript.append(
+            TaskNotification(
+                task_id="codex-turn",
+                status=status,
+                summary=summary,
+                output_file="",
+            )
+        )
+        try:
+            save_transcript(self._live_transcript_path(), transcript)
+        except Exception:
+            logger.warning("Failed to persist terminal Codex notification", exc_info=True)
+        return transcript
+
     async def run_iteration(self, prompt: str, *, reset_session: bool = False) -> IterationResult:
         """Run one turn on the codex thread and return its result.
 
         The turn's items are translated to a transcript and per-turn token
         usage is accumulated.
         """
+        self._partial_items = []
+        self._partial_usage = None
         try:
             thread = await self._ensure_thread(reset_session)
-            result = await asyncio.wait_for(thread.run(prompt), timeout=_TURN_TIMEOUT_SECONDS)
+            if isinstance(thread, AsyncThread):
+                turn_coro = self._run_streaming_turn(thread, prompt)
+            else:
+                # Test/provider compatibility for AsyncThread-like adapters
+                # that implement the older aggregate ``run`` contract only.
+                turn_coro = thread.run(prompt)
+            turn_task = asyncio.create_task(turn_coro)
+            done, _ = await asyncio.wait({turn_task}, timeout=_TURN_TIMEOUT_SECONDS)
+            if done:
+                result = turn_task.result()
+            else:
+                # Interrupt while the live turn reference still exists. wait_for
+                # used to cancel the consumer first, whose finally block cleared
+                # _active_turn before this handler could interrupt Codex.
+                if self._active_turn is not None:
+                    try:
+                        await self._active_turn.interrupt()
+                    except Exception:
+                        logger.debug("Interrupting timed-out Codex turn failed", exc_info=True)
+                done, _ = await asyncio.wait({turn_task}, timeout=5.0)
+                if not done:
+                    turn_task.cancel()
+                    await asyncio.gather(turn_task, return_exceptions=True)
+                raise TimeoutError
         except TimeoutError:
             # Runaway turn (e.g. the model looping on an unsupported tool call).
             # Report it honestly as TIMED_OUT (work done before the cut is already
             # persisted via the MCP tools); the orchestrator decides whether to
             # advance or fail, rather than this layer claiming success.
             logger.warning("Codex turn exceeded %ds, cutting the turn", _TURN_TIMEOUT_SECONDS)
+            if self._partial_usage is not None:
+                self._token_usage += self._usage_from_payload(self._partial_usage)
+            transcript = self._partial_transcript_with_notification(
+                status="timed_out",
+                summary=(
+                    f"Codex turn exceeded {_TURN_TIMEOUT_SECONDS}s after "
+                    f"{self._tool_call_count(self._partial_items)} recorded tool calls."
+                ),
+            )
             await self._close_codex()
             return IterationResult(
-                outcome=TurnOutcome.TIMED_OUT, output="", tool_calls=0, transcript=[], error=""
+                outcome=TurnOutcome.TIMED_OUT,
+                output="",
+                tool_calls=self._tool_call_count(self._partial_items),
+                transcript=transcript,
+                error=f"Codex turn exceeded {_TURN_TIMEOUT_SECONDS}s",
             )
         except Exception as e:
             logger.error("Codex run failed: %s", e, exc_info=True)
+            transcript = self._partial_transcript_with_notification(
+                status="failed",
+                summary=f"Codex turn failed: {e}",
+            )
             await self._close_codex()
             return IterationResult(
-                outcome=TurnOutcome.FAILED, output="", tool_calls=0, transcript=[], error=str(e)
+                outcome=TurnOutcome.FAILED,
+                output="",
+                tool_calls=self._tool_call_count(self._partial_items),
+                transcript=transcript,
+                error=str(e),
             )
 
         if result.usage is not None:
             self._token_usage += self._usage_from_payload(result.usage)
 
-        tool_calls = sum(
-            1
-            for item in result.items
-            if item.model_dump(mode="json").get("type") not in _NON_TOOL_ITEM_TYPES
-        )
+        tool_calls = self._tool_call_count(result.items)
         return IterationResult(
             outcome=TurnOutcome.COMPLETED,
             output=result.final_response or "",

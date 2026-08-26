@@ -9,13 +9,20 @@ import pytest
 from openscientist.skill_authoring import (
     _REQUEST_FILE,
     _RESPONSE_FILE,
+    _REVIEW_SYSTEM_PROMPT,
+    _SYSTEM_PROMPT,
     SkillAuthoringBrief,
     SkillDraftRequest,
+    SkillReviewRequest,
     _direct_authoring_completion,
     _responses_text,
     build_skill_authoring_prompt,
+    build_skill_review_prompt,
+    collect_skill_run_evidence,
     generate_skill_draft,
+    generate_skill_review,
     parse_skill_authoring_response,
+    parse_skill_review_response,
     run_skill_authoring_turn_async,
     starter_skill_markdown,
     validate_skill_markdown,
@@ -74,6 +81,36 @@ def test_prompt_rejects_oversized_draft() -> None:
         build_skill_authoring_prompt(request)
 
 
+def test_review_prompt_checks_companion_skill_routing_from_run_evidence() -> None:
+    request = SkillReviewRequest(
+        skill_markdown=VALID_SKILL,
+        focus="Review why a statistical companion skill was missed.",
+        category="domain",
+        slug="replicate-aware-analysis",
+        version=3,
+        run_evidence={
+            "assigned_skills": [{"key": "domain--data-science"}],
+            "used_skills": [],
+            "tool_activity": [{"tool": "execute_code", "arguments": "paired t-test"}],
+        },
+    )
+
+    prompt = build_skill_review_prompt(request)
+
+    assert "perform a skill quality check" in prompt
+    assert "domain--data-science" in prompt
+    assert "paired t-test" in prompt
+    assert '"current_version": 3' in prompt
+    assert "Compare the skill version captured by the run" in _REVIEW_SYSTEM_PROMPT
+
+
+def test_creation_protocol_requires_composable_traceable_skills() -> None:
+    normalized = " ".join(_SYSTEM_PROMPT.split())
+    assert "explicit companion-skill handoffs" in normalized
+    assert "skill remains authoritative" in normalized
+    assert "observable in a future run trace" in normalized
+
+
 def test_parse_structured_response_accepts_json_fence() -> None:
     raw = (
         "```json\n"
@@ -92,6 +129,31 @@ def test_parse_structured_response_accepts_json_fence() -> None:
     assert result["assistant_message"] == "Added failure behavior."
     assert result["draft_markdown"] == VALID_SKILL.strip()
     assert len(result["questions"]) == 3
+
+
+def test_parse_skill_review_response_preserves_quality_evidence() -> None:
+    raw = json.dumps(
+        {
+            "assistant_message": "A companion-skill trigger is missing.",
+            "questions": [],
+            "quality_findings": [
+                {
+                    "severity": "warning",
+                    "category": "coordination",
+                    "evidence": "execute_code ran a paired t-test while data-science was unused",
+                    "recommendation": "Load data-science before non-governed statistics.",
+                }
+            ],
+            "draft_markdown": VALID_SKILL,
+        }
+    )
+
+    result = parse_skill_review_response(raw, fallback_draft=VALID_SKILL)
+
+    assert len(result["quality_findings"]) == 1
+    finding = result["quality_findings"][0]
+    assert finding.category == "coordination"
+    assert finding.severity == "warning"
 
 
 def test_parse_invalid_response_preserves_existing_draft() -> None:
@@ -154,6 +216,49 @@ def test_starter_placeholders_block_export() -> None:
     assert "placeholder" in {finding.code for finding in findings if finding.severity == "error"}
 
 
+def test_collect_skill_run_evidence_distinguishes_assignment_and_observed_use(
+    tmp_path: Path,
+) -> None:
+    provenance = tmp_path / "provenance"
+    provenance.mkdir()
+    (tmp_path / ".openscientist_skill_manifest.json").write_text(
+        json.dumps([{"key": "domain--data-science", "version": 1}]),
+        encoding="utf-8",
+    )
+    (provenance / "skill_usage.json").write_text(
+        json.dumps(
+            {
+                "used_skills": [],
+                "invocations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (provenance / "iter1_transcript.json").write_text(
+        json.dumps(
+            [
+                {
+                    "type": "tool_call",
+                    "tool": "execute_code",
+                    "arguments": {"description": "Run paired t-test"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = collect_skill_run_evidence(
+        tmp_path,
+        job_id="job-1",
+        research_question="Compare paired measurements.",
+    )
+
+    assert evidence["assigned_skills"][0]["key"] == "domain--data-science"
+    assert evidence["used_skills"] == []
+    assert evidence["tool_activity"][0]["tool"] == "execute_code"
+    assert "Assigned means available" in evidence["interpretation_note"]
+
+
 @pytest.mark.asyncio
 async def test_generate_validates_the_model_draft() -> None:
     response = json.dumps(
@@ -175,6 +280,37 @@ async def test_generate_validates_the_model_draft() -> None:
 
     assert result.draft_markdown == VALID_SKILL.strip()
     assert not [finding for finding in result.findings if finding.severity == "error"]
+
+
+@pytest.mark.asyncio
+async def test_generate_skill_review_returns_quality_and_validation_findings() -> None:
+    response = json.dumps(
+        {
+            "assistant_message": "Review complete.",
+            "questions": [],
+            "quality_findings": [
+                {
+                    "severity": "info",
+                    "category": "scope",
+                    "evidence": "The trigger is specific.",
+                    "recommendation": "Keep it.",
+                }
+            ],
+            "draft_markdown": VALID_SKILL,
+        }
+    )
+    request = SkillReviewRequest(skill_markdown=VALID_SKILL)
+
+    with patch(
+        "openscientist.skill_authoring._run_skill_authoring_turn",
+        AsyncMock(return_value=response),
+    ) as run_turn:
+        result = await generate_skill_review(request)
+
+    assert result.quality_findings[0].category == "scope"
+    assert not [finding for finding in result.validation_findings if finding.severity == "error"]
+    assert run_turn.await_args is not None
+    assert "system_prompt" in run_turn.await_args.kwargs
 
 
 @pytest.mark.asyncio

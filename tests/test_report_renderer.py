@@ -96,6 +96,27 @@ def test_inline_figure_embeds_base64_when_requested(tmp_path: Path) -> None:
     assert html.count("data:image") == 1
 
 
+def test_figure_in_plots_directory_embeds_in_html(tmp_path: Path) -> None:
+    (tmp_path / "provenance").mkdir()
+    plots = tmp_path / "plots"
+    plots.mkdir()
+    (plots / "profile.png").write_bytes(_PNG_1x1)
+    md = "{{figure:profile.png|caption=Representative profile}}"
+    html = _render(tmp_path, md, embed=True)
+    assert html.count("data:image") == 1
+    assert "Representative profile" in html
+
+
+def test_markdown_image_in_plots_directory_embeds_in_html(tmp_path: Path) -> None:
+    (tmp_path / "provenance").mkdir()
+    plots = tmp_path / "plots"
+    plots.mkdir()
+    (plots / "profile.png").write_bytes(_PNG_1x1)
+    html = _render(tmp_path, "![Representative profile](plots/profile.png)", embed=True)
+    assert html.count("data:image") == 1
+    assert "<figcaption>Representative profile</figcaption>" in html
+
+
 def test_standalone_tag_not_double_rendered(tmp_path: Path) -> None:
     job_dir = _job_dir(tmp_path, "fa.png")
     md = "## Section\n\n{{figure:fa.png|caption=Standalone}}\n\nMore text.\n"

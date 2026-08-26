@@ -7,6 +7,7 @@ from uuid import UUID
 
 from nicegui import ui
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from openscientist.api.auth import generate_api_key_secret, hash_secret
@@ -129,18 +130,23 @@ def _validate_key_name(name: str) -> str | None:
     return None
 
 
-async def _check_user_key_limit(session: Any, user_uuid: UUID) -> bool:
-    """Return True if user already reached key limit."""
-    result = await session.execute(select(func.count()).where(APIKey.user_id == user_uuid))
+async def _check_user_key_limit(session: AsyncSession, user_uuid: UUID) -> bool:
+    """Return True if user already reached the active-key limit."""
+    result = await session.execute(
+        select(func.count()).where(
+            APIKey.user_id == user_uuid,
+            APIKey.is_active.is_(True),
+        )
+    )
     return (result.scalar() or 0) >= MAX_KEYS_PER_USER
 
 
-async def _key_name_exists(session: Any, user_uuid: UUID, key_name: str) -> bool:
-    """Return True when same key name already exists for user."""
+async def _get_key_by_name(session: AsyncSession, user_uuid: UUID, key_name: str) -> APIKey | None:
+    """Return the user's key with this name, including revoked keys."""
     result = await session.execute(
         select(APIKey).where(APIKey.user_id == user_uuid, APIKey.name == key_name)
     )
-    return result.scalar_one_or_none() is not None
+    return result.scalar_one_or_none()
 
 
 async def _create_key_for_user(user_id: str, key_name: str) -> str:
@@ -150,8 +156,12 @@ async def _create_key_for_user(user_id: str, key_name: str) -> str:
         await set_current_user(session, user_uuid)
         if await _check_user_key_limit(session, user_uuid):
             raise ValueError(f"Maximum {MAX_KEYS_PER_USER} API keys allowed")
-        if await _key_name_exists(session, user_uuid, key_name):
+        existing_key = await _get_key_by_name(session, user_uuid, key_name)
+        if existing_key and existing_key.is_active:
             raise ValueError("A key with this name already exists")
+        if existing_key:
+            await session.delete(existing_key)
+            await session.flush()
 
         secret = generate_api_key_secret()
         full_key = f"{key_name}:{secret}"

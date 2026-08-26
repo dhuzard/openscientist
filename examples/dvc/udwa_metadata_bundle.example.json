@@ -1,0 +1,29 @@
+{
+  "schema": "udwa-metadata/v1",
+  "study": {
+    "study_id": "dvc-engineering-fixture",
+    "study_name": "DVC metadata-aware POC fixture",
+    "experiment_description": "",
+    "timezone": "",
+    "light_on_time": "",
+    "light_off_time": ""
+  },
+  "subjects": [
+    {"subject_id": "C1_Control", "cage_id": "C1_Control", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "C2_Control", "cage_id": "C2_Control", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "D1_Donor", "cage_id": "D1_Donor", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "D2_Donor", "cage_id": "D2_Donor", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "D3_Donor", "cage_id": "D3_Donor", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "D4_Donor", "cage_id": "D4_Donor", "group_id_detected": "Group_0", "treatment_group": ""},
+    {"subject_id": "D5_Donor", "cage_id": "D5_Donor", "group_id_detected": "Group_0", "treatment_group": ""}
+  ],
+  "groups": [
+    {
+      "group_id": "Group_0",
+      "group_label": "Group_0",
+      "experimental_condition": "",
+      "description": "DVC Analytics export group; biological meaning unresolved"
+    }
+  ],
+  "treatments": []
+}

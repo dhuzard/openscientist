@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from claude_agent_sdk import (
@@ -26,6 +27,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import (
     McpStdioServerConfig,
     PermissionResultAllow,
+    SystemMessage,
     TextBlock,
     ToolPermissionContext,
     ToolUseBlock,
@@ -40,10 +42,12 @@ from openscientist.agent.base import (
     TurnOutcome,
 )
 from openscientist.agent.mcp_specs import StdioMcpServerSpec
+from openscientist.dvc_gateway_client import without_dvc_credentials
 from openscientist.providers.base import ClaudeCompatible
 from openscientist.transcript import CLAUDE
 
 if TYPE_CHECKING:
+    from openscientist.database.models import Skill
     from openscientist.prompts.common import BackendFragments
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,26 @@ class _IterationState:
     final_output: str = ""
 
 
+def _usage_field(payload: object, name: str) -> object:
+    """Read ``name`` off a usage payload that may be a dict or a typed object.
+
+    The SDK hands over model objects, while cached transcripts and tests hand over
+    the wire dicts, and both reach the usage mapper.
+    """
+    if isinstance(payload, dict):
+        return payload.get(name)
+    return getattr(payload, name, None)
+
+
+def _usage_int(payload: object, name: str) -> int:
+    value = _usage_field(payload, name)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
 _install_parse_message_patch()
 
 
@@ -135,6 +159,8 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
     backend = AgentBackend.CLAUDE_CODE
     file_write_tool = "Write"
+    display_name = "Claude Code"
+    skills_subdir = ".claude/skills"
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -151,9 +177,44 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         return cls.system_prompt()
 
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
+        if self._config.assigned_skill_ids is None:
+            self._write_job_claude_md(use_hypotheses=use_hypotheses)
+            await super().prepare_job_workspace(use_hypotheses=use_hypotheses)
+            return
+
         from openscientist.agent.skills import write_skills_to_claude_dir
 
-        await write_skills_to_claude_dir(self._config.job_dir, use_hypotheses=use_hypotheses)
+        await write_skills_to_claude_dir(
+            self._config.job_dir,
+            use_hypotheses=use_hypotheses,
+            skill_ids=self._config.assigned_skill_ids,
+        )
+
+    def _write_job_claude_md(self, *, use_hypotheses: bool = False) -> None:
+        from openscientist.prompts import generate_job_claude_md
+        from openscientist.settings import get_settings
+
+        claude_dir = self._config.job_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (claude_dir / "CLAUDE.md").write_text(
+                generate_job_claude_md(
+                    use_hypotheses=use_hypotheses,
+                    phenix_available=get_settings().phenix.is_available,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Failed to write job CLAUDE.md: %s", e)
+
+    def _write_skill(self, skills_root: Path, skill: Skill) -> None:
+        # Flat ``<name>.md`` with a human header (the claude-agent-sdk layout).
+        skills_root.mkdir(parents=True, exist_ok=True)
+        header = f"# {skill.name}\n*Category: {skill.category}*\n"
+        if skill.description:
+            header += f"\n{skill.description}\n"
+        path = skills_root / f"{skill.category}--{skill.slug}.md"
+        path.write_text(header + "\n" + skill.content, encoding="utf-8")
 
     def apply_runtime_environment(self) -> None:
         # Auth/routing flags for the Claude CLI and the tools subprocess.
@@ -208,19 +269,12 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
         from the agent container plus the per-job overlays).
         """
         config = self._config
-        env = dict(os.environ)
-        env["OPENSCIENTIST_JOB_ID"] = config.job_dir.name
-        env["OPENSCIENTIST_JOB_DIR"] = str(config.job_dir)
-        env["OPENSCIENTIST_USE_HYPOTHESES"] = "1" if config.use_hypotheses else "0"
-        if config.data_file is not None:
-            env["OPENSCIENTIST_DATA_FILE"] = str(config.data_file)
-        else:
+        env = without_dvc_credentials(dict(os.environ))
+        env.update(self._job_env_overlay(config.job_dir))
+        if config.data_file is None:
             env.pop("OPENSCIENTIST_DATA_FILE", None)
-        if config.data_files:
-            env["OPENSCIENTIST_DATA_FILES"] = os.pathsep.join(str(p) for p in config.data_files)
-        else:
+        if not config.data_files:
             env.pop("OPENSCIENTIST_DATA_FILES", None)
-        env.update(config.tool_server_env)
         return env
 
     def _build_options(self) -> ClaudeAgentOptions:
@@ -274,33 +328,30 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
     def _usage_from_payload(usage: object) -> TokenUsage:
         """Normalize Anthropic SDK usage payloads (object or dict) to TokenUsage.
 
-        Anthropic's shape is already additive: ``input_tokens`` excludes
-        cached input, and ``cache_creation_input_tokens`` /
-        ``cache_read_input_tokens`` are independent buckets. We pass the
-        values through with only the field renames required by the
-        normalized schema.
+        Anthropic's shape is already additive: ``input_tokens`` excludes cached
+        input, and ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+        are independent buckets.
 
-        ``reasoning_tokens`` is always 0 on this path because the
-        Anthropic API does not expose a separate count for extended-
-        thinking tokens; they are billed inside ``output_tokens``.
+        ``cache_creation_input_tokens`` is the sum of the per-lifetime counts in
+        ``cache_creation``, and a one-hour write bills at twice the input rate
+        against 1.25x for five minutes, so the one-hour portion is split off into
+        its own bucket. It is clamped to the total so the two stay disjoint.
 
-        The Codex backend (Phase 5) will have its own
-        ``_usage_from_payload`` that subtracts ``cached_input_tokens``
-        and ``reasoning_output_tokens`` from their parent totals to
-        produce the same additive form.
+        ``reasoning_tokens`` is always 0 on this path because the Anthropic API
+        does not expose a separate count for extended-thinking tokens; they are
+        billed inside ``output_tokens``.
         """
-        if isinstance(usage, dict):
-            return TokenUsage(
-                input_tokens=int(usage.get("input_tokens", 0) or 0),
-                output_tokens=int(usage.get("output_tokens", 0) or 0),
-                cache_write_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
-                cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
-            )
+        cache_write_total = _usage_int(usage, "cache_creation_input_tokens")
+        write_1h = min(
+            _usage_int(_usage_field(usage, "cache_creation"), "ephemeral_1h_input_tokens"),
+            cache_write_total,
+        )
         return TokenUsage(
-            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
-            cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            input_tokens=_usage_int(usage, "input_tokens"),
+            output_tokens=_usage_int(usage, "output_tokens"),
+            cache_write_tokens=cache_write_total - write_1h,
+            cache_write_1h_tokens=write_1h,
+            cache_read_tokens=_usage_int(usage, "cache_read_input_tokens"),
         )
 
     def _record_usage(self, message: object) -> None:
@@ -319,7 +370,12 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
             "input": getattr(block, "input", {}),
         }
 
-    def _handle_content_list(self, raw_content: list[object], state: _IterationState) -> None:
+    def _handle_content_list(
+        self,
+        raw_content: list[object],
+        state: _IterationState,
+        message: object,
+    ) -> None:
         """Convert SDK content blocks into transcript items."""
         content_items: list[dict[str, object]] = []
         for block in raw_content:
@@ -332,7 +388,18 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
                 logger.debug("Tool call: %s", block.name)
                 content_items.append(self._tool_use_item(block, state.tool_call_count))
         if content_items:
-            state.transcript.append({"type": "assistant", "message": {"content": content_items}})
+            wrapper: dict[str, Any] = {
+                "type": "assistant",
+                "message": {
+                    "content": content_items,
+                    "model": getattr(message, "model", None),
+                    "error": getattr(message, "error", None),
+                },
+            }
+            parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
+            if parent_tool_use_id:
+                wrapper["parent_tool_use_id"] = parent_tool_use_id
+            state.transcript.append(wrapper)
 
     @staticmethod
     def _handle_content_text(raw_content: str, state: _IterationState) -> None:
@@ -352,6 +419,32 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
         self._record_usage(message)
 
+        if isinstance(message, SystemMessage):
+            payload: dict[str, Any] = {
+                "type": "system",
+                "subtype": message.subtype,
+            }
+            if isinstance(message.data, dict):
+                payload.update(message.data)
+            for field_name in (
+                "task_id",
+                "description",
+                "task_type",
+                "tool_use_id",
+                "session_id",
+                "uuid",
+                "last_tool_name",
+                "usage",
+                "status",
+                "summary",
+                "output_file",
+            ):
+                value = getattr(message, field_name, None)
+                if value is not None:
+                    payload[field_name] = value
+            state.transcript.append(payload)
+            return
+
         if isinstance(message, ResultMessage):
             if message.result:
                 state.final_output = message.result
@@ -359,7 +452,7 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
 
         raw_content = getattr(message, "content", None)
         if isinstance(raw_content, list):
-            self._handle_content_list(raw_content, state)
+            self._handle_content_list(raw_content, state, message)
         elif isinstance(raw_content, str):
             self._handle_content_text(raw_content, state)
 

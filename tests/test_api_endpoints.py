@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openscientist.api.auth import hash_secret
@@ -393,6 +394,118 @@ class TestAPIKeyEndpoints:
 
         assert response.status_code == 409
         assert "already exists" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_revoked_keys_do_not_consume_creation_limit(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+    ):
+        """Ten revoked keys do not prevent creating another active key."""
+        from fastapi import FastAPI
+
+        from openscientist.api.auth import get_current_user_from_api_key
+        from openscientist.api.router import api_router as router
+        from openscientist.database.session import get_session
+
+        _, full_key = test_api_key_db
+        db_session.add_all(
+            [
+                APIKey(
+                    user_id=test_user_db.id,
+                    name=f"revoked-{index}",
+                    key_hash=hash_secret(f"revoked-secret-{index}"),
+                    is_active=False,
+                )
+                for index in range(10)
+            ]
+        )
+        await db_session.commit()
+
+        app = FastAPI()
+
+        async def override_get_session():
+            yield db_session
+
+        async def override_get_user():
+            return test_user_db
+
+        app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_current_user_from_api_key] = override_get_user
+        app.include_router(router)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/keys",
+                json={"name": "active-after-revocations"},
+                headers={"Authorization": f"Bearer {full_key}"},
+            )
+
+        assert response.status_code == 201
+        assert response.json()["is_active"] is True
+
+    @pytest.mark.asyncio
+    async def test_revoked_key_name_can_be_reused(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+    ):
+        """Creating a key may replace an inactive key with the same name."""
+        from fastapi import FastAPI
+
+        from openscientist.api.auth import get_current_user_from_api_key
+        from openscientist.api.router import api_router as router
+        from openscientist.database.session import get_session
+
+        _, full_key = test_api_key_db
+        revoked_key = APIKey(
+            user_id=test_user_db.id,
+            name="reusable-name",
+            key_hash=hash_secret("old-revoked-secret"),
+            is_active=False,
+        )
+        db_session.add(revoked_key)
+        await db_session.commit()
+        await db_session.refresh(revoked_key)
+        revoked_key_id = revoked_key.id
+
+        app = FastAPI()
+
+        async def override_get_session():
+            yield db_session
+
+        async def override_get_user():
+            return test_user_db
+
+        app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_current_user_from_api_key] = override_get_user
+        app.include_router(router)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/keys",
+                json={"name": "reusable-name"},
+                headers={"Authorization": f"Bearer {full_key}"},
+            )
+
+        assert response.status_code == 201
+        result = await db_session.execute(
+            select(APIKey).where(
+                APIKey.user_id == test_user_db.id,
+                APIKey.name == "reusable-name",
+            )
+        )
+        replacement = result.scalar_one()
+        assert replacement.id != revoked_key_id
+        assert replacement.is_active is True
 
 
 class TestJobEndpoints:
@@ -895,6 +1008,40 @@ class TestJobEndpoints:
 
         assert response.status_code == 204
         mock_job_manager.cancel_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_report_generation_job(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+    ):
+        """Abort remains available while an early/final report is running."""
+        _, full_key = test_api_key_db
+        reporting_job = Job(
+            owner_id=test_user_db.id,
+            research_question="Reporting Job",
+            status="generating_report",
+        )
+        db_session.add(reporting_job)
+        await db_session.commit()
+        await db_session.refresh(reporting_job)
+
+        app = _build_authenticated_app(db_session, test_user_db)
+        manager = MagicMock()
+
+        with patch("openscientist.api.endpoints.jobs._get_job_manager", return_value=manager):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.post(
+                    f"/api/v1/jobs/{reporting_job.id}/cancel",
+                    headers={"Authorization": f"Bearer {full_key}"},
+                )
+
+        assert response.status_code == 204
+        manager.cancel_job.assert_called_once_with(str(reporting_job.id))
 
     @pytest.mark.asyncio
     async def test_cancel_job_does_not_directly_mutate_database_status(
@@ -1657,6 +1804,42 @@ class TestJobEndpoints:
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/zip"
         assert response.headers.get("accept-ranges") == "bytes"
+
+    @pytest.mark.asyncio
+    async def test_get_job_artifacts_offloads_zip_build_to_threadpool(
+        self,
+        db_session: AsyncSession,
+        test_user_db: User,
+        test_api_key_db: tuple[APIKey, str],
+        test_job_db: Job,
+        tmp_path,
+    ):
+        _, full_key = test_api_key_db
+
+        job_dir = tmp_path / "jobs" / str(test_job_db.id)
+        job_dir.mkdir(parents=True)
+        (job_dir / "report.md").write_text("# Report")
+
+        app = _build_authenticated_app(db_session, test_user_db)
+
+        with (
+            patch("openscientist.api.endpoints.jobs._get_jobs_dir", return_value=tmp_path / "jobs"),
+            patch(
+                "openscientist.api.endpoints.jobs.run_in_threadpool",
+                wraps=lambda func, **kwargs: func(**kwargs),
+            ) as mock_run_in_threadpool,
+        ):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.get(
+                    f"/api/v1/jobs/{test_job_db.id}/artifacts",
+                    headers={"Authorization": f"Bearer {full_key}"},
+                )
+
+        assert response.status_code == 200
+        mock_run_in_threadpool.assert_called_once()
 
 
 class TestJobSharingEndpoints:

@@ -25,13 +25,30 @@ from typing import Any, cast
 
 import docker
 from docker import errors as docker_errors
+from openscientist.assay_gateway_client import (
+    ASSAY_CAPABILITIES_ENV,
+    ASSAY_GATEWAY_URL_ENV,
+    container_assay_gateway_base_url,
+)
+from openscientist.assays.capabilities import make_assay_capability_map
+from openscientist.dvc_gateway_client import (
+    DVC_CAPABILITY_ENV,
+    DVC_GATEWAY_URL_ENV,
+    container_dvc_gateway_base_url,
+    without_dvc_credentials,
+)
 from openscientist.exec_broker_client import (
     EXEC_BROKER_URL_ENV,
     EXEC_TOKEN_ENV,
     container_broker_base_url,
 )
+from openscientist.integrations.fair_prepare import (
+    FAIR_PREPARE_URL_ENV,
+    validate_fair_prepare_url,
+)
 from openscientist.job_container.secrets import (
     derive_job_secret,
+    make_dvc_capability,
     make_exec_placeholder,
     make_job_placeholder,
 )
@@ -44,6 +61,7 @@ from openscientist.version import SHORT_COMMIT_LENGTH
 logger = logging.getLogger(__name__)
 
 AGENT_APP_DIR = "/agent"
+AGENT_GCP_CREDENTIALS_PATH = f"{AGENT_APP_DIR}/gcp-credentials.json"
 _AUTHORING_DATABASE_URL = "postgresql+asyncpg://disabled:disabled@127.0.0.1:1/disabled"
 _AUTHORING_SECRET_KEY = "skill-authoring-sentinel-not-a-runtime-credential"
 _AUTHORING_COMMON_ENV = {
@@ -145,6 +163,9 @@ class JobContainerRunner:
             }
             provider_env = JobContainerRunner._authoring_provider_environment(provider_env)
 
+        # A future provider/settings refactor must not accidentally carry DVC
+        # credentials, CA paths, or the vendor base URL into the agent.
+        provider_env = without_dvc_credentials(provider_env)
         env: dict[str, str] = {
             "JOB_ID": job_id,
             "JOB_DIR": job_mount,
@@ -169,8 +190,19 @@ class JobContainerRunner:
                     # Per-job execution credential the broker verifies, plus the broker URL.
                     EXEC_TOKEN_ENV: make_exec_placeholder(settings.secret_key, job_id),
                     EXEC_BROKER_URL_ENV: container_broker_base_url(),
+                    # The only DVC-related values an agent may receive.
+                    DVC_CAPABILITY_ENV: make_dvc_capability(settings.secret_key, job_id),
+                    DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
+                    ASSAY_CAPABILITIES_ENV: make_assay_capability_map(settings.secret_key, job_id),
+                    ASSAY_GATEWAY_URL_ENV: container_assay_gateway_base_url(),
                 }
             )
+            # FAIR-VCG is addressed through a non-secret internal service URL.
+            # Forward this one validated locator explicitly; do not copy
+            # arbitrary FAIR-related environment variables into the agent.
+            fair_prepare_url = os.environ.get(FAIR_PREPARE_URL_ENV)
+            if fair_prepare_url:
+                env[FAIR_PREPARE_URL_ENV] = validate_fair_prepare_url(fair_prepare_url)
         # Only set the run-mode override when it diverges from the default so
         # ordinary discovery launches keep a clean env. The entrypoint reads
         # OPENSCIENTIST_RUN_MODE. "report_only" re-runs just the report phase.
@@ -188,8 +220,6 @@ class JobContainerRunner:
         # Air-gapped mode routes the tools subprocess to the local PubMed corpus.
         if settings.airgap.enabled:
             env["OPENSCIENTIST_AIRGAPPED"] = "1"
-        if settings.provider.google_application_credentials:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = "/agent/gcp-credentials.json"
         if settings.phenix.phenix_host_path:
             env["PHENIX_PATH"] = "/opt/phenix"
         return env
@@ -207,13 +237,14 @@ class JobContainerRunner:
         volumes: dict[str, dict[str, str]] = {
             str(job_dir_host): {"bind": job_mount, "mode": "rw"},
         }
-        gcp_path = (
-            settings.provider.google_application_credentials if include_gcp_credentials else None
+        # Mount only the operator-provided host creds. google_application_credentials
+        # is the container-internal path (Dockerfile ENV), not a valid host source.
+        gcp_host_path = (
+            settings.provider.gcp_credentials_host_path if include_gcp_credentials else None
         )
-        if gcp_path:
-            gcp_host_path = settings.provider.gcp_credentials_host_path or gcp_path
+        if gcp_host_path:
             volumes[str(gcp_host_path)] = {
-                "bind": "/agent/gcp-credentials.json",
+                "bind": AGENT_GCP_CREDENTIALS_PATH,
                 "mode": "ro",
             }
         phenix_host = settings.phenix.phenix_host_path if include_phenix else None
@@ -261,10 +292,20 @@ class JobContainerRunner:
             JobContainerRunner._agent_runtime_settings(settings)
         )
         job_mount = f"{AGENT_APP_DIR}/jobs/{job_id}"
-        provider_env = get_provider().proxied_container_env(
+        provider = get_provider()
+        # Mount and advertise the GCP creds only when the operator gives a host
+        # path, so the provider never emits a creds file that was not mounted.
+        gcp_credentials_container_path = (
+            AGENT_GCP_CREDENTIALS_PATH if settings.provider.gcp_credentials_host_path else None
+        )
+        provider_env = provider.proxied_container_env(
             proxy_base_url=container_proxy_base_url(),
             placeholder=make_job_placeholder(settings.secret_key, job_id),
+            gcp_credentials_container_path=gcp_credentials_container_path,
         )
+        # Resolve a self-hosted model's window app-side and pass it in, since the
+        # proxied container cannot probe a root path like llama.cpp's /props.
+        provider_env.update(provider.prelaunch_model_context_env())
         env = JobContainerRunner._build_container_environment(
             settings,
             job_id=job_id,
@@ -296,7 +337,8 @@ class JobContainerRunner:
             format_egress_allowlist,
         )
 
-        allow = format_egress_allowlist(derive_egress_allowlist(settings))
+        posture = get_provider().airgap_egress()
+        allow = format_egress_allowlist(derive_egress_allowlist(settings, posture))
         return (
             ["NET_ADMIN"],
             "root",
@@ -324,14 +366,33 @@ class JobContainerRunner:
         Raises:
             RuntimeError: If Docker is unavailable or launch fails
         """
+        container = self._start_agent_container(
+            job_id=job_id,
+            job_dir=job_dir,
+            run_mode=run_mode,
+            name=f"openscientist-agent-{job_id[:SHORT_COMMIT_LENGTH]}",
+            container_type="agent",
+        )
+        logger.info("Launched agent container %s for job %s", container.short_id, job_id)
+        return container
+
+    def _start_agent_container(
+        self,
+        *,
+        job_id: str,
+        job_dir: Path,
+        run_mode: str,
+        name: str,
+        container_type: str,
+    ) -> Any:
+        """Build the hardened launch config and start a detached agent container.
+        Shared by discovery/report launches and one-off chat turns."""
         settings: Settings = get_settings()
         cs = settings.container
 
-        # Translate job_dir from container-internal path to host path.
-        # Must resolve to absolute FIRST (so relative paths like "jobs/uuid" become
-        # "/app/jobs/uuid" inside the web container), then translate to the host
-        # path.  Docker requires absolute paths for bind mounts; relative paths
-        # are misinterpreted as named volumes.
+        # Translate job_dir to a host-absolute path: resolve first so a relative
+        # path becomes container-absolute, then map to the host (Docker bind
+        # mounts require host-absolute paths).
         job_dir_resolved = job_dir.resolve()
         # Host-side agent prep may copy backend credentials into the mounted
         # directory. Authoring uses a direct, no-tools completion path and must
@@ -355,9 +416,9 @@ class JobContainerRunner:
         cap_add, run_user, entrypoint, firewall_env = self._airgap_firewall_config(settings)
         env.update(firewall_env)
 
-        container = self._docker.containers.run(
+        return self._docker.containers.run(
             image=cs.agent_image,
-            name=f"openscientist-agent-{job_id[:SHORT_COMMIT_LENGTH]}",
+            name=name,
             detach=True,
             remove=False,
             environment=env,
@@ -370,19 +431,45 @@ class JobContainerRunner:
             cap_add=cap_add,
             user=run_user,
             entrypoint=entrypoint,
-            # Map host.docker.internal to the host gateway so a job can reach a
-            # model server running on the host (e.g. a local Ollama at
-            # http://host.docker.internal:11434/v1). Harmless for providers that
-            # do not use it. On Linux this is not provided by default.
+            # Map host.docker.internal to the host gateway so the container can
+            # reach a model server on the host (e.g. a local Ollama). Harmless
+            # otherwise. On Linux this is not provided by default.
             extra_hosts={"host.docker.internal": "host-gateway"},
             labels={
                 "openscientist.job_id": job_id,
-                "openscientist.type": "agent",
+                "openscientist.type": container_type,
             },
         )
 
-        logger.info("Launched agent container %s for job %s", container.short_id, job_id)
-        return container
+    def run_chat_turn(self, job_id: str, job_dir: Path, *, timeout: int = 300) -> None:
+        """Run one chat turn in an ephemeral hardened container and wait for it.
+
+        Inherits the job launch posture. Prompt and reply cross through files in
+        job_dir, not the database. Raises on timeout or non-zero exit, and the
+        container is always removed."""
+        name = f"openscientist-chat-{job_id[:SHORT_COMMIT_LENGTH]}-{os.urandom(4).hex()}"
+        container = self._start_agent_container(
+            job_id=job_id,
+            job_dir=job_dir,
+            run_mode="chat",
+            name=name,
+            container_type="chat",
+        )
+        try:
+            try:
+                outcome = container.wait(timeout=timeout)
+            except Exception as error:
+                raise RuntimeError(f"Chat turn did not finish within {timeout}s") from error
+            exit_code = int(outcome.get("StatusCode", 1)) if isinstance(outcome, dict) else 1
+            if exit_code != 0:
+                logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+                raise RuntimeError(f"Chat container exited with code {exit_code}: {logs[-2000:]}")
+        finally:
+            try:
+                container.remove(force=True)
+            except docker_errors.APIError as error:
+                if not self._is_not_found_error(error):
+                    logger.warning("Failed to remove chat container %s: %s", name, error)
 
     def run_skill_authoring_turn(
         self,

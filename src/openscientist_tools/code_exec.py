@@ -8,18 +8,22 @@ log_analysis writes.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from openscientist.code_executor import format_execution_result
 from openscientist.exec_broker_client import BrokerError, execute_code_via_broker
 from openscientist.file_loader import get_file_info, load_data_file
-from openscientist.job_container.utils import to_host_path
 from openscientist.knowledge_state import KnowledgeState
-from openscientist.settings import get_settings
+from openscientist.settings import get_settings  # noqa: F401 - compatibility patch point
 from openscientist_tools.server import mcp
 from openscientist_tools.state import STATE
 
@@ -28,6 +32,158 @@ logger = logging.getLogger(__name__)
 _DATA_CACHE: dict[str, object] = {}
 _DATA_LOADED: dict[str, bool] = {}
 _DATA_ERROR: dict[str, str | None] = {}
+
+_DVC_SKILL_KEY = "domain--digital-ventilated-cage-analysis"
+_DATA_SCIENCE_SKILL_KEY = "domain--data-science"
+_EXPLORATORY_SCOPE_RE = re.compile(
+    r"\b(exploratory|validation|diagnostic|quality control|qc)\b",
+    re.IGNORECASE,
+)
+_STATISTICS_OR_PLOT_RE = re.compile(
+    r"\b("
+    r"ttest|t-test|wilcoxon|mannwhitney|anova|kruskal|pearson|spearman|"
+    r"correlation|effect[\s_-]*size|cohen|confidence[\s_-]*interval|"
+    r"regression|mixedlm|ols|cosinor|periodogram|scipy\.stats|statsmodels|"
+    r"matplotlib|seaborn|plot|corr"
+    r")\b",
+    re.IGNORECASE,
+)
+_BIOLOGICAL_TIME_RE = re.compile(
+    r"\b("
+    r"circadian|cosinor|acrophase|zeitgeber|zt\d*|dark[\s_-]*(?:onset|phase)|"
+    r"light[\s_-]*(?:onset|phase|schedule)|lights?[\s_-]*(?:on|off)|"
+    r"phase[\s_-]*(?:angle|shift|mean)"
+    r")\b",
+    re.IGNORECASE,
+)
+_DVC_DATASET_ID_RE = re.compile(r"\bdvc-[0-9a-fA-F-]{36}\b")
+
+
+def _assigned_skill_keys(job_dir: Path) -> set[str]:
+    try:
+        payload = json.loads(
+            (job_dir / ".openscientist_skill_manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(payload, list):
+        return set()
+    return {
+        str(item["key"])
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+
+
+def _verified_biological_time_context_issue(
+    job_dir: Path,
+    *,
+    searchable: str,
+) -> str | None:
+    """Return why exact-dataset biological-time provenance is insufficient."""
+    dataset_root = job_dir / "dvc_datasets"
+    available = {
+        path.name
+        for path in dataset_root.iterdir()
+        if path.is_dir() and _DVC_DATASET_ID_RE.fullmatch(path.name)
+    }
+    referenced = set(_DVC_DATASET_ID_RE.findall(searchable))
+    unknown = referenced - available
+    if unknown:
+        return "the code references an unknown DVC dataset"
+    if not referenced:
+        if len(available) != 1:
+            return "the exact DVC dataset is ambiguous; reference one dataset ID explicitly"
+        referenced = available
+
+    analyses_dir = job_dir / "dvc_analyses"
+    if not analyses_dir.is_dir():
+        return "no governed analysis provenance is available"
+    verified: set[str] = set()
+    for path in analyses_dir.glob("*/provenance.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        dataset_id = payload.get("dataset_id")
+        prerequisites = payload.get("scientific_prerequisites", {})
+        if not isinstance(dataset_id, str) or not isinstance(prerequisites, dict):
+            continue
+        required = (
+            prerequisites.get("environment.light_schedule"),
+            prerequisites.get("environment.timezone"),
+        )
+        if all(
+            isinstance(item, dict)
+            and item.get("status") in {"recorded", "computed"}
+            and isinstance(item.get("source"), str)
+            and bool(item["source"].strip())
+            and isinstance(item.get("value_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", item["value_sha256"]))
+            for item in required
+        ):
+            verified.add(dataset_id)
+    missing = referenced - verified
+    if missing:
+        return (
+            "source-backed light schedule and local timezone provenance is missing "
+            f"for: {', '.join(sorted(missing))}"
+        )
+    return None
+
+
+def _dvc_code_guardrail(
+    job_dir: Path,
+    *,
+    code: str,
+    description: str,
+) -> tuple[str | None, str | None]:
+    """Fail closed for ad hoc code in a governed DVC job.
+
+    Returns ``(blocker, scope_notice)``. Jobs that are not governed DVC jobs
+    remain unaffected.
+    """
+    skills = _assigned_skill_keys(job_dir)
+    if _DVC_SKILL_KEY not in skills or not (job_dir / "dvc_datasets").is_dir():
+        return None, None
+
+    if not _EXPLORATORY_SCOPE_RE.search(description):
+        return (
+            "❌ DVC GOVERNANCE BLOCK: `execute_code` is outside governed UDWA "
+            "execution. Label its description explicitly as validation diagnostics "
+            "or exploratory work; it cannot produce governed evidence.",
+            None,
+        )
+
+    searchable = f"{description}\n{code}"
+    if _STATISTICS_OR_PLOT_RE.search(searchable) and _DATA_SCIENCE_SKILL_KEY not in skills:
+        return (
+            "❌ DVC METHODOLOGY BLOCK: statistical testing, assumptions, effect "
+            "sizes, correlations, modelling, and plots outside governed UDWA require "
+            "the assigned `data-science` skill.",
+            None,
+        )
+
+    biological_time_issue = (
+        _verified_biological_time_context_issue(job_dir, searchable=searchable)
+        if _BIOLOGICAL_TIME_RE.search(searchable)
+        else None
+    )
+    if biological_time_issue:
+        return (
+            "❌ DVC SCIENTIFIC BLOCK: biological circadian modelling, phase/dark-"
+            "onset interpretation, and light/dark-aligned plots require a verified, "
+            "source-backed local light schedule and timezone for the exact dataset "
+            f"({biological_time_issue}). Placeholder assumptions are not allowed.",
+            None,
+        )
+
+    return (
+        None,
+        "⚠️ DVC GOVERNANCE SCOPE: this `execute_code` result is explicitly "
+        "ungoverned validation/exploratory output. It must not be presented as "
+        "governed scientific evidence.",
+    )
 
 
 def _ensure_data_loaded() -> str | None:
@@ -39,6 +195,13 @@ def _ensure_data_loaded() -> str | None:
     _DATA_LOADED[key] = True
 
     if STATE.data_file is None:
+        _DATA_ERROR[key] = None
+        _DATA_CACHE[key] = None
+        return None
+
+    if STATE.data_file.suffix.casefold() == ".parquet" and "dvc_datasets" in STATE.data_file.parts:
+        # The executor loads the immutable prepared artifact as `data`. Avoid a
+        # duplicate DataFrame in the MCP process on every fresh agent session.
         _DATA_ERROR[key] = None
         _DATA_CACHE[key] = None
         return None
@@ -125,6 +288,14 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
     if language not in ("python", "rust", "sparql"):
         return f"❌ ERROR: Unsupported language '{language}'. Supported: 'python', 'rust', 'sparql'"
 
+    governance_blocker, governance_scope = _dvc_code_guardrail(
+        STATE.job_dir,
+        code=code,
+        description=description,
+    )
+    if governance_blocker:
+        return governance_blocker
+
     load_error = _ensure_data_loaded()
     if load_error and language not in ("rust", "sparql"):
         return f"❌ ERROR: Cannot execute code - data file failed to load.\n\n{load_error}"
@@ -144,16 +315,27 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
     provenance_dir = STATE.job_dir / "provenance"
     provenance_dir.mkdir(parents=True, exist_ok=True)
 
-    cs = get_settings().container
-
-    def _to_host(path: Path) -> str:
-        # Resolve and map to the host path the broker mounts.
-        return str(to_host_path(path.resolve(), cs))
+    def _asset_ref(path: Path) -> dict[str, str]:
+        resolved = path.resolve()
+        job_root = STATE.job_dir.resolve()
+        if resolved != job_root and job_root not in resolved.parents:
+            raise ValueError(f"Execution asset is outside the job directory: {path}")
+        digest = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        sha256 = digest.hexdigest()
+        return {
+            "asset_id": f"asset-{sha256[:20]}",
+            "job_relpath": resolved.relative_to(job_root).as_posix(),
+            "sha256": sha256,
+        }
 
     job_id = STATE.job_dir.name
-    host_output_dir = _to_host(provenance_dir)
+    output_ref = {"job_relpath": provenance_dir.relative_to(STATE.job_dir).as_posix()}
 
     result: dict[str, Any]
+    execution_started = time.time()
     try:
         if language == "python":
             data_files: list[dict[str, Any]] = []
@@ -161,17 +343,17 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
                 if not df_path.exists():
                     raise FileNotFoundError(f"Data file not found: {df_path}")
                 info = get_file_info(df_path)
-                info["path"] = _to_host(Path(info["path"]))
+                info["asset"] = _asset_ref(Path(info.pop("path")))
                 data_files.append(info)
 
-            primary_data_path = _to_host(STATE.data_files[0]) if STATE.data_files else None
+            primary_data_ref = _asset_ref(STATE.data_files[0]) if STATE.data_files else None
 
             result = execute_code_via_broker(
                 code=code,
                 language="python",
                 job_id=job_id,
-                output_dir=host_output_dir,
-                data_path=primary_data_path,
+                output_dir=output_ref,
+                data_path=primary_data_ref,
                 data_files=data_files,
                 description=description,
                 iteration=int(ks.data["iteration"]),
@@ -182,13 +364,41 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
                 code=code,
                 language=language,
                 job_id=job_id,
-                output_dir=host_output_dir,
+                output_dir=output_ref,
                 description=description,
                 iteration=int(ks.data["iteration"]),
                 timeout=300 if language == "rust" else 60,
             )
     except BrokerError as exc:
-        return f"❌ ERROR: code execution service unavailable: {exc}"
+        failure = exc.as_dict()
+        http_label = f"HTTP {exc.status_code}: " if exc.status_code else ""
+        message = (
+            "Code execution service unavailable: "
+            + http_label
+            + json.dumps(failure, sort_keys=True)
+        )
+        execution_time = time.time() - execution_started
+        # Persist the failure independently of the agent transcript. This makes
+        # the warning visible in the investigation timeline immediately, even
+        # when the surrounding model turn later times out.
+        ks.log_analysis(
+            action="execute_code",
+            code=code,
+            description=description,
+            output=message,
+            success=False,
+            execution_time=execution_time,
+            plots=[],
+            governance_scope=governance_scope,
+            broker_failure=failure,
+        )
+        ks.set_agent_status("Code execution failed — see Agentic Info")
+        ks.save_to_database_sync(STATE.job_id)
+        logger.error("execute_code broker failure for job %s: %s", STATE.job_id, exc)
+        # Returning an error-looking string is still a successful MCP call.
+        # Raising ToolError sets the protocol-level isError flag so Codex and
+        # the UI can reliably classify and alarm on the failure.
+        raise ToolError(message) from exc
 
     ks.log_analysis(
         action="execute_code",
@@ -198,7 +408,11 @@ def execute_code(code: str, language: str = "python", description: str = "") -> 
         success=result["success"],
         execution_time=result["execution_time"],
         plots=result.get("plots", []),
+        governance_scope=governance_scope,
     )
     ks.save_to_database_sync(STATE.job_id)
 
-    return format_execution_result(result)
+    formatted = format_execution_result(result)
+    if governance_scope:
+        return f"{governance_scope}\n\n{formatted}"
+    return formatted

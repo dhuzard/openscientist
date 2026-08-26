@@ -144,6 +144,13 @@ def _apply_migrations_once(test_database_url: str) -> None:
                 text("GRANT ALL ON ALL TABLES IN SCHEMA public TO openscientist_app")
             )
             await conn.execute(
+                text(
+                    "REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON "
+                    "preclinical_context_snapshots, assay_run_snapshots, "
+                    "assay_evidence_objects FROM openscientist_app"
+                )
+            )
+            await conn.execute(
                 text("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO openscientist_app")
             )
 

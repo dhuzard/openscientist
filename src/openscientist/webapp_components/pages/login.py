@@ -4,6 +4,7 @@ from nicegui import app, ui
 
 from openscientist.auth.oauth import is_mock_auth_enabled, is_oauth_configured
 from openscientist.settings import get_settings
+from openscientist.webapp_components.pages.mock_login import MOCK_LOGIN_FORM_PATH
 from openscientist.webapp_components.ui_components import (
     OPENSCIENTIST_THINKING_SVG,
     render_alert_banner,
@@ -150,7 +151,7 @@ def login_page(error: str | None = None) -> None:
                 ui.separator().classes("my-2")
                 ui.label("Development Mode").classes("text-xs text-gray-500 text-center w-full")
                 with (
-                    ui.button(on_click=lambda: ui.navigate.to("/auth/mock/login"))
+                    ui.button(on_click=lambda: ui.navigate.to(MOCK_LOGIN_FORM_PATH))
                     .classes("w-full login-btn")
                     .style("justify-content: flex-start; padding-left: 12px;")
                     .props("color=orange"),

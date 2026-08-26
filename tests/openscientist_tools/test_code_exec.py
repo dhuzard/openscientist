@@ -20,6 +20,7 @@ import pytest
 import uvicorn
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from sqlalchemy import delete
 
@@ -200,8 +201,7 @@ def test_execute_code_python_happy_path(
     assert call_kwargs["language"] == "python"
     assert call_kwargs["timeout"] == 60
     assert call_kwargs["job_id"] == state_job_dir.name
-    # The output dir is forwarded as a host-absolute path.
-    assert call_kwargs["output_dir"] == str((state_job_dir / "provenance").resolve())
+    assert call_kwargs["output_dir"] == {"job_relpath": "provenance"}
 
     last_log = patched_ks_persistence.data["analysis_log"][-1]
     assert last_log["action"] == "execute_code"
@@ -281,7 +281,7 @@ def test_execute_code_failure_returns_error_format(
     assert last_log["success"] is False
 
 
-def test_execute_code_broker_unavailable_returns_error(
+def test_execute_code_broker_unavailable_raises_and_logs_error(
     monkeypatch: pytest.MonkeyPatch,
     state_job_dir: Path,
     patched_ks_persistence: KnowledgeState,
@@ -289,10 +289,16 @@ def test_execute_code_broker_unavailable_returns_error(
     broker = _mock_broker(monkeypatch, {})
     broker.side_effect = BrokerError("connection refused")
 
-    result = execute_code("print('hi')")
-    assert result.startswith("❌ ERROR: code execution service unavailable")
-    # A transport failure is exceptional: nothing is logged as an execution.
-    assert patched_ks_persistence.data["analysis_log"] == []
+    with pytest.raises(ToolError, match="Code execution service unavailable"):
+        execute_code("print('hi')", description="Broker alarm regression")
+
+    last_log = patched_ks_persistence.data["analysis_log"][-1]
+    assert last_log["action"] == "execute_code"
+    assert last_log["success"] is False
+    assert "connection refused" in last_log["output"]
+    assert patched_ks_persistence.data["agent_status"] == (
+        "Code execution failed — see Agentic Info"
+    )
 
 
 def test_execute_code_python_with_data_files(
@@ -312,13 +318,14 @@ def test_execute_code_python_with_data_files(
     execute_code("pass")
 
     call_kwargs = broker.call_args.kwargs
-    assert call_kwargs["data_path"] == str((state_job_dir / "a.csv").resolve())
+    assert call_kwargs["data_path"]["job_relpath"] == "a.csv"
+    assert call_kwargs["data_path"]["asset_id"].startswith("asset-")
+    assert len(call_kwargs["data_path"]["sha256"]) == 64
     assert len(call_kwargs["data_files"]) == 2
     assert {f["name"] for f in call_kwargs["data_files"]} == {"a.csv", "b.csv"}
-    # Data-file paths are forwarded host-absolute (here an identity resolve).
-    assert {f["path"] for f in call_kwargs["data_files"]} == {
-        str((state_job_dir / "a.csv").resolve()),
-        str((state_job_dir / "b.csv").resolve()),
+    assert {f["asset"]["job_relpath"] for f in call_kwargs["data_files"]} == {
+        "a.csv",
+        "b.csv",
     }
 
 

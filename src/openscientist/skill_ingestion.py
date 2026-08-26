@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
-import yaml  # type: ignore[import-untyped]
+import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -165,12 +165,20 @@ class SkillParser:
         if not isinstance(frontmatter, dict):
             raise SkillParseError(f"YAML frontmatter must be a mapping in {source_path}")
 
+        standard_metadata = frontmatter.get("metadata", {})
+        if standard_metadata is None:
+            standard_metadata = {}
+        if not isinstance(standard_metadata, dict):
+            raise SkillParseError(f"YAML frontmatter metadata must be a mapping in {source_path}")
+
         # Extract required fields
         name = frontmatter.get("name")
         if not name:
             raise SkillParseError(f"Missing 'name' in frontmatter: {source_path}")
 
-        category = frontmatter.get("category")
+        # Accept the current portable skill format while retaining compatibility
+        # with existing OpenScientist skills that use legacy top-level fields.
+        category = frontmatter.get("category") or standard_metadata.get("category")
         if not category:
             # Derive category from path structure
             # Use immediate parent directory as category (e.g., "biopython" from "skills/biopython/SKILL.md")
@@ -183,7 +191,7 @@ class SkillParser:
                 )
 
         # Generate slug from filename or name
-        slug = frontmatter.get("slug")
+        slug = frontmatter.get("slug") or standard_metadata.get("slug")
         if not slug:
             filename_stem = Path(source_path).stem
             # For generic filenames (SKILL.md, README.md, INDEX.md), use parent directory
@@ -198,7 +206,7 @@ class SkillParser:
 
         # Optional fields
         description = frontmatter.get("description")
-        tags = frontmatter.get("tags", [])
+        tags = frontmatter.get("tags", standard_metadata.get("tags", []))
         if not isinstance(tags, list):
             tags = [tags] if tags else []
 

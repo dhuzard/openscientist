@@ -32,6 +32,7 @@ from .iteration_summary import IterationSummary
 from .job import Job
 from .job_chat_message import JobChatMessage
 from .job_data_file import JobDataFile
+from .job_guidance import JobGuidance
 from .job_share import JobShare
 from .literature import Literature
 from .oauth_account import OAuthAccount
@@ -41,6 +42,11 @@ from .pubmed_corpus import PubMedCorpusMeta
 
 # Review tokens
 from .review_token import ReviewToken
+from .scientific_state import (
+    AssayEvidenceObject,
+    AssayRunSnapshot,
+    PreclinicalContextSnapshot,
+)
 from .session import Session
 
 # Skill models
@@ -61,6 +67,7 @@ __all__ = [
     "Job",
     "JobChatMessage",
     "JobDataFile",
+    "JobGuidance",
     "JobShare",
     "Literature",
     "OAuthAccount",
@@ -68,6 +75,9 @@ __all__ = [
     "PubMedArticle",
     "PubMedCorpusMeta",
     "ReviewToken",
+    "AssayEvidenceObject",
+    "AssayRunSnapshot",
+    "PreclinicalContextSnapshot",
     "Session",
     "Skill",
     "SkillSource",

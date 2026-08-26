@@ -1,5 +1,7 @@
 """Tests for prompts module."""
 
+from types import SimpleNamespace
+
 from openscientist.agent.claude_code_agent import ClaudeCodeAgent
 from openscientist.agent.codex_agent import CodexAgent
 from openscientist.prompts import (
@@ -99,6 +101,43 @@ class TestBackendJobDocs:
         assert "add_hypothesis" not in without_h
 
 
+class TestAirgapSearchNote:
+    """The search_pubmed doc gains AND-semantics guidance only when air-gapped,
+    and never leaks the raw placeholder."""
+
+    @staticmethod
+    def _set_airgap(monkeypatch, enabled):
+        monkeypatch.setattr(
+            "openscientist.settings.get_settings",
+            lambda: SimpleNamespace(airgap=SimpleNamespace(enabled=enabled)),
+        )
+
+    def test_online_docs_omit_note_and_placeholder(self, monkeypatch):
+        self._set_airgap(monkeypatch, False)
+        for doc in (
+            generate_job_claude_md(use_hypotheses=True, phenix_available=True),
+            CodexAgent.job_doc(use_hypotheses=True, phenix_available=True),
+        ):
+            assert "{{AIRGAP_SEARCH_NOTE}}" not in doc
+            assert "This run is air-gapped" not in doc
+            assert "Every term is required (AND)" not in doc
+
+    def test_airgap_docs_add_note_to_both_backends(self, monkeypatch):
+        self._set_airgap(monkeypatch, True)
+        for doc in (
+            generate_job_claude_md(use_hypotheses=True, phenix_available=True),
+            CodexAgent.job_doc(use_hypotheses=True, phenix_available=True),
+        ):
+            assert "{{AIRGAP_SEARCH_NOTE}}" not in doc
+            assert "This run is air-gapped" in doc
+            assert "Every term is required (AND)" in doc
+            assert (
+                doc.index("**search_pubmed**")
+                < doc.index("This run is air-gapped")
+                < doc.index("**update_knowledge_state**")
+            )
+
+
 class TestRenderChatContext:
     """The job-chat context must honor backend fragments, sharing the discovery
     substitution path so the chat agent is never told about tools/paths its
@@ -118,6 +157,14 @@ class TestRenderChatContext:
         assert "`.claude/skills/`" not in ctx
         # The guidance itself is preserved.
         assert "execute_code" in ctx
+
+    def test_chat_context_keeps_skills_and_versioned_report_updates(self):
+        ctx = ClaudeCodeAgent.chat_doc()
+        normalized = " ".join(ctx.split())
+
+        assert "assigned skills remain mandatory during Chat" in ctx
+        assert "Do not write to `final_report.md`" not in ctx
+        assert "the host will preserve the prior report" in normalized
 
 
 class TestBuildDiscoveryPrompt:

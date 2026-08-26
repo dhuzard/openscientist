@@ -61,7 +61,15 @@ DOCS_PAGE_CONTENT_MARKDOWN = dedent(
     - Literature searched (expandable with paper links).
     - Findings recorded.
 
-    ### Report Tab
+    ### Agentic Info Tab
+
+    Shows job-specific operational transparency separately from scientific results:
+
+    - Exact agent and subagent model trace.
+    - Token usage grouped by model and task.
+    - Skill assignments and transcript-backed invocations.
+
+    ### Scientific Report Tab
 
     The final scientific report includes:
 

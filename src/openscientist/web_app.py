@@ -183,6 +183,17 @@ def _register_share_routes() -> None:
         logger.warning("Failed to register share routes: %s", e)
 
 
+def _register_download_routes() -> None:
+    """Register the session-authenticated artifact download route."""
+    try:
+        from openscientist.webapp_components.artifact_routes import router as download_router
+
+        app.include_router(download_router)
+        logger.info("Artifact download route registered at /web/jobs")
+    except Exception as e:
+        logger.warning("Failed to register artifact download routes: %s", e)
+
+
 def _register_review_routes() -> None:
     """Register review token redemption route on the NiceGUI app."""
     try:
@@ -423,6 +434,16 @@ async def _start_background_tasks(engine: Any) -> None:
     except Exception as e:
         logger.warning("Failed to start execution broker: %s", e)
 
+    # Assay credentials are resolved only in this trusted web process. Agents
+    # authenticate to this listener with short-lived contract-scoped capabilities.
+    try:
+        from openscientist.dvc_gateway import start_assay_gateway
+
+        await start_assay_gateway()
+        logger.info("Governed assay gateway started")
+    except Exception as e:
+        logger.warning("Failed to start governed assay gateway: %s", e)
+
 
 def _initialize_job_manager_runtime(jobs_dir: Path) -> None:
     if _state.job_manager is not None:
@@ -502,6 +523,7 @@ def _configure_host_app(host_app: FastAPI, jobs_dir: Path) -> None:
     _register_api_routes(host_app)
     _register_oauth_routes()
     _register_share_routes()
+    _register_download_routes()
     _register_review_routes()
 
     _initialize_job_manager_runtime(jobs_dir)
@@ -606,7 +628,7 @@ def main(
 
     from openscientist.settings import get_settings
 
-    reload = get_settings().dev.dev_mode
+    reload = get_settings().dev.reload_enabled
     os.environ[JOBS_DIR_ENV] = str(jobs_dir)
 
     logger.info("Starting NiceGUI server on %s:%s (reload=%s)", host, port, reload)

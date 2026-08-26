@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from openscientist.transcript import ToolCall, ToolResult, TranscriptEntry
+from openscientist.transcript import (
+    CollabAgentToolCall,
+    FileChange,
+    ShellExecution,
+    TaskNotification,
+    ToolCall,
+    ToolResult,
+    TranscriptEntry,
+    WebSearch,
+)
+
+_HTTP_5XX_RE = re.compile(r"\bHTTP(?:/\S+)?\s+5\d\d\b|\bHTTP\s+5\d\d\b", re.IGNORECASE)
+_LEGACY_EXECUTION_ERROR_RE = re.compile(
+    r"code execution service unavailable|❌\s*ERROR", re.IGNORECASE
+)
 
 # Known OpenScientist tool names (bare names, without MCP server prefix).
 _OPENSCIENTIST_TOOL_NAMES = frozenset(
@@ -116,6 +131,130 @@ def parse_transcript_actions(transcript: list[TranscriptEntry]) -> list[dict[str
         )
 
     return actions
+
+
+def extract_agent_activity(transcript: list[TranscriptEntry]) -> list[dict[str, Any]]:
+    """Return all troubleshooting-relevant agent actions in source order.
+
+    Unlike :func:`parse_transcript_actions`, this includes Codex shell commands,
+    file changes, web searches, and collaboration calls. It also recognises
+    legacy ``execute_code`` failures that were returned as successful MCP text
+    before protocol-level ``ToolError`` reporting was introduced.
+    """
+    activity: list[dict[str, Any]] = []
+    results = _collect_tool_results_by_call_id(transcript)
+
+    for entry in transcript:
+        if isinstance(entry, ToolCall):
+            result = results.get(entry.id)
+            output = result.output if result is not None else ""
+            success: bool | None = result.success if result is not None else None
+            error = result.error_message if result is not None else None
+            short_name = _short_tool_name(entry.tool)
+            legacy_error = bool(
+                short_name == "execute_code" and _LEGACY_EXECUTION_ERROR_RE.search(output)
+            )
+            if legacy_error:
+                success = False
+                error = error or output
+            activity.append(
+                {
+                    "kind": "tool",
+                    "name": short_name,
+                    "description": get_action_description(entry),
+                    "input": entry.arguments,
+                    "output": output,
+                    "success": success,
+                    "status": (
+                        result.status
+                        if result is not None and result.status
+                        else "running"
+                        if result is None
+                        else "completed"
+                    ),
+                    "error": error or "",
+                    "http_5xx": bool(_HTTP_5XX_RE.search(f"{error or ''}\n{output}")),
+                    "legacy_error_response": legacy_error,
+                }
+            )
+        elif isinstance(entry, ShellExecution):
+            success = entry.exit_code == 0 if entry.exit_code is not None else None
+            activity.append(
+                {
+                    "kind": "shell",
+                    "name": "shell",
+                    "description": entry.command,
+                    "input": {"command": entry.command},
+                    "output": entry.output,
+                    "success": success,
+                    "status": entry.status or ("completed" if success is not None else "running"),
+                    "error": entry.output if success is False else "",
+                    "http_5xx": bool(_HTTP_5XX_RE.search(entry.output)),
+                    "legacy_error_response": False,
+                }
+            )
+        elif isinstance(entry, FileChange):
+            activity.append(
+                {
+                    "kind": "file_change",
+                    "name": f"file_{entry.kind}",
+                    "description": entry.path,
+                    "input": {"path": entry.path, "kind": entry.kind},
+                    "output": entry.diff or "",
+                    "success": entry.success,
+                    "status": entry.status or "completed",
+                    "error": "" if entry.success else (entry.diff or "File change failed"),
+                    "http_5xx": False,
+                    "legacy_error_response": False,
+                }
+            )
+        elif isinstance(entry, WebSearch):
+            activity.append(
+                {
+                    "kind": "web_search",
+                    "name": "web_search",
+                    "description": entry.query,
+                    "input": {"query": entry.query, "action": entry.action},
+                    "output": "",
+                    "success": True,
+                    "status": "completed",
+                    "error": "",
+                    "http_5xx": False,
+                    "legacy_error_response": False,
+                }
+            )
+        elif isinstance(entry, CollabAgentToolCall):
+            activity.append(
+                {
+                    "kind": "collaboration",
+                    "name": entry.tool or "collaboration",
+                    "description": entry.prompt or "Subagent activity",
+                    "input": {"prompt": entry.prompt, "model": entry.model},
+                    "output": "",
+                    "success": None
+                    if entry.status in {None, "inProgress"}
+                    else entry.status == "completed",
+                    "status": entry.status or "running",
+                    "error": "",
+                    "http_5xx": False,
+                    "legacy_error_response": False,
+                }
+            )
+
+    return activity
+
+
+def extract_agent_notifications(transcript: list[TranscriptEntry]) -> list[dict[str, str]]:
+    """Extract timeout/failure lifecycle notifications for troubleshooting UI."""
+    return [
+        {
+            "status": entry.status,
+            "summary": entry.summary,
+            "task_id": entry.task_id,
+        }
+        for entry in transcript
+        if isinstance(entry, TaskNotification)
+    ]
 
 
 def extract_usage_summary(transcript: list[TranscriptEntry]) -> UsageSummary:

@@ -1,21 +1,31 @@
 """Egress allowlist for the air-gapped job-container firewall.
 
-Derives the host:port endpoints the job container may reach when air-gapped:
-Postgres, the execution broker, and the active provider's LLM endpoint.
+Turns the active provider's air-gap posture (`Provider.airgap_egress`) into the
+host:port set the container may reach: Postgres, trusted internal brokers and
+gateways, an optional FAIR-VCG service, plus the proxy for a PROXY posture or
+the provider's fixed endpoints for a DIRECT one. An UNSUPPORTED posture is
+refused.
 """
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
+from openscientist.dvc_gateway_client import container_dvc_gateway_base_url
 from openscientist.exec_broker_client import container_broker_base_url
+from openscientist.integrations.fair_prepare import (
+    FAIR_PREPARE_URL_ENV,
+    validate_fair_prepare_url,
+)
+from openscientist.providers.base import AirgapEgress, AirgapPosture
 from openscientist.settings import Settings
 
 _DEFAULT_PORT_BY_SCHEME = {"https": 443, "http": 80}
 
 
 class AirgapProviderError(ValueError):
-    """Raised when the active provider is misconfigured for air-gapped mode."""
+    """Raised when the active provider cannot be air-gapped."""
 
 
 def _host_port(url: str, *, default_port: int = 443) -> tuple[str, int]:
@@ -28,61 +38,26 @@ def _host_port(url: str, *, default_port: int = 443) -> tuple[str, int]:
     return host, port
 
 
-def _provider_endpoints(settings: Settings) -> list[tuple[str, int]]:
-    """Return the LLM (host, port) endpoints for the active provider."""
-    p = settings.provider
-    provider_id = p.provider_id.lower()
-
-    if provider_id == "anthropic":
-        return [_host_port(p.anthropic_base_url or "https://api.anthropic.com")]
-    if provider_id == "cborg":
-        if not p.anthropic_base_url:
-            raise AirgapProviderError(
-                "ANTHROPIC_BASE_URL is required for cborg in air-gapped mode."
-            )
-        return [_host_port(p.anthropic_base_url)]
-    if provider_id == "openai":
-        return [_host_port("https://api.openai.com")]
-    if provider_id == "azure-openai":
-        if not p.azure_openai_resource:
-            raise AirgapProviderError(
-                "AZURE_OPENAI_RESOURCE is required for azure-openai in air-gapped mode."
-            )
-        return [_host_port(f"https://{p.azure_openai_resource}.openai.azure.com")]
-    if provider_id == "foundry":
-        if p.anthropic_foundry_base_url:
-            return [_host_port(p.anthropic_foundry_base_url)]
-        if p.anthropic_foundry_resource:
-            return [_host_port(f"https://{p.anthropic_foundry_resource}.services.ai.azure.com")]
-        raise AirgapProviderError(
-            "ANTHROPIC_FOUNDRY_BASE_URL or ANTHROPIC_FOUNDRY_RESOURCE is required "
-            "for foundry in air-gapped mode."
-        )
-    if provider_id == "ollama":
-        return [_host_port(p.ollama_base_url, default_port=11434)]
-    if provider_id == "bedrock":
-        if not p.aws_region:
-            raise AirgapProviderError("AWS_REGION is required for bedrock in air-gapped mode.")
-        return [_host_port(f"https://bedrock-runtime.{p.aws_region}.amazonaws.com")]
-    if provider_id == "vertex":
-        if not p.cloud_ml_region:
-            raise AirgapProviderError("CLOUD_ML_REGION is required for vertex in air-gapped mode.")
-        # Vertex also calls Google's OAuth2 host to mint access tokens.
-        return [
-            _host_port(f"https://{p.cloud_ml_region}-aiplatform.googleapis.com"),
-            _host_port("https://oauth2.googleapis.com"),
-        ]
-
-    raise AirgapProviderError(f"Unknown provider {provider_id!r} for air-gapped egress allowlist.")
-
-
-def derive_egress_allowlist(settings: Settings) -> list[tuple[str, int]]:
+def derive_egress_allowlist(settings: Settings, posture: AirgapPosture) -> list[tuple[str, int]]:
     """Return the (host, port) endpoints the air-gapped job container may reach."""
+    if posture.mode is AirgapEgress.UNSUPPORTED:
+        raise AirgapProviderError(posture.reason or "The active provider cannot be air-gapped.")
+
     entries: list[tuple[str, int]] = [
         _host_port(settings.database.effective_database_url, default_port=5432),
         _host_port(container_broker_base_url()),
-        *_provider_endpoints(settings),
+        _host_port(container_dvc_gateway_base_url()),
     ]
+    if posture.mode is AirgapEgress.PROXY:
+        from openscientist.llm_proxy import container_proxy_base_url
+
+        entries.append(_host_port(container_proxy_base_url()))
+    else:
+        entries.extend(posture.direct_endpoints)
+
+    fair_prepare_url = os.environ.get(FAIR_PREPARE_URL_ENV)
+    if fair_prepare_url:
+        entries.append(_host_port(validate_fair_prepare_url(fair_prepare_url)))
 
     seen: set[tuple[str, int]] = set()
     unique: list[tuple[str, int]] = []

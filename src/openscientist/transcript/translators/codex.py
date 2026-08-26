@@ -306,6 +306,11 @@ class _DynamicToolCallItem(_CodexItem):
 class _CollabToolCallItem(_CodexItem):
     type: Literal["collabAgentToolCall"]
     prompt: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    receiver_thread_ids: list[str] = Field(default_factory=list)
+    sender_thread_id: str | None = None
+    tool: str | None = None
     agents_states: dict[str, Any] = Field(default_factory=dict)
     status: str | None = None
 
@@ -314,6 +319,12 @@ class _CollabToolCallItem(_CodexItem):
             CollabAgentToolCall(
                 id=self.id,
                 prompt=self.prompt,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                receiver_thread_ids=list(self.receiver_thread_ids),
+                sender_thread_id=self.sender_thread_id,
+                tool=self.tool,
+                status=self.status,
                 agents_states={k: v for k, v in self.agents_states.items()},
                 raw=self._raw(ctx),
             )
