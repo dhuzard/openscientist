@@ -38,7 +38,12 @@ The first required operation set is deliberately narrow:
 - `summarize_light_dark`
 - `summarize_circadian_cosinor`
 
-A new UDWA function is not automatically available to an agent. It must receive an OpenScientist scientific contract describing prerequisites, approvals, input assets, output evidence, and failure behavior.
+A new UDWA function is not automatically available to an agent. It must receive
+an OpenScientist scientific contract describing prerequisites, approvals, input
+assets, output evidence, numerical tolerance and failure behavior. Each contract
+has a semantic version and canonical SHA-256 identity recorded in execution
+provenance. Vendor equivalence cannot be declared without a named conformance
+fixture.
 
 ## Neutral preclinical exchange contract
 
@@ -83,6 +88,13 @@ The agent can reference an approval identifier but cannot create approval
 identity, timestamps, decisions or context hashes through MCP. Approval-required
 operations resolve the trusted record from the job workspace and fail when it
 is missing, stale, future-dated or bound to different context.
+
+The job-local `dvc_workflow.json` record makes this sequence resumable. It uses
+monotonic versions, actor- and timestamp-bearing transitions, hashed
+idempotency payloads, atomic replacement and explicit conflict errors. A
+completed deterministic request is reused only when its dataset, checkpoint,
+context, parameters, approval and operation-contract identities still match;
+corrupt or ambiguous prior evidence blocks a rerun.
 
 ## Next increments
 

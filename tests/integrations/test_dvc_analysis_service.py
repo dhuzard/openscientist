@@ -58,10 +58,12 @@ def make_dataset(job_dir: Path) -> str:
     return dataset_id
 
 
-def install_fake_udwa(monkeypatch):
+def install_fake_udwa(monkeypatch, calls: list[str] | None = None):
     orchestrator = types.ModuleType("udwa.orchestrator")
 
     def run_tool(name, dataframe, **parameters):
+        if calls is not None:
+            calls.append(name)
         assert name == "check_data_sanity"
         assert len(dataframe) == 2
         return {
@@ -131,6 +133,9 @@ def test_execution_writes_result_and_complete_provenance(tmp_path, monkeypatch):
     assert result.provenance["udwa_distribution_version"] == "0.1.0"
     assert result.provenance["udwa_pinned_commit"] == "abc123"
     assert result.provenance["openscientist_commit"] == "open-commit"
+    assert result.provenance["operation_contract"]["contract_version"] == "1.0.0"
+    assert len(result.provenance["operation_contract_sha256"]) == 64
+    assert len(result.provenance["request_sha256"]) == 64
     assert result.provenance["approval"] is None
     assert {asset.role for asset in result.assets} == {"result", "provenance"}
     for asset in result.assets:
@@ -144,6 +149,75 @@ def test_execution_writes_result_and_complete_provenance(tmp_path, monkeypatch):
     assert "analysis-secret" not in serialized
     assert "warning-secret" not in serialized
     assert "[REDACTED]" in serialized
+
+
+def test_completed_deterministic_execution_is_reused(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
+    calls: list[str] = []
+    install_fake_udwa(monkeypatch, calls)
+    request = DVCAnalysisRequest(
+        dataset_id=dataset_id,
+        pre_analysis_checkpoint_id=checkpoint_id,
+        operation="check_data_sanity",
+        context=context,
+    )
+
+    first = DVCAnalysisService(tmp_path).execute(request)
+    resumed = DVCAnalysisService(tmp_path).execute(request)
+
+    assert resumed.execution_id == first.execution_id
+    assert resumed.provenance["request_sha256"] == first.provenance["request_sha256"]
+    assert calls == ["check_data_sanity"]
+    assert len(list((tmp_path / "dvc_analyses").iterdir())) == 1
+    workflow = json.loads((tmp_path / "dvc_workflow.json").read_text(encoding="utf-8"))
+    assert workflow["current_stage"] == "analyzed"
+    assert workflow["executions"] == [first.execution_id]
+
+
+def test_reuse_rechecks_dataset_integrity_before_returning_result(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
+    calls: list[str] = []
+    install_fake_udwa(monkeypatch, calls)
+    request = DVCAnalysisRequest(
+        dataset_id=dataset_id,
+        pre_analysis_checkpoint_id=checkpoint_id,
+        operation="check_data_sanity",
+        context=context,
+    )
+    DVCAnalysisService(tmp_path).execute(request)
+    measurements = tmp_path / "dvc_datasets" / dataset_id / "measurements.csv"
+    measurements.write_text(measurements.read_text() + "tampered", encoding="utf-8")
+
+    with pytest.raises(DVCAnalysisError, match="integrity"):
+        DVCAnalysisService(tmp_path).execute(request)
+
+    assert calls == ["check_data_sanity"]
+
+
+def test_matching_execution_with_corrupt_result_refuses_rerun(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path)
+    context = PreclinicalStudyContext(study_id="study-1")
+    checkpoint_id = make_pre_checkpoint(tmp_path, dataset_id, context)
+    calls: list[str] = []
+    install_fake_udwa(monkeypatch, calls)
+    request = DVCAnalysisRequest(
+        dataset_id=dataset_id,
+        pre_analysis_checkpoint_id=checkpoint_id,
+        operation="check_data_sanity",
+        context=context,
+    )
+    first = DVCAnalysisService(tmp_path).execute(request)
+    result_path = tmp_path / "dvc_analyses" / first.execution_id / "result.json"
+    result_path.write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(DVCAnalysisError, match="invalid result artifact"):
+        DVCAnalysisService(tmp_path).execute(request)
+
+    assert calls == ["check_data_sanity"]
 
 
 def test_modified_measurements_are_rejected(tmp_path, monkeypatch):
@@ -279,7 +353,6 @@ def test_conflicting_light_cycle_assessment_blocks_biological_time_operation():
         checkpoint,
         "summarize_circadian_cosinor",
     ) == [
-        "Conflicting assessment finding blocks biological-time analysis: "
-        "environment.light_schedule"
+        "Conflicting assessment finding blocks biological-time analysis: environment.light_schedule"
     ]
     assert _assessment_conflict_blockers(checkpoint, "check_data_sanity") == []

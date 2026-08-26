@@ -6,11 +6,14 @@ from uuid import uuid4
 import pytest
 
 from openscientist.integrations.dvc.execution import (
+    OPERATION_CONTRACTS,
     DVCAnalysisApproval,
     DVCAnalysisRequest,
+    OperationContract,
     canonical_context_sha256,
     canonical_parameters_sha256,
     evaluate_prerequisites,
+    operation_contract_sha256,
 )
 from openscientist.preclinical_context.models import (
     AcquisitionContext,
@@ -116,6 +119,40 @@ def test_cosinor_requires_verified_light_schedule():
     ) in blockers
 
 
+def test_all_operations_have_versioned_scientific_contracts():
+    for name, contract in OPERATION_CONTRACTS.items():
+        assert contract.contract_version == "1.0.0"
+        assert contract.input_roles == ("normalized_measurements",)
+        assert contract.output_evidence == ("result.json", "provenance.json")
+        assert contract.numerical_tolerance
+        assert contract.vendor_equivalence == "not_claimed"
+        assert contract.conformance_fixture is None
+        assert len(operation_contract_sha256(name)) == 64
+
+
+def test_animal_count_estimation_is_not_a_governed_occupancy_proxy():
+    assert "estimate_animal_count" not in OPERATION_CONTRACTS
+    blockers = evaluate_prerequisites(
+        request("estimate_animal_count", study_context=context(complete=True))
+    )
+    assert blockers == [
+        "Operation 'estimate_animal_count' is not approved for OpenScientist DVC execution."
+    ]
+
+
+def test_vendor_equivalence_requires_named_conformance_fixture():
+    with pytest.raises(ValueError, match="conformance fixture"):
+        OperationContract(
+            contract_version="1.0.0",
+            input_roles=("normalized_measurements",),
+            required_context=(),
+            approval_required=True,
+            output_evidence=("result.json", "provenance.json"),
+            numerical_tolerance="absolute_error_lte_1e-9",
+            vendor_equivalence="validated",
+        )
+
+
 def test_biological_time_requires_source_backed_timezone():
     study_context = context()
     study_context.environment.timezone = EvidenceValue(
@@ -128,8 +165,7 @@ def test_biological_time_requires_source_backed_timezone():
     )
 
     assert (
-        "Verified recorded or computed context with a source is required: "
-        "environment.timezone"
+        "Verified recorded or computed context with a source is required: environment.timezone"
     ) in blockers
 
 

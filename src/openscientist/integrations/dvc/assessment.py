@@ -6,7 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
@@ -15,6 +15,7 @@ from openscientist.integrations.dvc.execution import (
     DVCAnalysisBlockedError,
     canonical_context_sha256,
 )
+from openscientist.integrations.dvc.workflow import DVCWorkflowStage, DVCWorkflowStore
 from openscientist.integrations.fair_prepare import FairPrepareProvider, HttpFairPrepareProvider
 from openscientist.preclinical_context.models import AssessmentResult, PreclinicalStudyContext
 
@@ -57,16 +58,30 @@ class DVCAssessmentService:
         context: PreclinicalStudyContext,
     ) -> DVCCheckpointResult:
         self._dataset_dir(dataset_id)
+        DVCWorkflowStore(self.job_dir).record_dataset(dataset_id)
         assessments = self.provider.assess_context(
             context,
             frameworks=("prepare-v1", "arrive-v2"),
         )
-        return self._persist(
+        checkpoint = self._persist(
             "pre_analysis",
             dataset_id,
             assessments,
             context_sha256=canonical_context_sha256(context),
         )
+        context_target = (
+            self.job_dir / "dvc_assessments" / f"{checkpoint.checkpoint_id}.context.json"
+        )
+        context_target.write_text(
+            json.dumps(context.model_dump(mode="json"), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        DVCWorkflowStore(self.job_dir).record_checkpoint(
+            checkpoint.checkpoint_id,
+            is_pre=True,
+            context_sha256=checkpoint.context_sha256,
+        )
+        return checkpoint
 
     def post_analysis(self, dataset_id: str) -> DVCCheckpointResult:
         dataset_dir = self._dataset_dir(dataset_id)
@@ -76,6 +91,32 @@ class DVCAssessmentService:
             raise DVCAnalysisBlockedError(
                 "DVC post-analysis assessment is blocked.",
                 blockers=["At least one completed analysis is required before post-analysis."],
+            )
+        workflow = DVCWorkflowStore(self.job_dir)
+        workflow.record_dataset(dataset_id)
+        for analysis in completed_analyses:
+            execution_id = str(analysis["execution_id"])
+            checkpoint_id = analysis.get("pre_analysis_checkpoint_id")
+            if isinstance(checkpoint_id, str):
+                workflow.record_checkpoint(
+                    checkpoint_id,
+                    is_pre=True,
+                    context_sha256=analysis.get("context_sha256"),
+                )
+            elif workflow.load().current_stage == DVCWorkflowStage.ACQUIRED:
+                workflow.transition(
+                    DVCWorkflowStage.PRE_ASSESSED,
+                    "workflow_reconciliation",
+                    idempotency_key=f"legacy-pre-assessment:{execution_id}",
+                    details={
+                        "execution_id": execution_id,
+                        "reason": "legacy execution lacks checkpoint reference",
+                    },
+                )
+            workflow.record_execution(
+                execution_id,
+                dataset_id=dataset_id,
+                operation=str(analysis.get("operation", "unknown")),
             )
         bundle_dir = self.job_dir / "dvc_bundles" / dataset_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -90,11 +131,16 @@ class DVCAssessmentService:
             bundle_dir,
             frameworks=("arrive-v2", "mnms-v1"),
         )
-        return self._persist("post_analysis", dataset_id, assessments)
+        checkpoint = self._persist("post_analysis", dataset_id, assessments)
+        DVCWorkflowStore(self.job_dir).record_checkpoint(
+            checkpoint.checkpoint_id,
+            is_pre=False,
+        )
+        return checkpoint
 
     @staticmethod
-    def _completed_analyses(dataset_id: str, analysis_root: Path) -> list[dict]:
-        completed = []
+    def _completed_analyses(dataset_id: str, analysis_root: Path) -> list[dict[str, Any]]:
+        completed: list[dict[str, Any]] = []
         if not analysis_root.is_dir():
             return completed
         for provenance_path in sorted(analysis_root.glob("*/provenance.json")):
@@ -139,4 +185,5 @@ class DVCAssessmentService:
             json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True),
             encoding="utf-8",
         )
+
         return result

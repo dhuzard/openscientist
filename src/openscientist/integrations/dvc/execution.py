@@ -6,8 +6,9 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -20,6 +21,7 @@ from openscientist.integrations.dvc.security import (
     redact_sensitive_data,
     redact_sensitive_text,
 )
+from openscientist.integrations.dvc.workflow import DVCWorkflowStore
 from openscientist.integrations.udwa import inspect_udwa_compatibility
 from openscientist.preclinical_context.models import EvidenceStatus, PreclinicalStudyContext
 
@@ -98,25 +100,57 @@ class DVCAnalysisResult(StrictModel):
 
 @dataclass(frozen=True)
 class OperationContract:
+    contract_version: str
+    input_roles: tuple[str, ...]
     required_context: tuple[str, ...]
     approval_required: bool
+    output_evidence: tuple[str, ...]
+    numerical_tolerance: str
     allowed_modes: tuple[str, ...] = ("exploratory", "confirmatory", "monitoring")
+    vendor_equivalence: Literal["not_claimed", "validated"] = "not_claimed"
+    conformance_fixture: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.vendor_equivalence == "validated" and not self.conformance_fixture:
+            raise ValueError("Vendor-equivalent operation contracts require a conformance fixture.")
+
+
+_STANDARD_INPUT_ROLES = ("normalized_measurements",)
+_STANDARD_OUTPUT_EVIDENCE = ("result.json", "provenance.json")
 
 
 OPERATION_CONTRACTS: dict[str, OperationContract] = {
-    "check_data_sanity": OperationContract(required_context=(), approval_required=False),
+    "check_data_sanity": OperationContract(
+        contract_version="1.0.0",
+        input_roles=_STANDARD_INPUT_ROLES,
+        required_context=(),
+        approval_required=False,
+        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
+        numerical_tolerance="not_applicable",
+    ),
     "summarize_time_bins": OperationContract(
-        required_context=("design.experimental_unit",), approval_required=True
+        contract_version="1.0.0",
+        input_roles=_STANDARD_INPUT_ROLES,
+        required_context=("design.experimental_unit",),
+        approval_required=True,
+        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
+        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
     ),
     "summarize_light_dark": OperationContract(
+        contract_version="1.0.0",
+        input_roles=_STANDARD_INPUT_ROLES,
         required_context=(
             "design.experimental_unit",
             "environment.timezone",
             "environment.light_schedule",
         ),
         approval_required=True,
+        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
+        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
     ),
     "summarize_circadian_cosinor": OperationContract(
+        contract_version="1.0.0",
+        input_roles=_STANDARD_INPUT_ROLES,
         required_context=(
             "design.experimental_unit",
             "environment.timezone",
@@ -124,8 +158,11 @@ OPERATION_CONTRACTS: dict[str, OperationContract] = {
             "acquisition.temporal_resolution",
         ),
         approval_required=True,
+        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
+        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
     ),
 }
+
 
 _BIOLOGICAL_TIME_OPERATIONS = frozenset({"summarize_light_dark", "summarize_circadian_cosinor"})
 _VERIFIED_EVIDENCE_STATUSES = frozenset({EvidenceStatus.RECORDED, EvidenceStatus.COMPUTED})
@@ -141,6 +178,35 @@ class DVCAnalysisBlockedError(RuntimeError):
 
 class DVCAnalysisError(RuntimeError):
     """Stable execution failure after governance gates have passed."""
+
+
+def _validated_result_fields(output: dict[str, Any]) -> dict[str, Any]:
+    specialist = output.get("specialist")
+    n_rows = output.get("n_rows")
+    columns = output.get("columns", [])
+    records = output.get("records", [])
+    warnings = output.get("warnings", [])
+    if specialist is not None and not isinstance(specialist, str):
+        raise DVCAnalysisError("UDWA execution returned an invalid specialist field.")
+    if n_rows is not None and (
+        not isinstance(n_rows, int) or isinstance(n_rows, bool) or n_rows < 0
+    ):
+        raise DVCAnalysisError("UDWA execution returned an invalid row count.")
+    if not isinstance(columns, (list, tuple)):
+        raise DVCAnalysisError("UDWA execution returned invalid result columns.")
+    if not isinstance(records, (list, tuple)) or any(
+        not isinstance(item, dict) for item in records
+    ):
+        raise DVCAnalysisError("UDWA execution returned invalid result records.")
+    if not isinstance(warnings, (list, tuple)):
+        raise DVCAnalysisError("UDWA execution returned invalid warnings.")
+    return {
+        "specialist": specialist,
+        "n_rows": n_rows,
+        "columns": [str(item) for item in columns],
+        "records": [dict(item) for item in records],
+        "warnings": [str(item) for item in warnings],
+    }
 
 
 def canonical_context_sha256(context: PreclinicalStudyContext) -> str:
@@ -176,6 +242,44 @@ def canonical_checkpoint_sha256(checkpoint: dict[str, Any]) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError("Assessment checkpoint must be canonical JSON.") from exc
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def operation_contract_sha256(operation: str) -> str:
+    """Return the immutable identity of one versioned scientific contract."""
+
+    contract = OPERATION_CONTRACTS.get(operation)
+    if contract is None:
+        raise ValueError(f"Operation '{operation}' has no governed scientific contract.")
+    payload = json.dumps(asdict(contract), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _analysis_request_sha256(
+    request: DVCAnalysisRequest,
+    *,
+    checkpoint_sha256: str,
+    dataset_manifest_sha256: str,
+    measurements_sha256: str,
+) -> str:
+    payload = {
+        "approval_id": request.approval.approval_id if request.approval else None,
+        "checkpoint_sha256": checkpoint_sha256,
+        "context_sha256": canonical_context_sha256(request.context),
+        "dataset_id": request.dataset_id,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "measurements_sha256": measurements_sha256,
+        "operation": request.operation,
+        "operation_contract_sha256": operation_contract_sha256(request.operation),
+        "parameters": request.parameters,
+    }
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _known(context: PreclinicalStudyContext, path: str) -> bool:
@@ -315,15 +419,6 @@ class DVCAnalysisService:
         if blockers:
             raise DVCAnalysisBlockedError("DVC analysis is blocked.", blockers=blockers)
 
-        compatibility = inspect_udwa_compatibility()
-        if not compatibility.compatible:
-            details: list[str] = []
-            if compatibility.missing_imports:
-                details.append("missing imports: " + ", ".join(compatibility.missing_imports))
-            if compatibility.missing_operations:
-                details.append("missing operations: " + ", ".join(compatibility.missing_operations))
-            raise DVCAnalysisError("Pinned UDWA dependency is incompatible: " + "; ".join(details))
-
         dataset_dir = self._dataset_dir(request.dataset_id)
         manifest_path = dataset_dir / "manifest.json"
         if not manifest_path.is_file():
@@ -337,6 +432,35 @@ class DVCAnalysisService:
         if dataset_dir not in measurements_path.parents or not measurements_path.is_file():
             raise DVCAnalysisError("Dataset manifest measurement asset is missing or unsafe.")
         self._verify_dataset_integrity(measurements_path, manifest)
+        checkpoint_sha256 = canonical_checkpoint_sha256(checkpoint)
+        dataset_manifest_sha256 = _sha256(manifest_path)
+        measurements_sha256 = _sha256(measurements_path)
+        request_sha256 = _analysis_request_sha256(
+            request,
+            checkpoint_sha256=checkpoint_sha256,
+            dataset_manifest_sha256=dataset_manifest_sha256,
+            measurements_sha256=measurements_sha256,
+        )
+
+        existing = self._find_matching_execution(request, request_sha256=request_sha256)
+        if existing is not None:
+            self._resume_workflow(request, existing.execution_id)
+            return existing
+
+        self._resume_workflow(request)
+        compatibility = inspect_udwa_compatibility()
+        if not compatibility.compatible:
+            details: list[str] = []
+            if compatibility.missing_imports:
+                details.append("missing imports: " + ", ".join(compatibility.missing_imports))
+            if compatibility.missing_operations:
+                details.append("missing operations: " + ", ".join(compatibility.missing_operations))
+            error = DVCAnalysisError(
+                "Pinned UDWA dependency is incompatible: " + "; ".join(details)
+            )
+            self._record_execution_failure(request_sha256, error)
+            raise error
+
         dataframe = (
             pd.read_parquet(measurements_path)
             if measurements_path.suffix.casefold() == ".parquet"
@@ -345,18 +469,27 @@ class DVCAnalysisService:
 
         started_at = datetime.now(timezone.utc)
         try:
-            from udwa.orchestrator import run_tool  # type: ignore[import-untyped]
+            run_tool = import_module("udwa.orchestrator").run_tool
 
             output = run_tool(request.operation, dataframe, **request.parameters)
         except Exception as exc:  # noqa: BLE001
-            raise DVCAnalysisError(
-                f"UDWA execution failed: {redact_sensitive_text(str(exc))}"
-            ) from exc
+            error = DVCAnalysisError(f"UDWA execution failed: {redact_sensitive_text(str(exc))}")
+            self._record_execution_failure(request_sha256, error)
+            raise error from exc
         if not isinstance(output, dict):
-            raise DVCAnalysisError("UDWA execution returned an invalid result.")
+            error = DVCAnalysisError("UDWA execution returned an invalid result.")
+            self._record_execution_failure(request_sha256, error)
+            raise error
         output = dict(redact_sensitive_data(output))
         if output.get("error"):
-            raise DVCAnalysisError(f"UDWA execution failed: {output['error']}")
+            error = DVCAnalysisError(f"UDWA execution failed: {output['error']}")
+            self._record_execution_failure(request_sha256, error)
+            raise error
+        try:
+            result_fields = _validated_result_fields(output)
+        except DVCAnalysisError as error:
+            self._record_execution_failure(request_sha256, error)
+            raise
         completed_at = datetime.now(timezone.utc)
 
         execution_id = f"dvc-exec-{uuid4()}"
@@ -380,13 +513,17 @@ class DVCAnalysisService:
         provenance = {
             "schema": "openscientist-dvc-analysis-provenance/0.1",
             "execution_id": execution_id,
+            "request_sha256": request_sha256,
             "dataset_id": request.dataset_id,
-            "dataset_manifest_sha256": _sha256(manifest_path),
-            "measurements_sha256": _sha256(measurements_path),
+            "dataset_manifest_sha256": dataset_manifest_sha256,
+            "measurements_sha256": measurements_sha256,
             "operation": request.operation,
+            "operation_contract": asdict(OPERATION_CONTRACTS[request.operation]),
+            "operation_contract_sha256": operation_contract_sha256(request.operation),
             "parameters": request.parameters,
             "context_sha256": canonical_context_sha256(request.context),
             "pre_analysis_checkpoint_id": request.pre_analysis_checkpoint_id,
+            "pre_analysis_checkpoint_sha256": checkpoint_sha256,
             "approval": request.approval.model_dump(mode="json") if request.approval else None,
             "udwa_distribution_version": compatibility.distribution_version,
             "udwa_pinned_commit": compatibility.pinned_commit,
@@ -414,20 +551,146 @@ class DVCAnalysisService:
             json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
         )
 
+        self._resume_workflow(request, execution_id)
+
         return DVCAnalysisResult(
             execution_id=execution_id,
             dataset_id=request.dataset_id,
             operation=request.operation,
-            specialist=output.get("specialist"),
-            n_rows=output.get("n_rows"),
-            columns=[str(item) for item in output.get("columns", [])],
-            records=[dict(item) for item in output.get("records", [])],
-            warnings=[str(item) for item in output.get("warnings", [])],
             assets=[
                 _asset(self.job_dir, result_path, "result"),
                 _asset(self.job_dir, provenance_path, "provenance"),
             ],
             provenance=provenance,
+            **result_fields,
+        )
+
+    def _find_matching_execution(
+        self,
+        request: DVCAnalysisRequest,
+        *,
+        request_sha256: str,
+    ) -> DVCAnalysisResult | None:
+        analysis_root = self.job_dir / "dvc_analyses"
+        if not analysis_root.is_dir():
+            return None
+        matches: list[DVCAnalysisResult] = []
+        for provenance_path in sorted(analysis_root.glob("*/provenance.json")):
+            result_path = provenance_path.with_name("result.json")
+            try:
+                prov = json.loads(provenance_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise DVCAnalysisError(
+                    "Existing DVC analysis provenance is unreadable; refusing a potentially "
+                    "duplicate deterministic execution."
+                ) from exc
+            if not isinstance(prov, dict):
+                raise DVCAnalysisError(
+                    "Existing DVC analysis provenance is invalid; refusing a potentially "
+                    "duplicate deterministic execution."
+                )
+            if prov.get("request_sha256") != request_sha256:
+                if self._is_legacy_request_match(prov, request):
+                    raise DVCAnalysisError(
+                        "A completed matching execution predates versioned idempotency. "
+                        "Refusing a silent deterministic rerun; review or supersede it explicitly."
+                    )
+                continue
+            if not result_path.is_file():
+                raise DVCAnalysisError(
+                    "A matching completed execution has no result artifact; refusing rerun."
+                )
+            try:
+                res = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise DVCAnalysisError(
+                    "A matching completed execution has an invalid result artifact; refusing rerun."
+                ) from exc
+            if not isinstance(res, dict) or not isinstance(res.get("output"), dict):
+                raise DVCAnalysisError(
+                    "A matching completed execution has an invalid result payload; refusing rerun."
+                )
+            execution_id = provenance_path.parent.name
+            if (
+                res.get("status") != "completed"
+                or res.get("execution_id") != execution_id
+                or prov.get("execution_id") != execution_id
+                or res.get("dataset_id") != request.dataset_id
+                or res.get("operation") != request.operation
+            ):
+                raise DVCAnalysisError(
+                    "A matching completed execution has conflicting provenance; refusing rerun."
+                )
+            output = res["output"]
+            try:
+                result_fields = _validated_result_fields(output)
+            except DVCAnalysisError as exc:
+                raise DVCAnalysisError(
+                    "A matching completed execution has invalid output evidence; refusing rerun."
+                ) from exc
+            matches.append(
+                DVCAnalysisResult(
+                    execution_id=execution_id,
+                    dataset_id=request.dataset_id,
+                    operation=request.operation,
+                    assets=[
+                        _asset(self.job_dir, result_path, "result"),
+                        _asset(self.job_dir, provenance_path, "provenance"),
+                    ],
+                    provenance=prov,
+                    **result_fields,
+                )
+            )
+        if len(matches) > 1:
+            raise DVCAnalysisError(
+                "Multiple completed executions have the same deterministic request identity."
+            )
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _is_legacy_request_match(provenance: dict[str, Any], request: DVCAnalysisRequest) -> bool:
+        return (
+            "request_sha256" not in provenance
+            and provenance.get("dataset_id") == request.dataset_id
+            and provenance.get("operation") == request.operation
+            and provenance.get("parameters") == request.parameters
+            and provenance.get("context_sha256") == canonical_context_sha256(request.context)
+            and provenance.get("pre_analysis_checkpoint_id") == request.pre_analysis_checkpoint_id
+        )
+
+    def _resume_workflow(
+        self,
+        request: DVCAnalysisRequest,
+        execution_id: str | None = None,
+    ) -> None:
+        store = DVCWorkflowStore(self.job_dir)
+        store.record_dataset(request.dataset_id)
+        store.record_checkpoint(
+            request.pre_analysis_checkpoint_id,
+            is_pre=True,
+            context_sha256=canonical_context_sha256(request.context),
+        )
+        if request.approval is not None:
+            store.record_approval(
+                request.approval.approval_id,
+                checkpoint_id=request.pre_analysis_checkpoint_id,
+                dataset_id=request.dataset_id,
+                actor=request.approval.approved_by,
+            )
+        if execution_id is not None:
+            store.record_execution(
+                execution_id,
+                dataset_id=request.dataset_id,
+                operation=request.operation,
+            )
+
+    def _record_execution_failure(self, request_sha256: str, error: Exception) -> None:
+        message_hash = hashlib.sha256(str(error).encode("utf-8")).hexdigest()
+        DVCWorkflowStore(self.job_dir).record_failure(
+            "governed_udwa_execution",
+            error,
+            idempotency_key=f"execution-failure:{request_sha256}:{message_hash}",
+            actor="analysis_service",
         )
 
     def _validate_pre_analysis_checkpoint(self, request: DVCAnalysisRequest) -> dict[str, Any]:

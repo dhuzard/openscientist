@@ -241,12 +241,20 @@ Nothing was pushed or deployed as part of this validation.
 
 #### DVC-203: Persist resumable governed workflow state
 
-- [ ] Persist the context, checkpoints, approvals, executions and report state
+- [x] Persist the context, checkpoints, approvals, executions and report state
   in a versioned job workflow record.
-- [ ] Associate transitions with actor, timestamp and previous version.
-- [ ] Resume safely after metadata answers, approval, restart or tool failure.
-- [ ] Add idempotency keys and conflict handling for retries.
-- [ ] Prevent silent reruns of completed deterministic operations.
+- [x] Associate transitions with actor, timestamp and previous version.
+- [x] Resume safely after metadata answers, approval, restart or tool failure.
+- [x] Add idempotency keys and conflict handling for retries.
+- [x] Prevent silent reruns of completed deterministic operations.
+
+Completed locally on 2026-08-26. The atomic `dvc_workflow.json` record carries
+monotonic versions, hashed transition payloads, lifecycle artifact references,
+failure evidence and optimistic conflict checks. Governed analysis requests now
+have a canonical identity bound to the input hashes, checkpoint, context,
+parameters, approval and scientific-contract version. Exact completed requests
+are reused only after integrity checks; damaged, duplicate or legacy-ambiguous
+matches fail closed instead of rerunning silently.
 
 #### DVC-204: Add authoritative CI gates
 
@@ -279,12 +287,20 @@ Nothing was pushed or deployed as part of this validation.
 
 #### DVC-303: Govern new metrics and UDWA operations
 
-- [ ] Require a versioned scientific contract for every added UDWA operation.
-- [ ] Define input roles, prerequisites, approval policy, output evidence and
+- [x] Require a versioned scientific contract for every added UDWA operation.
+- [x] Define input roles, prerequisites, approval policy, output evidence and
   numerical tolerance.
-- [ ] Add conformance fixtures before describing a proxy as vendor-equivalent.
-- [ ] Keep animal-count estimation separate from recorded occupancy until a
+- [x] Add conformance fixtures before describing a proxy as vendor-equivalent.
+- [x] Keep animal-count estimation separate from recorded occupancy until a
   dedicated validation program succeeds.
+
+Completed locally on 2026-08-26. Every allowlisted operation now carries a
+hashed semantic-versioned contract covering input roles, prerequisites,
+approval policy, output evidence and numerical tolerance. Contracts cannot
+claim vendor equivalence without naming a conformance fixture, no current
+contract makes that claim, and animal-count estimation remains outside the
+governed operation boundary rather than being conflated with recorded cage
+occupancy.
 
 ## Definition of done for a usable live POC
 

@@ -20,7 +20,10 @@ from sqlalchemy import select
 
 from openscientist.agent.factory import backend_for_provider_id
 from openscientist.agent_task_provenance import build_job_agent_task_provenance
-from openscientist.artifact_packager import create_artifacts_zip
+from openscientist.artifact_packager import (
+    create_artifacts_zip,
+    create_dvc_evidence_bundle_zip,
+)
 from openscientist.async_tasks import run_sync
 from openscientist.auth import (
     can_current_user_start_jobs,
@@ -36,6 +39,12 @@ from openscientist.dvc.governance_status import (
     DVCGovernanceStatus,
     derive_dvc_governance_status,
 )
+from openscientist.integrations.dvc.approvals import (
+    create_dvc_approval_record,
+    list_dvc_pre_analysis_checkpoints,
+    load_checkpoint_context,
+)
+from openscientist.integrations.dvc.execution import OPERATION_CONTRACTS
 from openscientist.job.types import JobInfo, JobStatus
 from openscientist.job_chat import (
     extract_chat_artifact_images,
@@ -51,6 +60,7 @@ from openscientist.job_manager import _db_get_job, _db_get_share_permission
 from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
 from openscientist.pdf_generator import markdown_to_pdf
+from openscientist.preclinical_context.models import PreclinicalStudyContext
 from openscientist.skill_provenance import build_job_skill_provenance
 from openscientist.transcript.io import load_transcript
 from openscientist.usage_summary import (
@@ -1495,6 +1505,7 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
 
     render_job_stats()
     _render_research_question_card(context)
+    _render_dvc_pending_approvals_banner(context)
     _render_job_runtime_controls(context)
     ui.label("Investigation Timeline").classes("text-h6 font-bold mb-2")
     render_timeline()
@@ -1522,6 +1533,156 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
         context.active_timers.append(stats_timer_holder["timer"])
 
 
+def _show_dvc_approval_dialog(
+    context: _JobDetailContext,
+    checkpoint: dict[str, Any],
+) -> None:
+    """Render the graphical review and approval dialog for a governed DVC checkpoint."""
+    checkpoint_id = checkpoint["checkpoint_id"]
+    dataset_id = checkpoint["dataset_id"]
+    context_sha256 = checkpoint.get("context_sha256", "")
+    assessments = checkpoint.get("assessments", [])
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
+        with ui.row().classes("w-full items-center gap-2 border-b pb-2"):
+            ui.icon("verified_user", size="md").classes("text-indigo-600")
+            with ui.column().classes("gap-0"):
+                ui.label("Review & Approve Governed DVC Analysis").classes("text-lg font-bold")
+                ui.label(f"Dataset: {dataset_id} · Checkpoint: {checkpoint_id}").classes(
+                    "text-xs text-gray-500 font-mono"
+                )
+
+        ui.label(
+            "Governed UDWA execution requires explicit scientific review of pre-analysis "
+            "FAIR/PREPARE/ARRIVE readiness and binding cryptographic approval."
+        ).classes("text-sm text-gray-600 mt-1")
+
+        if assessments:
+            with ui.expansion(
+                "Pre-analysis Assessment Findings", icon="assessment", value=True
+            ).classes("w-full mt-2"):
+                for assessment in assessments:
+                    framework = str(assessment.get("framework", "Framework"))
+                    satisfied = assessment.get("satisfied_count", 0)
+                    missing = assessment.get("missing_count", 0)
+                    partial = assessment.get("partial_count", 0)
+                    with ui.row().classes("items-center gap-2 mb-1"):
+                        ui.label(framework.upper()).classes("font-semibold text-sm")
+                        ui.badge(f"{satisfied} satisfied", color="green").props("outline")
+                        if partial:
+                            ui.badge(f"{partial} partial", color="orange").props("outline")
+                        if missing:
+                            ui.badge(f"{missing} missing", color="red").props("outline")
+
+        with ui.column().classes("w-full gap-2 mt-3"):
+            ui.label("Approved Operation & Parameters").classes("font-semibold text-sm")
+            operation_options = list(OPERATION_CONTRACTS.keys())
+            operation_select = (
+                ui.select(
+                    options=operation_options,
+                    value="summarize_time_bins",
+                    label="Governed UDWA Operation",
+                )
+                .props("outlined dense")
+                .classes("w-full")
+            )
+
+            params_input = (
+                ui.textarea(
+                    label="Parameters (JSON)",
+                    value='{"aggregation": "HOUR"}',
+                )
+                .props("outlined dense rows=2")
+                .classes("w-full font-mono text-xs")
+            )
+
+        with ui.row().classes("items-center gap-2 text-xs text-gray-500 font-mono mt-2"):
+            ui.label(f"Context SHA-256: {context_sha256[:16]}..." if context_sha256 else "")
+
+        with ui.row().classes("w-full justify-end gap-2 mt-4 pt-2 border-t"):
+            ui.button("Cancel", on_click=dialog.close).props("flat color=grey")
+
+            def submit_approval() -> None:
+                try:
+                    params = json.loads(params_input.value or "{}")
+                    if not isinstance(params, dict):
+                        raise ValueError("Parameters must be a JSON object.")
+                except Exception as e:
+                    ui.notify(f"Invalid parameters JSON: {e}", type="negative")
+                    return
+
+                user_id = get_current_user_id()
+                identity = str(user_id) if user_id else "authenticated_user"
+
+                study_context = load_checkpoint_context(context.job_dir, checkpoint_id)
+                if study_context is None:
+                    study_context = PreclinicalStudyContext(
+                        study_id=context.job_id,
+                    )
+
+                try:
+                    create_dvc_approval_record(
+                        job_dir=context.job_dir,
+                        dataset_id=dataset_id,
+                        pre_analysis_checkpoint_id=checkpoint_id,
+                        operation=str(operation_select.value),
+                        context=study_context,
+                        parameters=params,
+                        approved_by=identity,
+                        created_via="web_ui",
+                    )
+                    dialog.close()
+                    ui.notify(
+                        f"Approved {operation_select.value} for dataset {dataset_id}.",
+                        type="positive",
+                    )
+                    ui.navigate.to(f"/job/{context.job_id}")
+                except Exception as exc:
+                    logger.exception("Approval creation failed: %s", exc)
+                    ui.notify(f"Approval failed: {exc}", type="negative")
+
+            ui.button("Approve Execution", icon="check_circle", on_click=submit_approval).props(
+                "color=positive"
+            )
+
+    dialog.open()
+
+
+def _render_dvc_pending_approvals_banner(context: _JobDetailContext) -> None:
+    """Display pending DVC pre-analysis approvals when relevant."""
+    checkpoints = list_dvc_pre_analysis_checkpoints(context.job_dir)
+    if not checkpoints:
+        return
+
+    unapproved = [cp for cp in checkpoints if not cp.get("approved")]
+    if not unapproved:
+        return
+
+    with (
+        ui.card()
+        .classes("w-full mb-4 border-l-4 border-amber-500 bg-amber-50")
+        .props("flat bordered")
+    ):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            with ui.column().classes("gap-0"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("verified_user", size="sm").classes("text-amber-700")
+                    ui.label(f"Governed DVC Analysis Pending Approval ({len(unapproved)})").classes(
+                        "font-bold text-amber-900"
+                    )
+                ui.label(
+                    "Pre-analysis assessment is complete. Review findings and grant cryptographic approval "
+                    "for the agent to execute governed UDWA analytics."
+                ).classes("text-xs text-amber-800")
+            with ui.row().classes("gap-2"):
+                for cp in unapproved:
+                    ui.button(
+                        f"Review {cp['dataset_id'][:12]}...",
+                        icon="fact_check",
+                        on_click=lambda c=cp: _show_dvc_approval_dialog(context, c),
+                    ).props("color=amber-9 text-white dense")
+
+
 def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
     try:
         zip_buffer = create_artifacts_zip(job_dir, job_id)
@@ -1529,6 +1690,15 @@ def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
     except Exception as exc:
         logger.error("Failed to create artifacts ZIP: %s", exc, exc_info=True)
         ui.notify("Failed to create ZIP. Please try again.", type="negative")
+
+
+def _download_dvc_evidence_bundle_zip(job_dir: Path, job_id: str) -> None:
+    try:
+        zip_buffer = create_dvc_evidence_bundle_zip(job_dir, job_id)
+        ui.download(zip_buffer.getvalue(), filename=f"{job_id}_dvc_evidence_bundle.zip")
+    except Exception as exc:
+        logger.error("Failed to create DVC evidence ZIP: %s", exc, exc_info=True)
+        ui.notify("Failed to create DVC evidence bundle. Please try again.", type="negative")
 
 
 def _download_pdf_report(report_path: Path, pdf_path: Path, job_id: str) -> None:
@@ -1612,7 +1782,7 @@ def _confirm_regenerate_report(context: _JobDetailContext) -> None:
 
 
 def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_path: Path) -> None:
-    with ui.row().classes("w-full justify-end mb-4 gap-2"):
+    with ui.row().classes("w-full justify-end mb-4 gap-2 flex-wrap"):
         if pdf_path.exists() or report_path.exists():
             ui.button(
                 "Download PDF",
@@ -1621,6 +1791,18 @@ def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_pa
             ).props("color=primary")
         else:
             ui.button("PDF Unavailable", icon="picture_as_pdf").props("color=grey outline disabled")
+
+        dvc_present = (
+            (context.job_dir / "dvc_datasets").exists()
+            or (context.job_dir / "dvc_assessments").exists()
+            or (context.job_dir / "dvc_analyses").exists()
+        )
+        if dvc_present:
+            ui.button(
+                "Download DVC Evidence Bundle",
+                on_click=lambda: _download_dvc_evidence_bundle_zip(context.job_dir, context.job_id),
+                icon="verified_user",
+            ).props("color=positive outline")
 
         ui.button(
             "Download All Artifacts",

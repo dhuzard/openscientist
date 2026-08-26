@@ -1,5 +1,6 @@
 """Tests for openscientist.artifact_packager module."""
 
+import hashlib
 import stat
 import zipfile
 
@@ -159,3 +160,53 @@ class TestCreateArtifactsZip:
             assert "report.md" in names
             assert "config.json" not in names
             assert not any(name == ".codex" or name.startswith(".codex/") for name in names)
+
+
+class TestCreateDVCEvidenceBundleZip:
+    """Tests for create_dvc_evidence_bundle_zip()."""
+
+    def test_creates_dvc_evidence_bundle_with_manifest(self, tmp_path):
+        import json
+
+        from openscientist.artifact_packager import create_dvc_evidence_bundle_zip
+
+        # Create DVC structure
+        datasets_dir = tmp_path / "dvc_datasets" / "dvc-1"
+        datasets_dir.mkdir(parents=True)
+        (datasets_dir / "manifest.json").write_text('{"dataset_id": "dvc-1"}')
+        (datasets_dir / "measurements.csv").write_text(
+            "cage,time,value\nC1,2026-01-01T00:00:00Z,10\n"
+        )
+
+        assessments_dir = tmp_path / "dvc_assessments"
+        assessments_dir.mkdir(parents=True)
+        (assessments_dir / "dvc-assess-1.json").write_text('{"checkpoint": "pre_analysis"}')
+
+        (tmp_path / "final_report.md").write_text("# DVC Analysis Report")
+        (tmp_path / "dvc_workflow.json").write_text('{"version": 1}')
+        (tmp_path / ".dvc_workflow.lock").write_text("")
+        (tmp_path / "config.json").write_text('{"secret": "do_not_bundle"}')
+
+        buf = create_dvc_evidence_bundle_zip(tmp_path, "job-dvc-1")
+
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            assert "dvc_datasets/dvc-1/manifest.json" in names
+            assert "dvc_datasets/dvc-1/measurements.csv" in names
+            assert "dvc_assessments/dvc-assess-1.json" in names
+            assert "final_report.md" in names
+            assert "dvc_workflow.json" in names
+            assert ".dvc_workflow.lock" not in names
+            assert "config.json" not in names
+            assert "DVC_EVIDENCE_MANIFEST.json" in names
+
+            manifest_content = json.loads(zf.read("DVC_EVIDENCE_MANIFEST.json").decode("utf-8"))
+            assert manifest_content["schema"] == "openscientist-dvc-evidence-bundle/0.1"
+            assert manifest_content["job_id"] == "job-dvc-1"
+            assert manifest_content["total_files"] == 5
+            file_paths = [f["path"] for f in manifest_content["files"]]
+            assert "final_report.md" in file_paths
+            assert "dvc_datasets/dvc-1/measurements.csv" in file_paths
+            for entry in manifest_content["files"]:
+                assert entry["sha256"] == hashlib.sha256(zf.read(entry["path"])).hexdigest()
+                assert entry["bytes"] == len(zf.read(entry["path"]))

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from openscientist.integrations.dvc.execution import OPERATION_CONTRACTS
 from openscientist.integrations.udwa import (
     PINNED_UDWA_COMMIT,
     REQUIRED_UDWA_OPERATIONS,
@@ -26,6 +27,7 @@ def test_required_operations_cover_first_poc_boundary() -> None:
         "summarize_light_dark",
         "summarize_circadian_cosinor",
     }
+    assert set(OPERATION_CONTRACTS) == REQUIRED_UDWA_OPERATIONS
 
 
 def test_compatibility_report_fails_closed_when_udwa_is_absent() -> None:

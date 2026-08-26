@@ -21,6 +21,7 @@ from openscientist.integrations.dvc.execution import (
     canonical_context_sha256,
     canonical_parameters_sha256,
     evaluate_prerequisites,
+    operation_contract_sha256,
 )
 from openscientist.integrations.dvc.models import (
     DVCDatasetInspection,
@@ -28,6 +29,13 @@ from openscientist.integrations.dvc.models import (
     DVCImportRequest,
 )
 from openscientist.integrations.dvc.service import DVCAcquisitionService
+from openscientist.integrations.dvc.workflow import (
+    DVCWorkflowConflictError,
+    DVCWorkflowCorruptError,
+    DVCWorkflowStage,
+    DVCWorkflowState,
+    DVCWorkflowStore,
+)
 
 __all__ = [
     "DVCAcquisitionService",
@@ -42,6 +50,11 @@ __all__ = [
     "DVCConnection",
     "DVCConnectionNotFoundError",
     "DVCImportRequest",
+    "DVCWorkflowConflictError",
+    "DVCWorkflowCorruptError",
+    "DVCWorkflowStage",
+    "DVCWorkflowState",
+    "DVCWorkflowStore",
     "DVCDatasetInspection",
     "DVCDatasetResult",
     "EnvironmentDVCConnectionProvider",
@@ -50,4 +63,5 @@ __all__ = [
     "canonical_context_sha256",
     "canonical_parameters_sha256",
     "evaluate_prerequisites",
+    "operation_contract_sha256",
 ]

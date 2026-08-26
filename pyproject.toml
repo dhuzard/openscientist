@@ -67,6 +67,7 @@ dependencies = [
 
     # Type hints
     "typing-extensions>=4.8.0",
+    "filelock>=3.20.0",  # Cross-process DVC workflow state coordination
 
     # Cloud providers (for cost tracking and authentication)
     "google-cloud-bigquery>=3.11.0",  # Vertex AI

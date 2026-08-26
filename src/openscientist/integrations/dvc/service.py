@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -27,6 +28,7 @@ from openscientist.integrations.dvc.security import (
     redact_sensitive_data,
     redact_sensitive_text,
 )
+from openscientist.integrations.dvc.workflow import DVCWorkflowStore
 
 
 class DVCAcquisitionError(RuntimeError):
@@ -87,7 +89,7 @@ class DVCAcquisitionService:
     def test_connection(self, connection_id: str) -> dict[str, Any]:
         connection = self._connection(connection_id)
         try:
-            from udwa.ingest import test_api_connection  # type: ignore[import-untyped]
+            test_api_connection = import_module("udwa.ingest").test_api_connection
 
             accepted = bool(
                 test_api_connection(base_url=connection.base_url, api_key=connection.api_key)
@@ -100,7 +102,7 @@ class DVCAcquisitionService:
     def list_metrics(self, connection_id: str) -> list[dict[str, Any]]:
         connection = self._connection(connection_id)
         try:
-            from udwa.ingest import get_metrics_list  # type: ignore[import-untyped]
+            get_metrics_list = import_module("udwa.ingest").get_metrics_list
 
             metrics = get_metrics_list(base_url=connection.base_url, api_key=connection.api_key)
         except Exception as exc:  # noqa: BLE001
@@ -116,7 +118,7 @@ class DVCAcquisitionService:
             raise ValueError("At least one non-empty cage search pattern is required.")
         connection = self._connection(connection_id)
         try:
-            from udwa.ingest import search_cages_list  # type: ignore[import-untyped]
+            search_cages_list = import_module("udwa.ingest").search_cages_list
 
             cages = search_cages_list(
                 patterns=[pattern.strip() for pattern in patterns],
@@ -134,6 +136,7 @@ class DVCAcquisitionService:
         request_fingerprint = _request_fingerprint(request)
         reused = self._find_reusable_dataset(request, request_fingerprint)
         if reused is not None:
+            DVCWorkflowStore(self.job_dir).record_dataset(reused.dataset_id)
             return reused
 
         connection = self._connection(request.connection_id)
@@ -142,7 +145,7 @@ class DVCAcquisitionService:
         dataset_dir.mkdir(parents=True, exist_ok=False)
 
         try:
-            from udwa.ingest import fetch_api_bundle  # type: ignore[import-untyped]
+            fetch_api_bundle = import_module("udwa.ingest").fetch_api_bundle
 
             measurements, events, warnings, state = fetch_api_bundle(
                 base_url=connection.base_url,
@@ -396,4 +399,7 @@ class DVCAcquisitionService:
             encoding="utf-8",
         )
         result.assets.append(_asset(dataset_dir, manifest_path, "manifest"))
+
+        DVCWorkflowStore(self.job_dir).record_dataset(dataset_id)
+
         return result

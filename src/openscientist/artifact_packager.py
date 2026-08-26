@@ -10,11 +10,12 @@ import zipfile
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _EXCLUDE_DIRS = {".codex", ".git", "__pycache__", ".pytest_cache", "node_modules"}
-_EXCLUDE_FILES = {"config.json"}
+_EXCLUDE_FILES = {".dvc_workflow.lock", "config.json"}
 
 
 def _iter_artifact_files(
@@ -115,3 +116,136 @@ def create_artifacts_zip_file(job_dir: Path, archive_path: Path, job_id: str) ->
         written,
     )
     return written
+
+
+def _write_evidence_file(
+    zip_file: zipfile.ZipFile,
+    file_path: Path,
+    arcname: Path,
+) -> tuple[str, int]:
+    """Stream one file once so the manifest hash matches the archived bytes."""
+
+    import hashlib
+
+    digest = hashlib.sha256()
+    size = 0
+    archive_name = str(arcname).replace("\\", "/")
+    with file_path.open("rb") as source, zip_file.open(archive_name, "w") as destination:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            destination.write(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+_DVC_BUNDLE_PATTERNS = (
+    "dvc_datasets",
+    "dvc_assessments",
+    "dvc_approvals",
+    "dvc_analyses",
+    "dvc_bundles",
+    "dvc_workflow.json",
+    "plots",
+    "provenance",
+    "final_report.md",
+    "final_report.html",
+    "final_report.pdf",
+    "EVIDENCE_PLAN.md",
+    ".openscientist",
+    "DVC_REAL_VALIDATION_REPORT.md",
+    "dvc_validation_manifest.json",
+    "dvc_udwa_parity.json",
+)
+
+
+def _iter_dvc_evidence_files(
+    job_dir: Path,
+    excluded_paths: set[Path] | None = None,
+) -> Iterator[tuple[Path, Path]]:
+    """Yield (absolute_path, archive_relative_path) pairs for governed DVC evidence."""
+    excluded_paths = excluded_paths or set()
+    for pattern in _DVC_BUNDLE_PATTERNS:
+        target = job_dir / pattern
+        if not target.exists():
+            continue
+        if target.is_file():
+            if target.is_symlink() or target.resolve() in excluded_paths:
+                continue
+            yield target, target.relative_to(job_dir)
+        elif target.is_dir():
+            for root, dirnames, filenames in target.walk(top_down=True, follow_symlinks=False):
+                safe_dirnames = []
+                for dirname in dirnames:
+                    dir_path = root / dirname
+                    if (
+                        dirname in _EXCLUDE_DIRS
+                        or dir_path.is_symlink()
+                        or dir_path.resolve() in excluded_paths
+                    ):
+                        continue
+                    safe_dirnames.append(dirname)
+                dirnames[:] = safe_dirnames
+
+                for filename in filenames:
+                    file_path = root / filename
+                    if file_path.is_symlink() or file_path.resolve() in excluded_paths:
+                        continue
+                    if filename in _EXCLUDE_FILES:
+                        continue
+                    yield file_path, file_path.relative_to(job_dir)
+
+
+def create_dvc_evidence_bundle_zip(job_dir: Path, job_id: str) -> BytesIO:
+    """
+    Create a standalone, audit-ready ZIP archive of all governed DVC evidence.
+
+    Includes:
+    - Raw DVC dataset files and manifests (dvc_datasets/)
+    - Pre/Post FAIR, PREPARE, ARRIVE, and MNMS assessment checkpoints (dvc_assessments/)
+    - Signed cryptographic approval records (dvc_approvals/)
+    - Governed UDWA analysis results and immutable provenance (dvc_analyses/)
+    - Post-analysis bundle exports (dvc_bundles/)
+    - Visualizations and figures (plots/)
+    - Provenance traces (provenance/)
+    - Final scientific synthesis reports (final_report.md, final_report.html, final_report.pdf)
+    - Auto-generated DVC_EVIDENCE_MANIFEST.json with SHA-256 checksums of all bundled assets
+    """
+    import json
+    from datetime import datetime, timezone
+
+    zip_buffer = BytesIO()
+    manifest_entries: list[dict[str, Any]] = []
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path, arcname in _iter_dvc_evidence_files(job_dir):
+            sha256, size = _write_evidence_file(zip_file, file_path, arcname)
+            manifest_entries.append(
+                {
+                    "path": str(arcname).replace("\\", "/"),
+                    "sha256": sha256,
+                    "bytes": size,
+                }
+            )
+
+        # Generate cryptographic manifest
+        manifest_payload = {
+            "schema": "openscientist-dvc-evidence-bundle/0.1",
+            "job_id": job_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_files": len(manifest_entries),
+            "total_bytes": sum(item["bytes"] for item in manifest_entries),
+            "files": sorted(manifest_entries, key=lambda x: x["path"]),
+        }
+        zip_file.writestr(
+            "DVC_EVIDENCE_MANIFEST.json",
+            json.dumps(manifest_payload, indent=2, sort_keys=True),
+        )
+
+    zip_buffer.seek(0)
+    logger.info(
+        "Created DVC evidence bundle ZIP for job %s (%d files, %d bytes)",
+        job_id,
+        len(manifest_entries),
+        zip_buffer.getbuffer().nbytes,
+    )
+    return zip_buffer
