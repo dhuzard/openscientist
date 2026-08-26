@@ -42,6 +42,11 @@ from .pubmed_corpus import PubMedCorpusMeta
 
 # Review tokens
 from .review_token import ReviewToken
+from .scientific_state import (
+    AssayEvidenceObject,
+    AssayRunSnapshot,
+    PreclinicalContextSnapshot,
+)
 from .session import Session
 
 # Skill models
@@ -70,6 +75,9 @@ __all__ = [
     "PubMedArticle",
     "PubMedCorpusMeta",
     "ReviewToken",
+    "AssayEvidenceObject",
+    "AssayRunSnapshot",
+    "PreclinicalContextSnapshot",
     "Session",
     "Skill",
     "SkillSource",

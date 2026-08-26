@@ -790,7 +790,7 @@ class TestBuiltinSkillsIngestion:
         stats = await ingester.sync_source(db_session, source)
 
         assert stats["errors"] == 0
-        assert stats["created"] == 12
+        assert stats["created"] == len(list(BUILTIN_SKILLS_DIR.rglob("SKILL.md")))
 
         # Verify all expected slugs are present
         stmt = select(Skill).where(Skill.source_id == source.id)
@@ -798,6 +798,7 @@ class TestBuiltinSkillsIngestion:
         skills = {s.slug: s for s in result.scalars().all()}
 
         expected_slugs = {
+            "create-job-brief",
             "data-science",
             "digital-ventilated-cage-analysis",
             "genomics",
@@ -813,11 +814,11 @@ class TestBuiltinSkillsIngestion:
         }
         assert set(skills.keys()) == expected_slugs
 
-        # Verify 8 domain + 4 workflow category split
+        # Verify 8 domain + 5 workflow category split
         domain_skills = [s for s in skills.values() if s.category == "domain"]
         workflow_skills = [s for s in skills.values() if s.category == "workflow"]
         assert len(domain_skills) == 8
-        assert len(workflow_skills) == 4
+        assert len(workflow_skills) == 5
 
         # Spot-check one skill's metadata
         genomics = skills["genomics"]

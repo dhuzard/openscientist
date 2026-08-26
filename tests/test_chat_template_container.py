@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from contextlib import suppress
 from pathlib import Path
 from textwrap import dedent
@@ -75,19 +77,16 @@ class TestChatTemplateContainerIntegration:
         repo_root = Path(__file__).resolve().parents[1]
         tag = f"openscientist-chat-template-test:{uuid4().hex[:12]}"
 
-        try:
-            docker_client.images.build(
-                path=str(repo_root),
-                dockerfile="Dockerfile",
-                tag=tag,
-                rm=True,
-            )
-        except docker.errors.BuildError as exc:
-            log_tail = "\n".join(
-                str(entry.get("stream", "")).rstrip()
-                for entry in exc.build_log[-20:]
-                if isinstance(entry, dict)
-            )
+        build = subprocess.run(
+            ["docker", "build", "--file", "Dockerfile", "--tag", tag, "."],
+            cwd=repo_root,
+            env={**os.environ, "DOCKER_BUILDKIT": "1"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if build.returncode:
+            log_tail = "\n".join((build.stdout + build.stderr).splitlines()[-20:])
             pytest.fail(f"Failed to build test web image {tag}:\n{log_tail}")
 
         try:

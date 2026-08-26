@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -54,11 +55,16 @@ def require_docker(
     return 0
 
 
-def _run_commands(label: str, commands: Sequence[Sequence[str]]) -> int:
+def _run_commands(
+    label: str,
+    commands: Sequence[Sequence[str]],
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
     for command in commands:
         rendered = subprocess.list2cmdline(list(command))
         print(f"[{label}] $ {rendered}", flush=True)
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, env=env)
         if result.returncode:
             print(
                 f"[{label}] FAILED with exit code {result.returncode}: {rendered}",
@@ -118,6 +124,12 @@ def run_integration() -> int:
     docker_status = require_docker()
     if docker_status:
         return docker_status
+    integration_env = None
+    if sys.platform == "win32":
+        # Docker Desktop can run containers while failing to publish Ryuk's
+        # control port. Session-scoped context managers still remove the test
+        # PostgreSQL container, so disable only the unreliable sidecar here.
+        integration_env = {**os.environ, "TESTCONTAINERS_RYUK_DISABLED": "true"}
     return _run_commands(
         "quality-integration",
         (
@@ -129,6 +141,7 @@ def run_integration() -> int:
                 "--cov-report=term-missing",
             ),
         ),
+        env=integration_env,
     )
 
 

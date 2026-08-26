@@ -62,6 +62,7 @@ from openscientist.knowledge_state import KnowledgeState
 from openscientist.orchestrator.iteration import update_job_status
 from openscientist.pdf_generator import markdown_to_pdf
 from openscientist.preclinical_context.models import PreclinicalStudyContext
+from openscientist.scientific_persistence import persist_job_scientific_state
 from openscientist.skill_provenance import build_job_skill_provenance
 from openscientist.transcript.io import load_transcript
 from openscientist.usage_summary import (
@@ -1667,6 +1668,12 @@ def _show_assay_approval_dialog(
                             if rationale_input is not None
                             else None
                         ),
+                    )
+                    run_sync(
+                        persist_job_scientific_state(
+                            context.job_id,
+                            context.job_dir,
+                        )
                     )
                     dialog.close()
                     ui.notify(

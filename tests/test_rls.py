@@ -527,7 +527,7 @@ def test_user_facing_pages_use_get_session():
         if filepath.name == "__init__.py":
             continue
 
-        source = filepath.read_text()
+        source = filepath.read_text(encoding="utf-8")
 
         # Parse the AST to find AsyncSessionLocal() calls without thread_safe=True
         try:

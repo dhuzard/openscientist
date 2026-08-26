@@ -42,3 +42,20 @@ def test_docker_preflight_closes_client_after_failed_ping() -> None:
 
     assert quality.require_docker(lambda: client) == quality.BLOCKED_EXIT_CODE
     assert client.closed is True
+
+
+def test_windows_integration_disables_unreliable_ryuk_sidecar(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def run_commands(label, commands, *, env=None):
+        assert label == "quality-integration"
+        assert commands
+        captured.update(env or {})
+        return 0
+
+    monkeypatch.setattr(quality, "require_docker", lambda: 0)
+    monkeypatch.setattr(quality, "_run_commands", run_commands)
+    monkeypatch.setattr(quality.sys, "platform", "win32")
+
+    assert quality.run_integration() == 0
+    assert captured["TESTCONTAINERS_RYUK_DISABLED"] == "true"

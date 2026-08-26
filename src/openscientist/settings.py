@@ -11,6 +11,8 @@ import logging
 import os
 import re
 from functools import lru_cache
+from pathlib import PureWindowsPath
+from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -674,6 +676,54 @@ class FileSettings(BaseSettings):
         return v
 
 
+class ObjectStorageSettings(BaseSettings):
+    """Durable content-addressed storage for scientific state and evidence."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    backend: Literal["filesystem", "s3"] = Field(
+        default="filesystem", alias="OPENSCIENTIST_OBJECT_STORE_BACKEND"
+    )
+    filesystem_root: str = Field(
+        default="data/scientific-objects",
+        alias="OPENSCIENTIST_OBJECT_STORE_ROOT",
+    )
+    s3_bucket: str | None = Field(default=None, alias="OPENSCIENTIST_OBJECT_STORE_S3_BUCKET")
+    s3_prefix: str = Field(default="openscientist", alias="OPENSCIENTIST_OBJECT_STORE_S3_PREFIX")
+    s3_endpoint_url: str | None = Field(
+        default=None, alias="OPENSCIENTIST_OBJECT_STORE_S3_ENDPOINT_URL"
+    )
+    s3_region: str | None = Field(default=None, alias="OPENSCIENTIST_OBJECT_STORE_S3_REGION")
+    s3_server_side_encryption: str | None = Field(
+        default=None,
+        alias="OPENSCIENTIST_OBJECT_STORE_S3_SERVER_SIDE_ENCRYPTION",
+    )
+    s3_access_key_id: str | None = Field(
+        default=None,
+        alias="OPENSCIENTIST_OBJECT_STORE_S3_ACCESS_KEY_ID",
+    )
+    s3_secret_access_key: str | None = Field(
+        default=None,
+        alias="OPENSCIENTIST_OBJECT_STORE_S3_SECRET_ACCESS_KEY",
+    )
+    s3_session_token: str | None = Field(
+        default=None,
+        alias="OPENSCIENTIST_OBJECT_STORE_S3_SESSION_TOKEN",
+    )
+
+    @model_validator(mode="after")
+    def require_s3_bucket(self) -> "ObjectStorageSettings":
+        if self.backend == "s3" and not self.s3_bucket:
+            raise ValueError("OPENSCIENTIST_OBJECT_STORE_S3_BUCKET is required for the s3 backend")
+        if bool(self.s3_access_key_id) != bool(self.s3_secret_access_key):
+            raise ValueError("S3 access key id and secret access key must be configured together")
+        return self
+
+
 class ContainerSettings(BaseSettings):
     """Container isolation configuration."""
 
@@ -757,7 +807,7 @@ class PhenixSettings(BaseSettings):
             return None
 
         # Must be an absolute path
-        if not value.startswith("/"):
+        if not value.startswith("/") and not PureWindowsPath(value).is_absolute():
             raise ValueError(
                 f"{env_name} must be an absolute path (starting with '/'), got: '{value}'\n"
                 f"  Example: {env_name}={example}"
@@ -893,6 +943,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = Field(default_factory=AuthSettings)
     budget: BudgetSettings = Field(default_factory=BudgetSettings)
     file: FileSettings = Field(default_factory=FileSettings)
+    object_storage: ObjectStorageSettings = Field(default_factory=ObjectStorageSettings)
     container: ContainerSettings = Field(default_factory=ContainerSettings)
     phenix: PhenixSettings = Field(default_factory=PhenixSettings)
     berkeley_lab: BerkeleyLabSettings = Field(default_factory=BerkeleyLabSettings)

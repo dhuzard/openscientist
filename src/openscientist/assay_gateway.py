@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ CapabilityVerifier = Callable[[str, str, str, str], bool]
 ResultTransformer = Callable[[str, dict[str, Any], Any], Any]
 ErrorMapper = Callable[[Exception], tuple[int, str, bool] | None]
 JobDirectoryResolver = Callable[[str], Path]
+StatePersister = Callable[[str, Path], Awaitable[None]]
 
 
 def _import_symbol(path: str) -> object:
@@ -124,6 +125,7 @@ def create_assay_gateway_app(
     error_mapper: ErrorMapper | None = None,
     legacy_assay_id: str | None = None,
     job_dir_resolver: JobDirectoryResolver = _job_dir,
+    state_persister: StatePersister | None = None,
 ) -> Starlette:
     """Build a gateway whose permissions and handlers come only from adapters."""
 
@@ -210,6 +212,8 @@ def create_assay_gateway_app(
                 )
                 if result_transformer is not None:
                     result = result_transformer(action_name, arguments, result)
+                if state_persister is not None:
+                    await state_persister(job_id, job_dir)
             finally:
                 active_runs.discard(active_key)
             safe_result = redact_sensitive_data(result)

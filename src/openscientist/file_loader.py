@@ -14,8 +14,9 @@ from openscientist.exceptions import FileLoadError, FileTooBigError, Unsupported
 from openscientist.settings import get_settings
 
 # Try to import python-magic, but make it optional
+magic: Any | None = None
 try:
-    import magic
+    import magic  # type: ignore[no-redef]
 
     HAS_MAGIC = True
 except (ImportError, OSError):
@@ -121,7 +122,7 @@ def get_file_info(file_path: Path) -> dict[str, Any]:
     extension = file_path.suffix.lower()
 
     # Detect MIME type using python-magic (if available)
-    if HAS_MAGIC:
+    if magic is not None:
         try:
             mime_type = magic.from_file(str(file_path), mime=True)
         except (ValueError, OSError) as e:
@@ -281,7 +282,7 @@ def validate_uploaded_file(file_path: Path, content: bytes) -> None:
     extension = file_path.suffix.lower()
 
     # Detect actual file type from content
-    if HAS_MAGIC:
+    if magic is not None:
         try:
             mime_type = magic.from_buffer(content, mime=True)
         except (ValueError, OSError) as e:

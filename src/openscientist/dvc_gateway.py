@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse
 
 from openscientist.assay_gateway import (
     ASSAY_CAPABILITY_HEADER,
+    StatePersister,
     create_assay_gateway_app,
 )
 from openscientist.dvc_gateway_client import (
@@ -179,6 +180,7 @@ def create_dvc_gateway_app(
     *,
     master_key: Callable[[], str],
     service_factory: ServiceFactory = DVCAcquisitionService,
+    state_persister: StatePersister | None = None,
 ) -> Starlette:
     """Build the DVC-compatible route from the registered assay contract."""
 
@@ -233,6 +235,7 @@ def create_dvc_gateway_app(
         error_mapper=map_error,
         legacy_assay_id="dvc",
         job_dir_resolver=_job_dir,
+        state_persister=state_persister,
     )
 
 
@@ -251,7 +254,12 @@ async def start_assay_gateway() -> None:
     global _gateway_server, _gateway_task
     if _gateway_task is not None:
         return
-    app = create_dvc_gateway_app(master_key=lambda: get_settings().secret_key)
+    from openscientist.scientific_persistence import persist_job_scientific_state
+
+    app = create_dvc_gateway_app(
+        master_key=lambda: get_settings().secret_key,
+        state_persister=persist_job_scientific_state,
+    )
     config = uvicorn.Config(app, host="0.0.0.0", port=DVC_GATEWAY_PORT, log_level="warning")
     _gateway_server = _NoSignalServer(config)
     _gateway_task = asyncio.create_task(_gateway_server.serve())

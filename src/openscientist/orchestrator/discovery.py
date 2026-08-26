@@ -934,8 +934,8 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
         "description": getattr(job, "description", None),
         "max_iterations": job.max_iterations,
         "resume_iteration": max(
-            int(job.resume_iteration or 1),
-            int(job.current_iteration or 1),
+            int(getattr(job, "resume_iteration", None) or 1),
+            int(getattr(job, "current_iteration", None) or 1),
         ),
         "use_hypotheses": bool(job.use_hypotheses),
         "assigned_skill_ids": getattr(job, "assigned_skill_ids", None),

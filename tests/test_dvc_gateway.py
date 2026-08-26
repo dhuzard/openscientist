@@ -108,6 +108,33 @@ def test_gateway_resolves_job_path_server_side_and_dispatches(
     service.test_connection.assert_called_once_with("default")
 
 
+def test_gateway_persists_scientific_state_after_successful_dispatch(
+    jobs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_dir = jobs_root / "job-1"
+    job_dir.mkdir()
+    service = MagicMock()
+    service.test_connection.return_value = {"accepted": True}
+    persisted: list[tuple[str, Path]] = []
+
+    async def persist(job_id: str, resolved_job_dir: Path) -> None:
+        persisted.append((job_id, resolved_job_dir))
+
+    monkeypatch.setattr("openscientist.job_container.secrets.time.time", lambda: _NOW)
+    client = TestClient(
+        create_dvc_gateway_app(
+            master_key=lambda: _MASTER,
+            service_factory=lambda _job_dir: service,
+            state_persister=persist,
+        )
+    )
+
+    response = _post(client)
+
+    assert response.status_code == 200
+    assert persisted == [("job-1", job_dir)]
+
+
 def test_gateway_rejects_capability_owned_by_another_job(
     jobs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

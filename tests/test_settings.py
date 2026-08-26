@@ -13,6 +13,7 @@ from openscientist.settings import (
     DatabaseSettings,
     DevSettings,
     FileSettings,
+    ObjectStorageSettings,
     PhenixSettings,
     ProviderSettings,
     clear_settings_cache,
@@ -383,8 +384,9 @@ class TestProviderContainerEnvVars:
         assert env["OPENSCIENTIST_PROVIDER"] == "openai"
         assert env["OPENAI_API_KEY"] == "sk-openai-test"
 
-    def test_openai_api_key_omitted_when_unset(self):
-        settings = ProviderSettings(OPENSCIENTIST_PROVIDER="openai")
+    def test_openai_api_key_omitted_when_unset(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        settings = ProviderSettings(_env_file=None, OPENSCIENTIST_PROVIDER="openai")
         assert "OPENAI_API_KEY" not in settings.get_container_env_vars()
 
     def test_azure_openai_vars_passed_for_codex_provider(self):
@@ -589,9 +591,10 @@ class TestAuthSettings:
             AuthSettings(BOOTSTRAP_ADMIN_EMAILS="valid@example.com,not-an-email")
         assert "BOOTSTRAP_ADMIN_EMAILS" in str(exc_info.value)
 
-    def test_bootstrap_admin_emails_defaults_to_empty_set(self):
+    def test_bootstrap_admin_emails_defaults_to_empty_set(self, monkeypatch):
         """BOOTSTRAP_ADMIN_EMAILS is empty when unset."""
-        settings = AuthSettings()
+        monkeypatch.delenv("BOOTSTRAP_ADMIN_EMAILS", raising=False)
+        settings = AuthSettings(_env_file=None)
         assert settings.bootstrap_admin_emails_set == set()
 
     def test_valid_github_oauth(self):
@@ -735,6 +738,28 @@ class TestFileSettings:
         """Default file size is 1000 MB."""
         settings = FileSettings()
         assert settings.max_file_size_mb == 1000
+
+
+class TestObjectStorageSettings:
+    def test_filesystem_backend_is_durable_default(self):
+        settings = ObjectStorageSettings(_env_file=None)
+
+        assert settings.backend == "filesystem"
+        assert settings.filesystem_root == "data/scientific-objects"
+
+    def test_s3_backend_requires_bucket(self):
+        with pytest.raises(ValidationError, match="S3_BUCKET is required"):
+            ObjectStorageSettings(
+                _env_file=None,
+                OPENSCIENTIST_OBJECT_STORE_BACKEND="s3",
+            )
+
+    def test_dedicated_s3_credentials_are_paired(self):
+        with pytest.raises(ValidationError, match="configured together"):
+            ObjectStorageSettings(
+                _env_file=None,
+                OPENSCIENTIST_OBJECT_STORE_S3_ACCESS_KEY_ID="access-key",
+            )
 
 
 class TestContainerSettings:
