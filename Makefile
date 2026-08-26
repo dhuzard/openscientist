@@ -39,7 +39,7 @@ help:
 	@echo ""
 	@echo "Quality:"
 	@echo "  make quality-fast        - Lock, compile, lint, format, and type checks"
-	@echo "  make quality-contract    - Governed DVC and preclinical contract tests"
+	@echo "  make quality-contract    - Governed assay, context, and team contract tests"
 	@echo "  make quality-integration - Full coverage suite (requires Docker)"
 	@echo ""
 	@echo "Deployment:"

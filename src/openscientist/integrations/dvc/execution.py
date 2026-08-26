@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
@@ -16,6 +16,16 @@ from uuid import uuid4
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openscientist.assays import (
+    AnalysisRunStore,
+    ApprovalDecision,
+    EvidenceArtifact,
+    make_analysis_run_id,
+)
+from openscientist.assays import (
+    OperationContract as GenericOperationContract,
+)
+from openscientist.integrations.dvc.adapter import DVC_OPERATION_CONTRACTS
 from openscientist.integrations.dvc.security import (
     contains_sensitive_key,
     redact_sensitive_data,
@@ -26,6 +36,7 @@ from openscientist.integrations.udwa import inspect_udwa_compatibility
 from openscientist.preclinical_context.models import EvidenceStatus, PreclinicalStudyContext
 
 AnalysisAssetRole = Literal["result", "provenance"]
+OperationContract = GenericOperationContract
 
 
 class StrictModel(BaseModel):
@@ -98,70 +109,7 @@ class DVCAnalysisResult(StrictModel):
     provenance: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class OperationContract:
-    contract_version: str
-    input_roles: tuple[str, ...]
-    required_context: tuple[str, ...]
-    approval_required: bool
-    output_evidence: tuple[str, ...]
-    numerical_tolerance: str
-    allowed_modes: tuple[str, ...] = ("exploratory", "confirmatory", "monitoring")
-    vendor_equivalence: Literal["not_claimed", "validated"] = "not_claimed"
-    conformance_fixture: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.vendor_equivalence == "validated" and not self.conformance_fixture:
-            raise ValueError("Vendor-equivalent operation contracts require a conformance fixture.")
-
-
-_STANDARD_INPUT_ROLES = ("normalized_measurements",)
-_STANDARD_OUTPUT_EVIDENCE = ("result.json", "provenance.json")
-
-
-OPERATION_CONTRACTS: dict[str, OperationContract] = {
-    "check_data_sanity": OperationContract(
-        contract_version="1.0.0",
-        input_roles=_STANDARD_INPUT_ROLES,
-        required_context=(),
-        approval_required=False,
-        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
-        numerical_tolerance="not_applicable",
-    ),
-    "summarize_time_bins": OperationContract(
-        contract_version="1.0.0",
-        input_roles=_STANDARD_INPUT_ROLES,
-        required_context=("design.experimental_unit",),
-        approval_required=True,
-        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
-        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
-    ),
-    "summarize_light_dark": OperationContract(
-        contract_version="1.0.0",
-        input_roles=_STANDARD_INPUT_ROLES,
-        required_context=(
-            "design.experimental_unit",
-            "environment.timezone",
-            "environment.light_schedule",
-        ),
-        approval_required=True,
-        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
-        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
-    ),
-    "summarize_circadian_cosinor": OperationContract(
-        contract_version="1.0.0",
-        input_roles=_STANDARD_INPUT_ROLES,
-        required_context=(
-            "design.experimental_unit",
-            "environment.timezone",
-            "environment.light_schedule",
-            "acquisition.temporal_resolution",
-        ),
-        approval_required=True,
-        output_evidence=_STANDARD_OUTPUT_EVIDENCE,
-        numerical_tolerance="canonical_json_exact_against_pinned_udwa",
-    ),
-}
+OPERATION_CONTRACTS = DVC_OPERATION_CONTRACTS
 
 
 _BIOLOGICAL_TIME_OPERATIONS = frozenset({"summarize_light_dark", "summarize_circadian_cosinor"})
@@ -242,6 +190,19 @@ def canonical_checkpoint_sha256(checkpoint: dict[str, Any]) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError("Assessment checkpoint must be canonical JSON.") from exc
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def dvc_analysis_run_id(request: DVCAnalysisRequest) -> str:
+    """Return the stable run identity shared by approval and execution."""
+
+    return make_analysis_run_id(
+        study_id=request.context.study_id,
+        assay_id="dvc",
+        dataset_id=request.dataset_id,
+        operation_id=request.operation,
+        context_sha256=canonical_context_sha256(request.context),
+        parameters_sha256=canonical_parameters_sha256(request.parameters),
+    )
 
 
 def operation_contract_sha256(operation: str) -> str:
@@ -444,7 +405,13 @@ class DVCAnalysisService:
 
         existing = self._find_matching_execution(request, request_sha256=request_sha256)
         if existing is not None:
-            self._resume_workflow(request, existing.execution_id)
+            self._resume_workflow(
+                request,
+                existing.execution_id,
+                evidence_paths=tuple(
+                    self.job_dir / asset.relative_path for asset in existing.assets
+                ),
+            )
             return existing
 
         self._resume_workflow(request)
@@ -458,7 +425,7 @@ class DVCAnalysisService:
             error = DVCAnalysisError(
                 "Pinned UDWA dependency is incompatible: " + "; ".join(details)
             )
-            self._record_execution_failure(request_sha256, error)
+            self._record_execution_failure(request, request_sha256, error)
             raise error
 
         dataframe = (
@@ -474,21 +441,21 @@ class DVCAnalysisService:
             output = run_tool(request.operation, dataframe, **request.parameters)
         except Exception as exc:  # noqa: BLE001
             error = DVCAnalysisError(f"UDWA execution failed: {redact_sensitive_text(str(exc))}")
-            self._record_execution_failure(request_sha256, error)
+            self._record_execution_failure(request, request_sha256, error)
             raise error from exc
         if not isinstance(output, dict):
             error = DVCAnalysisError("UDWA execution returned an invalid result.")
-            self._record_execution_failure(request_sha256, error)
+            self._record_execution_failure(request, request_sha256, error)
             raise error
         output = dict(redact_sensitive_data(output))
         if output.get("error"):
             error = DVCAnalysisError(f"UDWA execution failed: {output['error']}")
-            self._record_execution_failure(request_sha256, error)
+            self._record_execution_failure(request, request_sha256, error)
             raise error
         try:
             result_fields = _validated_result_fields(output)
         except DVCAnalysisError as error:
-            self._record_execution_failure(request_sha256, error)
+            self._record_execution_failure(request, request_sha256, error)
             raise
         completed_at = datetime.now(timezone.utc)
 
@@ -513,6 +480,7 @@ class DVCAnalysisService:
         provenance = {
             "schema": "openscientist-dvc-analysis-provenance/0.1",
             "execution_id": execution_id,
+            "analysis_run_id": dvc_analysis_run_id(request),
             "request_sha256": request_sha256,
             "dataset_id": request.dataset_id,
             "dataset_manifest_sha256": dataset_manifest_sha256,
@@ -551,7 +519,11 @@ class DVCAnalysisService:
             json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
         )
 
-        self._resume_workflow(request, execution_id)
+        self._resume_workflow(
+            request,
+            execution_id,
+            evidence_paths=(result_path, provenance_path),
+        )
 
         return DVCAnalysisResult(
             execution_id=execution_id,
@@ -662,8 +634,99 @@ class DVCAnalysisService:
         self,
         request: DVCAnalysisRequest,
         execution_id: str | None = None,
+        evidence_paths: tuple[Path, ...] = (),
     ) -> None:
-        store = DVCWorkflowStore(self.job_dir)
+        store = self._workflow_store(request)
+        store.record_dataset(request.dataset_id)
+        store.record_checkpoint(
+            request.pre_analysis_checkpoint_id,
+            is_pre=True,
+            context_sha256=canonical_context_sha256(request.context),
+        )
+        if request.approval is not None:
+            decision = ApprovalDecision(
+                approval_id=request.approval.approval_id,
+                run_id=store.run_id,
+                assay_id="dvc",
+                dataset_id=request.dataset_id,
+                operation_id=request.operation,
+                contract_sha256=operation_contract_sha256(request.operation),
+                context_sha256=request.approval.context_sha256,
+                parameters_sha256=request.approval.parameters_sha256,
+                decided_by=request.approval.approved_by,
+                decided_at=request.approval.approved_at,
+                decision="approved",
+            )
+            store.record_approval(
+                request.approval.approval_id,
+                checkpoint_id=request.pre_analysis_checkpoint_id,
+                dataset_id=request.dataset_id,
+                actor=request.approval.approved_by,
+                decision=decision,
+            )
+        if execution_id is not None:
+            store.record_execution(
+                execution_id,
+                dataset_id=request.dataset_id,
+                operation=request.operation,
+            )
+            for path in evidence_paths:
+                role = "result" if path.name == "result.json" else "provenance"
+                store.record_evidence(
+                    EvidenceArtifact(
+                        artifact_id=f"{execution_id}:{role}",
+                        run_id=store.run_id,
+                        assay_id="dvc",
+                        dataset_id=request.dataset_id,
+                        role=role,
+                        relative_path=str(path.relative_to(self.job_dir)),
+                        sha256=_sha256(path),
+                        bytes=path.stat().st_size,
+                        media_type="application/json",
+                    )
+                )
+        # Maintain the documented legacy job-level summary as a compatibility
+        # projection. The run-scoped record above is the canonical workflow.
+        legacy = DVCWorkflowStore(self.job_dir)
+        legacy.record_dataset(request.dataset_id)
+        legacy.record_checkpoint(
+            request.pre_analysis_checkpoint_id,
+            is_pre=True,
+            context_sha256=canonical_context_sha256(request.context),
+        )
+        if request.approval is not None:
+            legacy.record_approval(
+                request.approval.approval_id,
+                checkpoint_id=request.pre_analysis_checkpoint_id,
+                dataset_id=request.dataset_id,
+                actor=request.approval.approved_by,
+            )
+        if execution_id is not None:
+            legacy.record_execution(
+                execution_id,
+                dataset_id=request.dataset_id,
+                operation=request.operation,
+            )
+
+    def _workflow_store(self, request: DVCAnalysisRequest) -> AnalysisRunStore:
+        return DVCWorkflowStore.for_dvc_analysis(
+            self.job_dir,
+            study_id=request.context.study_id,
+            dataset_id=request.dataset_id,
+            operation_id=request.operation,
+            context_sha256=canonical_context_sha256(request.context),
+            parameters_sha256=canonical_parameters_sha256(request.parameters),
+        )
+
+    def _record_execution_failure(
+        self,
+        request: DVCAnalysisRequest,
+        request_sha256: str,
+        error: Exception,
+    ) -> None:
+        message_hash = hashlib.sha256(str(error).encode("utf-8")).hexdigest()
+        store = self._workflow_store(request)
+        # A failed execution is still attached to a fully identified run.
         store.record_dataset(request.dataset_id)
         store.record_checkpoint(
             request.pre_analysis_checkpoint_id,
@@ -677,16 +740,7 @@ class DVCAnalysisService:
                 dataset_id=request.dataset_id,
                 actor=request.approval.approved_by,
             )
-        if execution_id is not None:
-            store.record_execution(
-                execution_id,
-                dataset_id=request.dataset_id,
-                operation=request.operation,
-            )
-
-    def _record_execution_failure(self, request_sha256: str, error: Exception) -> None:
-        message_hash = hashlib.sha256(str(error).encode("utf-8")).hexdigest()
-        DVCWorkflowStore(self.job_dir).record_failure(
+        store.record_failure(
             "governed_udwa_execution",
             error,
             idempotency_key=f"execution-failure:{request_sha256}:{message_hash}",

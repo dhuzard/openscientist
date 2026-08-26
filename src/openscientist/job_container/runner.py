@@ -25,6 +25,12 @@ from typing import Any, cast
 
 import docker
 from docker import errors as docker_errors
+from openscientist.assay_gateway_client import (
+    ASSAY_CAPABILITIES_ENV,
+    ASSAY_GATEWAY_URL_ENV,
+    container_assay_gateway_base_url,
+)
+from openscientist.assays.capabilities import make_assay_capability_map
 from openscientist.dvc_gateway_client import (
     DVC_CAPABILITY_ENV,
     DVC_GATEWAY_URL_ENV,
@@ -186,6 +192,8 @@ class JobContainerRunner:
                     # The only DVC-related values an agent may receive.
                     DVC_CAPABILITY_ENV: make_dvc_capability(settings.secret_key, job_id),
                     DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
+                    ASSAY_CAPABILITIES_ENV: make_assay_capability_map(settings.secret_key, job_id),
+                    ASSAY_GATEWAY_URL_ENV: container_assay_gateway_base_url(),
                 }
             )
             # FAIR-VCG is addressed through a non-secret internal service URL.

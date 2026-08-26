@@ -87,7 +87,7 @@ def run_fast() -> int:
 
 
 def run_contract() -> int:
-    """Run the governed DVC and preclinical contract suite without Docker."""
+    """Run governed assay, workflow, context, and team contracts without Docker."""
 
     return _run_commands(
         "quality-contract",
@@ -98,10 +98,15 @@ def run_contract() -> int:
                 "pytest",
                 "-q",
                 "tests/integrations",
+                "tests/assays",
+                "tests/scientific_team",
                 "tests/api/test_dvc_governance_api.py",
                 "tests/preclinical_context",
                 "tests/dvc",
                 "tests/tools/test_dvc_runtime_smoke.py",
+                "tests/test_assay_capabilities.py",
+                "tests/test_dvc_gateway.py",
+                "tests/test_artifact_packager.py",
             ),
         ),
     )

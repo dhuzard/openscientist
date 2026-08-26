@@ -22,7 +22,14 @@ from openscientist.agent.factory import backend_for_provider_id
 from openscientist.agent_task_provenance import build_job_agent_task_provenance
 from openscientist.artifact_packager import (
     create_artifacts_zip,
-    create_dvc_evidence_bundle_zip,
+    create_assay_evidence_bundle_zip,
+)
+from openscientist.assays import AssayAdapter, get_assay_registry
+from openscientist.assays.review import (
+    AssayReviewItem,
+    create_assay_review_approval,
+    list_assay_reviews,
+    load_assay_review_context,
 )
 from openscientist.async_tasks import run_sync
 from openscientist.auth import (
@@ -39,12 +46,6 @@ from openscientist.dvc.governance_status import (
     DVCGovernanceStatus,
     derive_dvc_governance_status,
 )
-from openscientist.integrations.dvc.approvals import (
-    create_dvc_approval_record,
-    list_dvc_pre_analysis_checkpoints,
-    load_checkpoint_context,
-)
-from openscientist.integrations.dvc.execution import OPERATION_CONTRACTS
 from openscientist.job.types import JobInfo, JobStatus
 from openscientist.job_chat import (
     extract_chat_artifact_images,
@@ -1505,7 +1506,7 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
 
     render_job_stats()
     _render_research_question_card(context)
-    _render_dvc_pending_approvals_banner(context)
+    _render_assay_pending_approvals_banner(context)
     _render_job_runtime_controls(context)
     ui.label("Investigation Timeline").classes("text-h6 font-bold mb-2")
     render_timeline()
@@ -1533,11 +1534,13 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
         context.active_timers.append(stats_timer_holder["timer"])
 
 
-def _show_dvc_approval_dialog(
+def _show_assay_approval_dialog(
     context: _JobDetailContext,
-    checkpoint: dict[str, Any],
+    review: AssayReviewItem,
 ) -> None:
-    """Render the graphical review and approval dialog for a governed DVC checkpoint."""
+    """Render a review dialog from an assay adapter's declared panel contract."""
+    adapter = review.adapter
+    checkpoint = review.checkpoint
     checkpoint_id = checkpoint["checkpoint_id"]
     dataset_id = checkpoint["dataset_id"]
     context_sha256 = checkpoint.get("context_sha256", "")
@@ -1547,15 +1550,27 @@ def _show_dvc_approval_dialog(
         with ui.row().classes("w-full items-center gap-2 border-b pb-2"):
             ui.icon("verified_user", size="md").classes("text-indigo-600")
             with ui.column().classes("gap-0"):
-                ui.label("Review & Approve Governed DVC Analysis").classes("text-lg font-bold")
+                ui.label(f"Review & Approve {adapter.display_name}").classes("text-lg font-bold")
                 ui.label(f"Dataset: {dataset_id} · Checkpoint: {checkpoint_id}").classes(
                     "text-xs text-gray-500 font-mono"
                 )
 
         ui.label(
-            "Governed UDWA execution requires explicit scientific review of pre-analysis "
-            "FAIR/PREPARE/ARRIVE readiness and binding cryptographic approval."
+            "Execution requires an explicit, run-bound scientific decision. The approval "
+            "is cryptographically bound to the registered operation contract, context, and parameters."
         ).classes("text-sm text-gray-600 mt-1")
+
+        with ui.expansion("Contract review summary", icon="fact_check", value=True).classes(
+            "w-full mt-2"
+        ):
+            for field_name in adapter.review_panel.summary_fields:
+                if field_name not in checkpoint:
+                    continue
+                value = checkpoint[field_name]
+                rendered = (
+                    json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+                )
+                ui.label(f"{field_name}: {rendered}").classes("text-xs font-mono")
 
         if assessments:
             with ui.expansion(
@@ -1576,12 +1591,22 @@ def _show_dvc_approval_dialog(
 
         with ui.column().classes("w-full gap-2 mt-3"):
             ui.label("Approved Operation & Parameters").classes("font-semibold text-sm")
-            operation_options = list(OPERATION_CONTRACTS.keys())
+            bound_operation = checkpoint.get("operation_id")
+            operation_options = (
+                [str(bound_operation)]
+                if bound_operation
+                else [
+                    operation_id
+                    for operation_id, contract in adapter.operation_contracts.items()
+                    if contract.approval_required
+                ]
+            )
+            default_operation = operation_options[0]
             operation_select = (
                 ui.select(
                     options=operation_options,
-                    value="summarize_time_bins",
-                    label="Governed UDWA Operation",
+                    value=default_operation,
+                    label="Governed Assay Operation",
                 )
                 .props("outlined dense")
                 .classes("w-full")
@@ -1594,6 +1619,13 @@ def _show_dvc_approval_dialog(
                 )
                 .props("outlined dense rows=2")
                 .classes("w-full font-mono text-xs")
+            )
+            rationale_input = (
+                ui.textarea(label="Scientific rationale")
+                .props("outlined dense rows=2")
+                .classes("w-full")
+                if "rationale" in adapter.review_panel.decision_fields
+                else None
             )
 
         with ui.row().classes("items-center gap-2 text-xs text-gray-500 font-mono mt-2"):
@@ -1614,22 +1646,27 @@ def _show_dvc_approval_dialog(
                 user_id = get_current_user_id()
                 identity = str(user_id) if user_id else "authenticated_user"
 
-                study_context = load_checkpoint_context(context.job_dir, checkpoint_id)
+                study_context = load_assay_review_context(context.job_dir, adapter, checkpoint_id)
                 if study_context is None:
                     study_context = PreclinicalStudyContext(
                         study_id=context.job_id,
                     )
 
                 try:
-                    create_dvc_approval_record(
+                    create_assay_review_approval(
                         job_dir=context.job_dir,
-                        dataset_id=dataset_id,
-                        pre_analysis_checkpoint_id=checkpoint_id,
+                        adapter=adapter,
+                        checkpoint=checkpoint,
                         operation=str(operation_select.value),
                         context=study_context,
                         parameters=params,
                         approved_by=identity,
                         created_via="web_ui",
+                        rationale=(
+                            str(rationale_input.value).strip() or None
+                            if rationale_input is not None
+                            else None
+                        ),
                     )
                     dialog.close()
                     ui.notify(
@@ -1648,13 +1685,13 @@ def _show_dvc_approval_dialog(
     dialog.open()
 
 
-def _render_dvc_pending_approvals_banner(context: _JobDetailContext) -> None:
-    """Display pending DVC pre-analysis approvals when relevant."""
-    checkpoints = list_dvc_pre_analysis_checkpoints(context.job_dir)
-    if not checkpoints:
-        return
-
-    unapproved = [cp for cp in checkpoints if not cp.get("approved")]
+def _render_assay_pending_approvals_banner(context: _JobDetailContext) -> None:
+    """Display pending approvals discovered through registered review contracts."""
+    unapproved = [
+        review
+        for review in list_assay_reviews(context.job_dir)
+        if not review.checkpoint.get("approved")
+    ]
     if not unapproved:
         return
 
@@ -1667,19 +1704,21 @@ def _render_dvc_pending_approvals_banner(context: _JobDetailContext) -> None:
             with ui.column().classes("gap-0"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon("verified_user", size="sm").classes("text-amber-700")
-                    ui.label(f"Governed DVC Analysis Pending Approval ({len(unapproved)})").classes(
-                        "font-bold text-amber-900"
-                    )
+                    ui.label(
+                        f"Governed Assay Analysis Pending Approval ({len(unapproved)})"
+                    ).classes("font-bold text-amber-900")
                 ui.label(
                     "Pre-analysis assessment is complete. Review findings and grant cryptographic approval "
                     "for the agent to execute governed UDWA analytics."
                 ).classes("text-xs text-amber-800")
             with ui.row().classes("gap-2"):
-                for cp in unapproved:
+                for review in unapproved:
+                    checkpoint = review.checkpoint
                     ui.button(
-                        f"Review {cp['dataset_id'][:12]}...",
+                        f"Review {review.adapter.adapter_id}: "
+                        f"{str(checkpoint['dataset_id'])[:12]}...",
                         icon="fact_check",
-                        on_click=lambda c=cp: _show_dvc_approval_dialog(context, c),
+                        on_click=lambda item=review: _show_assay_approval_dialog(context, item),
                     ).props("color=amber-9 text-white dense")
 
 
@@ -1692,13 +1731,16 @@ def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
         ui.notify("Failed to create ZIP. Please try again.", type="negative")
 
 
-def _download_dvc_evidence_bundle_zip(job_dir: Path, job_id: str) -> None:
+def _download_assay_evidence_bundle_zip(job_dir: Path, job_id: str, adapter: AssayAdapter) -> None:
     try:
-        zip_buffer = create_dvc_evidence_bundle_zip(job_dir, job_id)
-        ui.download(zip_buffer.getvalue(), filename=f"{job_id}_dvc_evidence_bundle.zip")
+        zip_buffer = create_assay_evidence_bundle_zip(job_dir, job_id, adapter.adapter_id)
+        ui.download(
+            zip_buffer.getvalue(),
+            filename=f"{job_id}_{adapter.adapter_id}_evidence_bundle.zip",
+        )
     except Exception as exc:
-        logger.error("Failed to create DVC evidence ZIP: %s", exc, exc_info=True)
-        ui.notify("Failed to create DVC evidence bundle. Please try again.", type="negative")
+        logger.error("Failed to create assay evidence ZIP: %s", exc, exc_info=True)
+        ui.notify("Failed to create assay evidence bundle. Please try again.", type="negative")
 
 
 def _download_pdf_report(report_path: Path, pdf_path: Path, job_id: str) -> None:
@@ -1781,6 +1823,14 @@ def _confirm_regenerate_report(context: _JobDetailContext) -> None:
     dialog.open()
 
 
+def _assay_evidence_present(job_dir: Path, adapter: AssayAdapter) -> bool:
+    return any(
+        candidate.is_file()
+        for pattern in adapter.evidence_patterns
+        for candidate in job_dir.glob(pattern.glob)
+    )
+
+
 def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_path: Path) -> None:
     with ui.row().classes("w-full justify-end mb-4 gap-2 flex-wrap"):
         if pdf_path.exists() or report_path.exists():
@@ -1792,15 +1842,14 @@ def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_pa
         else:
             ui.button("PDF Unavailable", icon="picture_as_pdf").props("color=grey outline disabled")
 
-        dvc_present = (
-            (context.job_dir / "dvc_datasets").exists()
-            or (context.job_dir / "dvc_assessments").exists()
-            or (context.job_dir / "dvc_analyses").exists()
-        )
-        if dvc_present:
+        for adapter in get_assay_registry().list():
+            if not _assay_evidence_present(context.job_dir, adapter):
+                continue
             ui.button(
-                "Download DVC Evidence Bundle",
-                on_click=lambda: _download_dvc_evidence_bundle_zip(context.job_dir, context.job_id),
+                f"Download {adapter.display_name} Evidence",
+                on_click=lambda selected=adapter: _download_assay_evidence_bundle_zip(
+                    context.job_dir, context.job_id, selected
+                ),
                 icon="verified_user",
             ).props("color=positive outline")
 
@@ -2771,6 +2820,7 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         _render_missing_report_state(context)
         return
 
+    _render_assay_contract_panels(context.job_dir)
     dvc_governance = derive_dvc_governance_status(context.job_dir)
     if dvc_governance is not None:
         _render_dvc_governance_status(dvc_governance)
@@ -2786,6 +2836,34 @@ def _render_report_tab(context: _JobDetailContext) -> None:
         return
 
     _render_missing_report_state(context)
+
+
+def _render_assay_contract_panels(job_dir: Path) -> None:
+    """Render assay review summaries directly from registered contracts."""
+
+    for adapter in get_assay_registry().list():
+        if not _assay_evidence_present(job_dir, adapter):
+            continue
+        panel = adapter.review_panel
+        with ui.expansion(panel.title, icon="policy").classes("w-full mb-3"):
+            ui.label(
+                f"Adapter {adapter.adapter_id} v{adapter.adapter_version} · "
+                f"{len(adapter.operation_contracts)} governed operations"
+            ).classes("text-sm text-gray-600")
+            for contract in adapter.operation_contracts.values():
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    ui.label(contract.display_name).classes("text-sm font-medium")
+                    ui.badge(f"contract v{contract.contract_version}", color="gray").props(
+                        "outline"
+                    )
+                    if contract.approval_required:
+                        ui.badge("approval required", color="amber")
+                    for validator_id in contract.validator_ids:
+                        ui.badge(f"validator: {validator_id}", color="blue").props("outline")
+                if contract.required_context:
+                    ui.label("Required context: " + ", ".join(contract.required_context)).classes(
+                        "text-xs text-gray-500"
+                    )
 
 
 def _render_dvc_governance_status(status: DVCGovernanceStatus) -> None:

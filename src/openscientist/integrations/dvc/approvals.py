@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from openscientist.assays import ApprovalDecision
 from openscientist.integrations.dvc.execution import (
     OPERATION_CONTRACTS,
     DVCAnalysisApproval,
     canonical_checkpoint_sha256,
     canonical_context_sha256,
     canonical_parameters_sha256,
+    operation_contract_sha256,
 )
 from openscientist.integrations.dvc.workflow import DVCWorkflowStore
 from openscientist.preclinical_context.models import PreclinicalStudyContext
@@ -100,9 +102,23 @@ def create_dvc_approval_record(
         raise ValueError("Checkpoint context_sha256 does not match current context.")
 
     parameters_sha256 = canonical_parameters_sha256(parameters or {})
-    workflow = DVCWorkflowStore(job_dir)
+    workflow = DVCWorkflowStore.for_dvc_analysis(
+        job_dir,
+        study_id=context.study_id,
+        dataset_id=dataset_id,
+        operation_id=operation,
+        context_sha256=context_sha256,
+        parameters_sha256=parameters_sha256,
+    )
     workflow.record_dataset(dataset_id)
     workflow.record_checkpoint(
+        pre_analysis_checkpoint_id,
+        is_pre=True,
+        context_sha256=context_sha256,
+    )
+    legacy_workflow = DVCWorkflowStore(job_dir)
+    legacy_workflow.record_dataset(dataset_id)
+    legacy_workflow.record_checkpoint(
         pre_analysis_checkpoint_id,
         is_pre=True,
         context_sha256=context_sha256,
@@ -117,6 +133,25 @@ def create_dvc_approval_record(
             and existing.parameters_sha256 == parameters_sha256
         ):
             workflow.record_approval(
+                existing.approval_id,
+                checkpoint_id=pre_analysis_checkpoint_id,
+                dataset_id=dataset_id,
+                actor=approved_by,
+                decision=ApprovalDecision(
+                    approval_id=existing.approval_id,
+                    run_id=workflow.run_id,
+                    assay_id="dvc",
+                    dataset_id=dataset_id,
+                    operation_id=operation,
+                    contract_sha256=operation_contract_sha256(operation),
+                    context_sha256=context_sha256,
+                    parameters_sha256=parameters_sha256,
+                    decided_by=existing.approved_by,
+                    decided_at=existing.approved_at,
+                    decision="approved",
+                ),
+            )
+            legacy_workflow.record_approval(
                 existing.approval_id,
                 checkpoint_id=pre_analysis_checkpoint_id,
                 dataset_id=dataset_id,
@@ -165,6 +200,25 @@ def create_dvc_approval_record(
     )
 
     workflow.record_approval(
+        approval_id,
+        checkpoint_id=pre_analysis_checkpoint_id,
+        dataset_id=dataset_id,
+        actor=approved_by,
+        decision=ApprovalDecision(
+            approval_id=approval_id,
+            run_id=workflow.run_id,
+            assay_id="dvc",
+            dataset_id=dataset_id,
+            operation_id=operation,
+            contract_sha256=operation_contract_sha256(operation),
+            context_sha256=context_sha256,
+            parameters_sha256=parameters_sha256,
+            decided_by=approved_by,
+            decided_at=approval.approved_at,
+            decision="approved",
+        ),
+    )
+    legacy_workflow.record_approval(
         approval_id,
         checkpoint_id=pre_analysis_checkpoint_id,
         dataset_id=dataset_id,

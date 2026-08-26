@@ -575,6 +575,12 @@ async def _send_message_via_executor(
     """
     from openscientist.agent.base import AgentConfig
     from openscientist.agent.factory import agent_class_for_provider, build_agent
+    from openscientist.assay_gateway_client import (
+        ASSAY_CAPABILITIES_ENV,
+        ASSAY_GATEWAY_URL_ENV,
+        container_assay_gateway_base_url,
+    )
+    from openscientist.assays.capabilities import make_assay_capability_map
     from openscientist.dvc_gateway_client import (
         DVC_CAPABILITY_ENV,
         DVC_GATEWAY_URL_ENV,
@@ -681,6 +687,11 @@ will enforce the preview and create the immutable report version."""
                 str(job_id),
             ),
             DVC_GATEWAY_URL_ENV: container_dvc_gateway_base_url(),
+            ASSAY_CAPABILITIES_ENV: make_assay_capability_map(
+                get_settings().secret_key,
+                str(job_id),
+            ),
+            ASSAY_GATEWAY_URL_ENV: container_assay_gateway_base_url(),
         },
     )
     executor = build_agent(config, provider)

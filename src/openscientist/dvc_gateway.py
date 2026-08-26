@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from pydantic import ValidationError
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.responses import JSONResponse
 
+from openscientist.assay_gateway import (
+    ASSAY_CAPABILITY_HEADER,
+    create_assay_gateway_app,
+)
 from openscientist.dvc_gateway_client import (
     DVC_CAPABILITY_HEADER,
     DVC_GATEWAY_PORT,
@@ -31,7 +32,7 @@ from openscientist.integrations.dvc.credentials import DVCConnectionNotFoundErro
 from openscientist.integrations.dvc.models import DVCImportRequest
 from openscientist.integrations.dvc.security import redact_sensitive_data, redact_sensitive_text
 from openscientist.integrations.dvc.service import DVCAcquisitionError, DVCAcquisitionService
-from openscientist.job_container.secrets import verify_dvc_capability
+from openscientist.job_container.secrets import verify_assay_capability, verify_dvc_capability
 from openscientist.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,25 @@ _MAX_IMPORT_WINDOW = timedelta(days=31)
 _MAX_RESPONSE_BYTES = 256 * 1024
 
 ServiceFactory = Callable[[Path], DVCAcquisitionService]
+
+
+class _DVCContractService:
+    """Compatibility facade around the contract-dispatched DVC service."""
+
+    def __init__(self, service: DVCAcquisitionService) -> None:
+        self._service = service
+
+    def test_connection(self, *, connection_id: str) -> dict[str, Any]:
+        return self._service.test_connection(connection_id)
+
+    def list_metrics(self, *, connection_id: str) -> list[dict[str, Any]]:
+        return self._service.list_metrics(connection_id)
+
+    def search_cages(self, *, connection_id: str, patterns: list[str]) -> list[dict[str, Any]]:
+        return self._service.search_cages(connection_id, patterns)
+
+    def import_dataset(self, request: DVCImportRequest) -> Any:
+        return self._service.import_dataset(request)
 
 
 def _error(status: int, code: str, message: str, *, retryable: bool = False) -> JSONResponse:
@@ -160,68 +180,60 @@ def create_dvc_gateway_app(
     master_key: Callable[[], str],
     service_factory: ServiceFactory = DVCAcquisitionService,
 ) -> Starlette:
-    """Build the internal gateway app with injectable dependencies for tests."""
+    """Build the DVC-compatible route from the registered assay contract."""
 
-    active_jobs: set[str] = set()
+    def verify(token: str, job_id: str, assay_id: str, permission: str) -> bool:
+        if verify_assay_capability(
+            master_key(),
+            token,
+            expected_job_id=job_id,
+            expected_assay_id=assay_id,
+            required_permission=permission,
+        ):
+            return True
+        # Existing acquisition-only capabilities remain usable during migration.
+        return permission in {"dvc:read", "dvc:import"} and verify_dvc_capability(
+            master_key(), token, expected_job_id=job_id
+        )
 
-    async def handler(request: Request) -> Response:
-        try:
-            raw: Any = await request.json()
-        except Exception:
-            return _error(400, "invalid_request", "Request body must be JSON.")
-        if not isinstance(raw, dict):
-            return _error(400, "invalid_request", "Request body must be a JSON object.")
+    def factory(_adapter: Any, action: Any, job_dir: Path) -> object:
+        if action.handler_path == ("openscientist.integrations.dvc.service.DVCAcquisitionService"):
+            return _DVCContractService(service_factory(job_dir))
+        module_name, _, symbol_name = action.handler_path.rpartition(".")
+        handler = getattr(__import__(module_name, fromlist=[symbol_name]), symbol_name)
+        return handler(job_dir)
 
-        job_id = raw.get("job_id")
-        operation = raw.get("operation")
-        arguments = raw.get("arguments")
-        if not isinstance(job_id, str) or not isinstance(operation, str):
-            return _error(400, "invalid_request", "job_id and operation are required.")
-        if not isinstance(arguments, dict):
-            return _error(400, "invalid_request", "arguments must be a JSON object.")
-        if operation not in _OPERATIONS:
-            return _error(403, "operation_not_allowed", "DVC operation is not allowed.")
-
-        capability = request.headers.get(DVC_CAPABILITY_HEADER, "")
-        if not verify_dvc_capability(master_key(), capability, expected_job_id=job_id):
-            return _error(401, "invalid_capability", "DVC capability is missing or expired.")
-
-        try:
-            job_dir = _job_dir(job_id)
-            # The mounted job must already exist. Never let a capability create
-            # an arbitrary job-shaped directory.
-            if not job_dir.is_dir():
-                return _error(404, "job_not_found", "Authenticated job directory was not found.")
-            if job_id in active_jobs:
-                return _error(
-                    409,
-                    "job_busy",
-                    "Another DVC acquisition request is already running for this job.",
-                    retryable=True,
+    def transform(action: str, arguments: dict[str, Any], result: Any) -> Any:
+        if action in {"list_metrics", "search_cages"}:
+            if not isinstance(result, list):
+                raise TypeError(f"{action} must return a list.")
+            if len(result) > _MAX_DISCOVERY_ITEMS:
+                raise ValueError(
+                    f"DVC returned {len(result)} items; the gateway limit is "
+                    f"{_MAX_DISCOVERY_ITEMS}."
                 )
-            active_jobs.add(job_id)
-            service = service_factory(job_dir)
-            try:
-                result = await asyncio.to_thread(_run_operation, service, operation, arguments)
-            finally:
-                active_jobs.discard(job_id)
-        except (ValidationError, ValueError) as exc:
-            return _error(400, "invalid_request", str(exc))
-        except DVCConnectionNotFoundError as exc:
-            return _error(404, "connection_not_found", str(exc))
-        except DVCAcquisitionError as exc:
-            return _error(502, "upstream_dvc_error", str(exc), retryable=True)
-        except Exception:
-            logger.exception("Unexpected DVC gateway failure for job %s", job_id)
-            return _error(
-                500,
-                "internal_gateway_error",
-                "DVC gateway failed without exposing upstream details.",
-                retryable=True,
-            )
-        return JSONResponse({"ok": True, "result": result})
+            key = "metrics" if action == "list_metrics" else "cages"
+            return {"connection_id": arguments["connection_id"], key: result}
+        return result
 
-    return Starlette(routes=[Route("/v1/acquire", handler, methods=["POST"])])
+    def map_error(exc: Exception) -> tuple[int, str, bool] | None:
+        if isinstance(exc, DVCConnectionNotFoundError):
+            return (404, "connection_not_found", False)
+        if isinstance(exc, DVCAcquisitionError):
+            return (502, "upstream_dvc_error", True)
+        logger.exception("Unexpected DVC gateway failure", exc_info=exc)
+        return None
+
+    return create_assay_gateway_app(
+        master_key=master_key,
+        service_factory=factory,
+        capability_header=(DVC_CAPABILITY_HEADER, ASSAY_CAPABILITY_HEADER),
+        capability_verifier=verify,
+        result_transformer=transform,
+        error_mapper=map_error,
+        legacy_assay_id="dvc",
+        job_dir_resolver=_job_dir,
+    )
 
 
 class _NoSignalServer(uvicorn.Server):
@@ -233,8 +245,8 @@ _gateway_server: uvicorn.Server | None = None
 _gateway_task: asyncio.Task[None] | None = None
 
 
-async def start_dvc_gateway() -> None:
-    """Start the trusted gateway as a sibling listener in the web process."""
+async def start_assay_gateway() -> None:
+    """Start the contract-driven assay gateway in the trusted web process."""
 
     global _gateway_server, _gateway_task
     if _gateway_task is not None:
@@ -243,4 +255,10 @@ async def start_dvc_gateway() -> None:
     config = uvicorn.Config(app, host="0.0.0.0", port=DVC_GATEWAY_PORT, log_level="warning")
     _gateway_server = _NoSignalServer(config)
     _gateway_task = asyncio.create_task(_gateway_server.serve())
-    logger.info("DVC acquisition gateway listening on port %d", DVC_GATEWAY_PORT)
+    logger.info("Governed assay gateway listening on port %d", DVC_GATEWAY_PORT)
+
+
+async def start_dvc_gateway() -> None:
+    """Compatibility alias for older application startup integrations."""
+
+    await start_assay_gateway()

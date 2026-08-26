@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,7 +22,7 @@ class StrictModel(BaseModel):
 
 class DVCImportRequest(StrictModel):
     connection_id: str = Field(min_length=1, max_length=100)
-    cage_ids: list[str] = Field(min_length=1, max_length=100)
+    cage_ids: list[str] = Field(min_length=1, max_length=20)
     metric_id: str = Field(min_length=1, max_length=100)
     start: str = Field(min_length=10, max_length=40)
     stop: str = Field(min_length=10, max_length=40)
@@ -80,6 +80,10 @@ class DVCImportRequest(StrictModel):
     def bounded_window(self) -> "DVCImportRequest":
         if self.start >= self.stop:
             raise ValueError("Import start must be earlier than import stop.")
+        start = datetime.fromisoformat(self.start.replace("Z", "+00:00"))
+        stop = datetime.fromisoformat(self.stop.replace("Z", "+00:00"))
+        if stop - start > timedelta(days=31):
+            raise ValueError("DVC import window cannot exceed 31 days.")
         return self
 
 

@@ -423,15 +423,15 @@ async def _start_background_tasks(engine: Any) -> None:
     except Exception as e:
         logger.warning("Failed to start execution broker: %s", e)
 
-    # DVC credentials are resolved only in this trusted web process. Agents
-    # authenticate to this listener with a short-lived job capability.
+    # Assay credentials are resolved only in this trusted web process. Agents
+    # authenticate to this listener with short-lived contract-scoped capabilities.
     try:
-        from openscientist.dvc_gateway import start_dvc_gateway
+        from openscientist.dvc_gateway import start_assay_gateway
 
-        await start_dvc_gateway()
-        logger.info("DVC acquisition gateway started")
+        await start_assay_gateway()
+        logger.info("Governed assay gateway started")
     except Exception as e:
-        logger.warning("Failed to start DVC acquisition gateway: %s", e)
+        logger.warning("Failed to start governed assay gateway: %s", e)
 
 
 def _initialize_job_manager_runtime(jobs_dir: Path) -> None:

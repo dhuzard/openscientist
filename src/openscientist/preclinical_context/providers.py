@@ -12,7 +12,10 @@ from openscientist.preclinical_context.models import (
     AssessmentResult,
     AssessmentStatus,
     PreclinicalStudyContext,
+    PreclinicalStudyContextV2,
 )
+
+PreclinicalContext = PreclinicalStudyContext | PreclinicalStudyContextV2
 
 
 class PreclinicalAssessmentProvider(Protocol):
@@ -20,7 +23,7 @@ class PreclinicalAssessmentProvider(Protocol):
 
     def assess_context(
         self,
-        context: PreclinicalStudyContext,
+        context: PreclinicalContext,
         *,
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]: ...
@@ -51,17 +54,27 @@ class StubPreclinicalAssessmentProvider:
 
     def assess_context(
         self,
-        context: PreclinicalStudyContext,
+        context: PreclinicalContext,
         *,
         frameworks: tuple[str, ...],
     ) -> list[AssessmentResult]:
         context_payload = context.model_dump(mode="json")
         context_hash = _canonical_hash(context_payload)
         missing: list[str] = []
-        if context.design.experimental_unit.status.value == "unknown":
-            missing.append("design.experimental_unit")
-        if context.objective.status.value == "unknown":
-            missing.append("objective")
+        if isinstance(context, PreclinicalStudyContextV2):
+            experimental_unit = context.design.units.experimental
+            objective = context.study.objective
+            experimental_unit_path = "design.units.experimental"
+            objective_path = "study.objective"
+        else:
+            experimental_unit = context.design.experimental_unit
+            objective = context.objective
+            experimental_unit_path = "design.experimental_unit"
+            objective_path = "objective"
+        if experimental_unit.status.value == "unknown":
+            missing.append(experimental_unit_path)
+        if objective.status.value == "unknown":
+            missing.append(objective_path)
 
         return [
             AssessmentResult(
@@ -75,9 +88,7 @@ class StubPreclinicalAssessmentProvider:
                         status=(AssessmentStatus.MISSING if missing else AssessmentStatus.PARTIAL),
                         missing_fields=missing,
                         blocks=(
-                            ["inferential_analysis"]
-                            if "design.experimental_unit" in missing
-                            else []
+                            ["inferential_analysis"] if experimental_unit_path in missing else []
                         ),
                         recommendation=(
                             "Connect an authoritative FAIR-PREPARE provider before reporting "

@@ -1,0 +1,61 @@
+"""Governed assay kernel public API."""
+
+from openscientist.assays.contracts import (
+    ApprovalDecision,
+    AssayAdapter,
+    EvidenceArtifact,
+    EvidencePattern,
+    ExecutableValidator,
+    GatewayAction,
+    OperationContract,
+    ReviewPanelSpec,
+    ValidationFinding,
+    ValidationResult,
+)
+from openscientist.assays.registry import (
+    AssayAlreadyRegisteredError,
+    AssayNotRegisteredError,
+    AssayRegistry,
+    AssayRegistryError,
+    get_assay_registry,
+)
+from openscientist.assays.workflow import (
+    AnalysisRun,
+    AnalysisRunConflictError,
+    AnalysisRunCorruptError,
+    AnalysisRunError,
+    AnalysisRunFailure,
+    AnalysisRunStage,
+    AnalysisRunStore,
+    AnalysisRunTransition,
+    canonical_json_sha256,
+    make_analysis_run_id,
+)
+
+__all__ = [
+    "ApprovalDecision",
+    "AnalysisRun",
+    "AnalysisRunConflictError",
+    "AnalysisRunCorruptError",
+    "AnalysisRunError",
+    "AnalysisRunFailure",
+    "AnalysisRunStage",
+    "AnalysisRunStore",
+    "AnalysisRunTransition",
+    "AssayAdapter",
+    "AssayAlreadyRegisteredError",
+    "AssayNotRegisteredError",
+    "AssayRegistry",
+    "AssayRegistryError",
+    "EvidenceArtifact",
+    "EvidencePattern",
+    "ExecutableValidator",
+    "GatewayAction",
+    "OperationContract",
+    "ReviewPanelSpec",
+    "ValidationFinding",
+    "ValidationResult",
+    "canonical_json_sha256",
+    "get_assay_registry",
+    "make_analysis_run_id",
+]

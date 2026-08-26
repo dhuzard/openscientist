@@ -5,12 +5,17 @@ Provides utilities for packaging job artifacts (reports, plots, logs, data)
 into downloadable archives in various formats (ZIP, Markdown, JSON).
 """
 
+import json
 import logging
 import zipfile
 from collections.abc import Iterator
+from dataclasses import asdict
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from openscientist.assays import AssayAdapter, get_assay_registry
 
 logger = logging.getLogger(__name__)
 
@@ -138,61 +143,107 @@ def _write_evidence_file(
     return digest.hexdigest(), size
 
 
-_DVC_BUNDLE_PATTERNS = (
-    "dvc_datasets",
-    "dvc_assessments",
-    "dvc_approvals",
-    "dvc_analyses",
-    "dvc_bundles",
-    "dvc_workflow.json",
-    "plots",
-    "provenance",
-    "final_report.md",
-    "final_report.html",
-    "final_report.pdf",
-    "EVIDENCE_PLAN.md",
-    ".openscientist",
-    "DVC_REAL_VALIDATION_REPORT.md",
-    "dvc_validation_manifest.json",
-    "dvc_udwa_parity.json",
-)
-
-
-def _iter_dvc_evidence_files(
+def _assay_evidence_files(
     job_dir: Path,
+    adapter: AssayAdapter,
     excluded_paths: set[Path] | None = None,
-) -> Iterator[tuple[Path, Path]]:
-    """Yield (absolute_path, archive_relative_path) pairs for governed DVC evidence."""
-    excluded_paths = excluded_paths or set()
-    for pattern in _DVC_BUNDLE_PATTERNS:
-        target = job_dir / pattern
-        if not target.exists():
-            continue
-        if target.is_file():
-            if target.is_symlink() or target.resolve() in excluded_paths:
-                continue
-            yield target, target.relative_to(job_dir)
-        elif target.is_dir():
-            for root, dirnames, filenames in target.walk(top_down=True, follow_symlinks=False):
-                safe_dirnames = []
-                for dirname in dirnames:
-                    dir_path = root / dirname
-                    if (
-                        dirname in _EXCLUDE_DIRS
-                        or dir_path.is_symlink()
-                        or dir_path.resolve() in excluded_paths
-                    ):
-                        continue
-                    safe_dirnames.append(dirname)
-                dirnames[:] = safe_dirnames
+) -> tuple[list[tuple[Path, Path, tuple[str, ...], tuple[str, ...]]], list[str]]:
+    """Resolve adapter-declared evidence without following job-controlled links."""
 
-                for filename in filenames:
-                    file_path = root / filename
-                    if file_path.is_symlink() or file_path.resolve() in excluded_paths:
-                        continue
-                    if filename in _EXCLUDE_FILES:
-                        continue
-                    yield file_path, file_path.relative_to(job_dir)
+    excluded_paths = excluded_paths or set()
+    job_root = job_dir.resolve()
+    matched: dict[Path, tuple[set[str], set[str]]] = {}
+    missing_required: list[str] = []
+    for evidence_pattern in adapter.evidence_patterns:
+        pattern_matches = 0
+        for candidate in job_dir.glob(evidence_pattern.glob):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            resolved = candidate.resolve()
+            if job_root not in resolved.parents or resolved in excluded_paths:
+                continue
+            if candidate.name in _EXCLUDE_FILES or any(
+                part in _EXCLUDE_DIRS for part in candidate.relative_to(job_dir).parts
+            ):
+                continue
+            pattern_matches += 1
+            roles, schemas = matched.setdefault(resolved, (set(), set()))
+            roles.add(evidence_pattern.role)
+            if evidence_pattern.schema_id:
+                schemas.add(evidence_pattern.schema_id)
+        if evidence_pattern.required and pattern_matches == 0:
+            missing_required.append(evidence_pattern.glob)
+
+    files = [
+        (
+            absolute_path,
+            absolute_path.relative_to(job_root),
+            tuple(sorted(roles)),
+            tuple(sorted(schemas)),
+        )
+        for absolute_path, (roles, schemas) in sorted(
+            matched.items(), key=lambda item: str(item[0])
+        )
+    ]
+    return files, sorted(missing_required)
+
+
+def create_assay_evidence_bundle_zip(
+    job_dir: Path,
+    job_id: str,
+    assay_id: str,
+    *,
+    manifest_name: str = "ASSAY_EVIDENCE_MANIFEST.json",
+    manifest_schema: str = "openscientist-assay-evidence-bundle/1.0",
+) -> BytesIO:
+    """Create a contract-derived, checksum-verifiable assay evidence bundle."""
+
+    adapter = get_assay_registry().require(assay_id)
+    evidence_files, missing_required = _assay_evidence_files(job_dir, adapter)
+    zip_buffer = BytesIO()
+    manifest_entries: list[dict[str, Any]] = []
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path, arcname, roles, schemas in evidence_files:
+            sha256, size = _write_evidence_file(zip_file, file_path, arcname)
+            manifest_entries.append(
+                {
+                    "path": str(arcname).replace("\\", "/"),
+                    "sha256": sha256,
+                    "bytes": size,
+                    "roles": list(roles),
+                    "schema_ids": list(schemas),
+                }
+            )
+
+        manifest_payload = {
+            "schema": manifest_schema,
+            "job_id": job_id,
+            "assay_id": adapter.adapter_id,
+            "adapter_version": adapter.adapter_version,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "complete": not missing_required,
+            "missing_required_patterns": missing_required,
+            "evidence_contract": [asdict(pattern) for pattern in adapter.evidence_patterns],
+            "manifest_schemas": list(adapter.manifest_schemas),
+            "total_files": len(manifest_entries),
+            "total_bytes": sum(item["bytes"] for item in manifest_entries),
+            "files": sorted(manifest_entries, key=lambda item: item["path"]),
+        }
+        zip_file.writestr(
+            manifest_name,
+            json.dumps(manifest_payload, indent=2, sort_keys=True),
+        )
+
+    zip_buffer.seek(0)
+    logger.info(
+        "Created %s evidence bundle ZIP for job %s (%d files, %d bytes)",
+        assay_id,
+        job_id,
+        len(manifest_entries),
+        zip_buffer.getbuffer().nbytes,
+    )
+    return zip_buffer
 
 
 def create_dvc_evidence_bundle_zip(job_dir: Path, job_id: str) -> BytesIO:
@@ -210,42 +261,10 @@ def create_dvc_evidence_bundle_zip(job_dir: Path, job_id: str) -> BytesIO:
     - Final scientific synthesis reports (final_report.md, final_report.html, final_report.pdf)
     - Auto-generated DVC_EVIDENCE_MANIFEST.json with SHA-256 checksums of all bundled assets
     """
-    import json
-    from datetime import datetime, timezone
-
-    zip_buffer = BytesIO()
-    manifest_entries: list[dict[str, Any]] = []
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path, arcname in _iter_dvc_evidence_files(job_dir):
-            sha256, size = _write_evidence_file(zip_file, file_path, arcname)
-            manifest_entries.append(
-                {
-                    "path": str(arcname).replace("\\", "/"),
-                    "sha256": sha256,
-                    "bytes": size,
-                }
-            )
-
-        # Generate cryptographic manifest
-        manifest_payload = {
-            "schema": "openscientist-dvc-evidence-bundle/0.1",
-            "job_id": job_id,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "total_files": len(manifest_entries),
-            "total_bytes": sum(item["bytes"] for item in manifest_entries),
-            "files": sorted(manifest_entries, key=lambda x: x["path"]),
-        }
-        zip_file.writestr(
-            "DVC_EVIDENCE_MANIFEST.json",
-            json.dumps(manifest_payload, indent=2, sort_keys=True),
-        )
-
-    zip_buffer.seek(0)
-    logger.info(
-        "Created DVC evidence bundle ZIP for job %s (%d files, %d bytes)",
+    return create_assay_evidence_bundle_zip(
+        job_dir,
         job_id,
-        len(manifest_entries),
-        zip_buffer.getbuffer().nbytes,
+        "dvc",
+        manifest_name="DVC_EVIDENCE_MANIFEST.json",
+        manifest_schema="openscientist-dvc-evidence-bundle/0.1",
     )
-    return zip_buffer
