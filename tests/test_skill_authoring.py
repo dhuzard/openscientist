@@ -309,6 +309,7 @@ async def test_generate_skill_review_returns_quality_and_validation_findings() -
 
     assert result.quality_findings[0].category == "scope"
     assert not [finding for finding in result.validation_findings if finding.severity == "error"]
+    assert run_turn.await_args is not None
     assert "system_prompt" in run_turn.await_args.kwargs
 
 

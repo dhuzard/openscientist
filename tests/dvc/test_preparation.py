@@ -11,7 +11,12 @@ import pandas as pd
 import pytest
 
 from openscientist.dvc.ingestion import DVCIngestionError, normalize_type2
-from openscientist.dvc.models import DVCImportSpec, DVCSourceSpec, ExportType
+from openscientist.dvc.models import (
+    DVCImportSpec,
+    DVCPreparedDataset,
+    DVCSourceSpec,
+    ExportType,
+)
 from openscientist.dvc.preparation import prepare_uploaded_dvc
 
 
@@ -267,7 +272,7 @@ def test_concurrent_preparation_publishes_one_atomic_dataset(tmp_path: Path) -> 
     )
     barrier = Barrier(2)
 
-    def prepare() -> object:
+    def prepare() -> DVCPreparedDataset:
         barrier.wait(timeout=5)
         return prepare_uploaded_dvc(tmp_path, spec)
 

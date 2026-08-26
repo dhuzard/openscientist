@@ -287,6 +287,4 @@ def test_analysis_provenance_rejects_invalid_dataset_path(tmp_path: Path) -> Non
 
     assert status is not None
     assert status.primary_state == "blocked"
-    assert "dataset id is missing or invalid" in (
-        status.unverified_analyses[0].detail or ""
-    )
+    assert "dataset id is missing or invalid" in (status.unverified_analyses[0].detail or "")

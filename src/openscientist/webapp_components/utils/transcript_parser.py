@@ -152,8 +152,7 @@ def extract_agent_activity(transcript: list[TranscriptEntry]) -> list[dict[str, 
             error = result.error_message if result is not None else None
             short_name = _short_tool_name(entry.tool)
             legacy_error = bool(
-                short_name == "execute_code"
-                and _LEGACY_EXECUTION_ERROR_RE.search(output)
+                short_name == "execute_code" and _LEGACY_EXECUTION_ERROR_RE.search(output)
             )
             if legacy_error:
                 success = False
@@ -169,7 +168,9 @@ def extract_agent_activity(transcript: list[TranscriptEntry]) -> list[dict[str, 
                     "status": (
                         result.status
                         if result is not None and result.status
-                        else "running" if result is None else "completed"
+                        else "running"
+                        if result is None
+                        else "completed"
                     ),
                     "error": error or "",
                     "http_5xx": bool(_HTTP_5XX_RE.search(f"{error or ''}\n{output}")),
@@ -230,7 +231,9 @@ def extract_agent_activity(transcript: list[TranscriptEntry]) -> list[dict[str, 
                     "description": entry.prompt or "Subagent activity",
                     "input": {"prompt": entry.prompt, "model": entry.model},
                     "output": "",
-                    "success": None if entry.status in {None, "inProgress"} else entry.status == "completed",
+                    "success": None
+                    if entry.status in {None, "inProgress"}
+                    else entry.status == "completed",
                     "status": entry.status or "running",
                     "error": "",
                     "http_5xx": False,

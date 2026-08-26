@@ -47,12 +47,7 @@ def test_chat_figure_creates_baseline_and_new_report_version(tmp_path: Path) -> 
         tmp_path / "report_versions" / "v2" / "final_report.md"
     ).read_text(encoding="utf-8")
     assert (
-        tmp_path
-        / "report_versions"
-        / "v2"
-        / "artifacts"
-        / "plots"
-        / "circadian.png"
+        tmp_path / "report_versions" / "v2" / "artifacts" / "plots" / "circadian.png"
     ).read_bytes() == b"plot"
 
     manifest = json.loads(

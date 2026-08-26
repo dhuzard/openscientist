@@ -1,4 +1,4 @@
-.PHONY: start start-fair stop restart restart-fair build build-executor rebuild logs shell clean clean-jobs reset-db help deploy status fair-status
+.PHONY: start start-fair stop restart restart-fair build build-executor rebuild logs shell clean clean-jobs reset-db help deploy status fair-status quality-fast quality-contract quality-integration
 
 # Deployment configuration
 DEPLOY_HOST ?= gassh
@@ -36,6 +36,11 @@ help:
 	@echo "  make shell      - Open shell in main container"
 	@echo "  make clean      - Remove containers and volumes"
 	@echo "  make reset-db   - Flush database and run migrations"
+	@echo ""
+	@echo "Quality:"
+	@echo "  make quality-fast        - Lock, compile, lint, format, and type checks"
+	@echo "  make quality-contract    - Governed DVC and preclinical contract tests"
+	@echo "  make quality-integration - Full coverage suite (requires Docker)"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  make deploy     - Deploy to production server"
@@ -134,6 +139,15 @@ status:
 
 fair-status:
 	docker compose $(FAIR_COMPOSE_FILES) ps
+
+quality-fast:
+	uv run python -m openscientist.quality fast
+
+quality-contract:
+	uv run python -m openscientist.quality contract
+
+quality-integration:
+	uv run python -m openscientist.quality integration
 
 # Deploy to production server
 deploy:

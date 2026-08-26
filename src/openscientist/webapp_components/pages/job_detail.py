@@ -2461,7 +2461,14 @@ def _load_job_agent_activity(job_dir: Path) -> dict[str, Any]:
             for path in provenance_dir.glob("iter*_transcript.json")
             if _ITER_TRANSCRIPT_RE.fullmatch(path.name)
         ]
-        paths.sort(key=lambda path: int(_ITER_TRANSCRIPT_RE.fullmatch(path.name).group(1)))
+
+        def iteration_number(path: Path) -> int:
+            match = _ITER_TRANSCRIPT_RE.fullmatch(path.name)
+            if match is None:  # Defensive: paths are filtered immediately above.
+                raise ValueError(f"Invalid iteration transcript name: {path.name}")
+            return int(match.group(1))
+
+        paths.sort(key=iteration_number)
     live_path = provenance_dir / "current_turn_transcript.json"
     if live_path.exists():
         paths.append(live_path)

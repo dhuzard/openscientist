@@ -256,8 +256,7 @@ def _append_chat_update_summary(
         )
         if revision.figures:
             additions.append(
-                "Accompanying text: "
-                + " ".join(figure.caption for figure in revision.figures)
+                "Accompanying text: " + " ".join(figure.caption for figure in revision.figures)
             )
     if not additions:
         return content
@@ -505,9 +504,7 @@ async def send_chat_message(
 
     revision = None
     report_path = job_dir / "final_report.md"
-    if report_path.is_file() and before_report.markdown != report_path.read_text(
-        encoding="utf-8"
-    ):
+    if report_path.is_file() and before_report.markdown != report_path.read_text(encoding="utf-8"):
         await _render_report_outputs(job_dir)
         revision = record_report_revision(
             job_dir,

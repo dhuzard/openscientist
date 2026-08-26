@@ -55,9 +55,7 @@ class ReportRevision:
 def capture_report_snapshot(job_dir: Path) -> ReportSnapshot:
     """Capture current report outputs before the agent can modify them."""
     files = {
-        name: path.read_bytes()
-        for name in _REPORT_FILENAMES
-        if (path := job_dir / name).is_file()
+        name: path.read_bytes() for name in _REPORT_FILENAMES if (path := job_dir / name).is_file()
     }
     return ReportSnapshot(files=files)
 
@@ -162,7 +160,9 @@ def _sanitize_figure_parameter(text: str) -> str:
 
 def _report_references_figure(markdown: str, figure: ReportFigure) -> bool:
     references = (figure.relative_path, *figure.aliases)
-    return any(reference in markdown or Path(reference).name in markdown for reference in references)
+    return any(
+        reference in markdown or Path(reference).name in markdown for reference in references
+    )
 
 
 def _last_heading_before(markdown: str, needle: str) -> str | None:
@@ -172,9 +172,7 @@ def _last_heading_before(markdown: str, needle: str) -> str | None:
     if index < 0:
         return None
     headings = [
-        line.lstrip("#").strip()
-        for line in markdown[:index].splitlines()
-        if line.startswith("#")
+        line.lstrip("#").strip() for line in markdown[:index].splitlines() if line.startswith("#")
     ]
     return headings[-1] if headings else None
 
@@ -202,10 +200,7 @@ def update_report_markdown(
                 [
                     f"### {figure.title}",
                     figure.caption,
-                    (
-                        f"{{{{figure:{figure.relative_path}"
-                        f"|caption={caption}|width=100%}}}}"
-                    ),
+                    (f"{{{{figure:{figure.relative_path}|caption={caption}|width=100%}}}}"),
                 ]
             )
         markdown = markdown.rstrip() + "\n\n" + "\n\n".join(chunks) + "\n"
@@ -239,10 +234,13 @@ def record_report_revision(
         return None
 
     manifest = _ensure_baseline(job_dir, before)
-    version = max(
-        (int(item.get("version", 0)) for item in manifest["versions"]),
-        default=0,
-    ) + 1
+    version = (
+        max(
+            (int(item.get("version", 0)) for item in manifest["versions"]),
+            default=0,
+        )
+        + 1
+    )
     version_dir = _version_dir(job_dir, version)
     files = _copy_live_report(job_dir, version_dir)
     artifact_files = _copy_revision_artifacts(job_dir, version_dir, figures)

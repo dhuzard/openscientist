@@ -7,6 +7,7 @@ from uuid import UUID
 
 from nicegui import ui
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from openscientist.api.auth import generate_api_key_secret, hash_secret
@@ -129,7 +130,7 @@ def _validate_key_name(name: str) -> str | None:
     return None
 
 
-async def _check_user_key_limit(session: Any, user_uuid: UUID) -> bool:
+async def _check_user_key_limit(session: AsyncSession, user_uuid: UUID) -> bool:
     """Return True if user already reached the active-key limit."""
     result = await session.execute(
         select(func.count()).where(
@@ -140,7 +141,7 @@ async def _check_user_key_limit(session: Any, user_uuid: UUID) -> bool:
     return (result.scalar() or 0) >= MAX_KEYS_PER_USER
 
 
-async def _get_key_by_name(session: Any, user_uuid: UUID, key_name: str) -> APIKey | None:
+async def _get_key_by_name(session: AsyncSession, user_uuid: UUID, key_name: str) -> APIKey | None:
     """Return the user's key with this name, including revoked keys."""
     result = await session.execute(
         select(APIKey).where(APIKey.user_id == user_uuid, APIKey.name == key_name)

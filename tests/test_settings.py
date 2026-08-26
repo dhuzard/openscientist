@@ -23,12 +23,8 @@ from openscientist.settings import (
 class TestDevSettings:
     def test_reload_defaults_to_development_mode(self, monkeypatch):
         monkeypatch.delenv("OPENSCIENTIST_RELOAD", raising=False)
-        assert (
-            DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=True).reload_enabled is True
-        )
-        assert (
-            DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=False).reload_enabled is False
-        )
+        assert DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=True).reload_enabled is True
+        assert DevSettings(_env_file=None, OPENSCIENTIST_DEV_MODE=False).reload_enabled is False
 
     def test_reload_can_be_disabled_without_disabling_development_auth(self, monkeypatch):
         monkeypatch.delenv("OPENSCIENTIST_RELOAD", raising=False)

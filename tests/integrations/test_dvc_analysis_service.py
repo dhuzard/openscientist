@@ -76,9 +76,9 @@ def install_fake_udwa(monkeypatch, calls: list[str] | None = None):
             "warnings": ["token=warning-secret"],
         }
 
-    orchestrator.run_tool = run_tool
+    orchestrator.__dict__["run_tool"] = run_tool
     package = types.ModuleType("udwa")
-    package.orchestrator = orchestrator
+    package.__dict__["orchestrator"] = orchestrator
     monkeypatch.setitem(sys.modules, "udwa", package)
     monkeypatch.setitem(sys.modules, "udwa.orchestrator", orchestrator)
     monkeypatch.setattr(

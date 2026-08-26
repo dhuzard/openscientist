@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -521,7 +521,7 @@ class HttpFairPrepareProvider:
         return False
 
     @staticmethod
-    def _contract_error(message: str, *, endpoint: str, action: str | None = None) -> None:
+    def _contract_error(message: str, *, endpoint: str, action: str | None = None) -> NoReturn:
         raise FairPrepareError(
             message,
             kind=FairPrepareFailureKind.CONTRACT,
@@ -536,7 +536,7 @@ class HttpFairPrepareProvider:
                 f"FAIR-VCG {endpoint} returned an incompatible response.",
                 endpoint=endpoint,
             )
-        return payload
+        return cast(dict[str, Any], payload)
 
     @classmethod
     def _dataset_id(cls, payload: dict[str, Any]) -> str:
@@ -555,7 +555,7 @@ class HttpFairPrepareProvider:
                 endpoint="POST /api/upload",
                 action="Repair the FAIR-VCG upload response before retrying the assessment.",
             )
-        return dataset_id
+        return cast(str, dataset_id)
 
     @staticmethod
     def _validate_fair_score(payload: dict[str, Any]) -> None:

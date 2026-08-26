@@ -88,6 +88,7 @@ async def test_generate_job_brief_suggestion_grounds_agent_with_skill() -> None:
             ["activity.csv"],
         )
 
+    assert runner.await_args is not None
     system_prompt, prompt = runner.await_args.args
     assert "## Trusted create-job-brief skill" in system_prompt
     assert "name: create-job-brief" in system_prompt

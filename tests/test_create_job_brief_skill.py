@@ -29,6 +29,7 @@ def test_job_brief_skill_is_discoverable_as_workflow() -> None:
     assert parsed.name == "create-job-brief"
     assert parsed.slug == "create-job-brief"
     assert parsed.category == "workflow"
+    assert parsed.description is not None
     assert "creating a job" in parsed.description
     assert "experimental units or estimands" in parsed.description
 

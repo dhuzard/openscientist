@@ -29,16 +29,19 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
 from openai_codex.generated.v2_all import (
     ItemCompletedNotification,
+    ItemStartedNotification,
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
 )
+from openai_codex.models import Notification
 
 from openscientist.agent.base import (
     AbstractAgent,
@@ -461,14 +464,18 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         turn = await thread.turn(prompt)
         self._active_turn = turn
         completed: TurnCompletedNotification | None = None
-        stream = turn.stream()
+        # ``AsyncTurn.stream`` is implemented as an async generator, although
+        # the SDK exposes the narrower AsyncIterator return annotation. Keep
+        # the cast local so the stream can be closed deterministically when a
+        # turn is cancelled or times out.
+        stream = cast(AsyncGenerator[Notification, None], turn.stream())
         try:
             async for event in stream:
                 payload = event.payload
                 if (
-                    payload.__class__.__name__ == "ItemStartedNotification"
-                    and getattr(payload, "turn_id", None) == turn.id
-                    and getattr(payload, "item", None) is not None
+                    isinstance(payload, ItemStartedNotification)
+                    and payload.turn_id == turn.id
+                    and payload.item is not None
                 ):
                     self._upsert_partial_item(payload.item)
                 if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn.id:

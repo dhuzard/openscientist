@@ -37,7 +37,7 @@ def _verified_schedule(job_dir: Path) -> None:
                         "status": "recorded",
                         "source": "approved protocol",
                         "value_sha256": "b" * 64,
-                    }
+                    },
                 },
                 "dataset_id": _DATASET_ID,
             }

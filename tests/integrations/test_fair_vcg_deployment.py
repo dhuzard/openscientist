@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -8,8 +9,8 @@ OVERLAY = Path(__file__).parents[2] / "docker-compose.fair-vcg.yml"
 MAKEFILE = Path(__file__).parents[2] / "Makefile"
 
 
-def _compose() -> dict:
-    return yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
+def _compose() -> dict[str, Any]:
+    return cast(dict[str, Any], yaml.safe_load(OVERLAY.read_text(encoding="utf-8")))
 
 
 def test_fair_vcg_build_is_pinned_and_not_host_published():

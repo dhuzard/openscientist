@@ -570,8 +570,7 @@ async def test_new_chat_plot_is_embedded_and_creates_report_revision(
                 {
                     "also_saved_as": "plots/mean_circadian.png",
                     "description": (
-                        "Mean circadian activity centered on the assumed "
-                        "18:00 UTC dark onset."
+                        "Mean circadian activity centered on the assumed 18:00 UTC dark onset."
                     ),
                 }
             ),
@@ -617,19 +616,14 @@ async def test_new_chat_plot_is_embedded_and_creates_report_revision(
     assert manifest["current_version"] == 2
     assert [item["version"] for item in manifest["versions"]] == [1, 2]
     assert manifest["versions"][1]["section"] == "Follow-up analyses from Chat"
-    assert (
-        job_dir / "report_versions" / "v1" / "final_report.md"
-    ).read_text(encoding="utf-8") == "# Original report\n"
+    assert (job_dir / "report_versions" / "v1" / "final_report.md").read_text(
+        encoding="utf-8"
+    ) == "# Original report\n"
     assert "Follow-up analyses from Chat" in (
         job_dir / "report_versions" / "v2" / "final_report.md"
     ).read_text(encoding="utf-8")
     assert (
-        job_dir
-        / "report_versions"
-        / "v2"
-        / "artifacts"
-        / "plots"
-        / "mean_circadian.png"
+        job_dir / "report_versions" / "v2" / "artifacts" / "plots" / "mean_circadian.png"
     ).is_file()
 
 
@@ -660,9 +654,7 @@ def test_extract_chat_artifact_images_for_explicit_inline_rendering() -> None:
     assert text == "Created this plot:"
     assert len(images) == 1
     assert images[0].alt == "Circadian profile"
-    assert images[0].url == (
-        "/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png"
-    )
+    assert images[0].url == ("/jobs/1db3e835-d47a-4cef-967a-a3131ca5c55e/plots/reference.png")
 
 
 @pytest.mark.asyncio
