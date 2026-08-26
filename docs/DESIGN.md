@@ -57,8 +57,10 @@ OpenScientist proactively searches PubMed to inform hypothesis generation and in
 ### How It Works
 
 OpenScientist uses an **agentic coding assistant** as its reasoning engine. The
-backend is selected through the configured provider: Claude-compatible providers
-run Claude Code, while OpenAI-compatible providers run Codex.
+provider configures model routing and authentication, while the harness selects
+the coding-agent runtime. In automatic mode, Claude-compatible providers run
+Claude Code, OpenAI-compatible providers run Codex, and self-hosted vLLM or
+llama.cpp providers run OMP. OMP can also be selected for any provider.
 
 The orchestrator spawns the agent with:
 - A system prompt containing the research question and context
@@ -74,7 +76,8 @@ NiceGUI Web UI / FastAPI REST API
                  ▼
        Per-job Agent Container
        ├── Claude Code
-       └── Codex
+       ├── Codex
+       └── OMP
                  │
                  ▼
       openscientist-tools MCP Server
@@ -136,15 +139,18 @@ At completion, OpenScientist generates a final report synthesizing all findings.
 
 ### Multi-Provider Support
 
-OpenScientist supports two agent backends across multiple LLM providers:
+OpenScientist supports three agent harnesses across multiple LLM providers:
 
-| Agent backend | Providers |
-|---------------|-----------|
+| Automatic harness | Providers |
+|-------------------|-----------|
 | **Claude Code** | Anthropic, CBORG, Vertex AI, AWS Bedrock, Azure AI Foundry |
 | **Codex** | OpenAI, Azure OpenAI, Ollama |
+| **OMP** | vLLM, llama.cpp |
 
 Provider integrations configure authentication, model routing, and any available
-cost tracking or budget enforcement.
+cost tracking or budget enforcement. Harness selection is orthogonal: OMP can
+drive any registered provider, while explicit Claude Code and Codex selections
+require a compatible provider family.
 
 ### Skills System
 
