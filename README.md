@@ -178,6 +178,7 @@ OPENSCIENTIST_DEV_MODE=true
 ### Job Manager Settings
 
 - `OPENSCIENTIST_MAX_CONCURRENT_JOBS`: Maximum concurrent jobs (default: `1`)
+- `OPENSCIENTIST_JOBS_DIR`: Directory for job artifacts (default: `jobs/`)
 
 ### Legacy Bootstrap (Filesystem -> DB)
 
