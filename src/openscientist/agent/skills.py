@@ -1,11 +1,4 @@
-"""Per-job skill-file writers, shared by the concrete agents.
-
-Each backend materialises the enabled skills in its own on-disk layout from
-its ``prepare_job_workspace``: Claude writes ``.claude/CLAUDE.md`` plus
-``.claude/skills/*.md``. Codex writes native ``.agents/skills/*/SKILL.md``
-files it auto-discovers. These live in the agent layer (not the orchestrator)
-so the agents do not depend back on ``orchestrator.discovery``.
-"""
+"""SKILL.md rendering shared by the agents that materialise skills."""
 
 from __future__ import annotations
 
@@ -98,8 +91,6 @@ async def write_skills_to_claude_dir(
 
 
 def _yaml_quote(value: str) -> str:
-    """Render a YAML double-quoted scalar so colons and other special
-    characters cannot break SKILL.md frontmatter parsing."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -114,10 +105,9 @@ def claude_skill_markdown(skill: Skill) -> str:
 def codex_skill_markdown(skill: Skill) -> str:
     """Render one enabled skill as a codex ``SKILL.md`` (frontmatter + body).
 
-    Codex caps the frontmatter ``name`` at 64 chars and DROPS any skill whose
-    ``description`` is empty, so the name is truncated and the description is
-    collapsed to a single line, bounded to 1024 chars, with a non-empty
-    fallback.
+    The ``name`` is capped at 64 chars and ``description`` collapsed to one line
+    (max 1024) with a non-empty fallback, since some providers drop a skill whose
+    description is empty.
     """
     name = f"{skill.category}--{skill.slug}"[:64]
     description = " ".join((skill.description or "").split())[:1024]
@@ -125,6 +115,11 @@ def codex_skill_markdown(skill: Skill) -> str:
         description = f"{skill.category} skill: {skill.name}"
     frontmatter = f"---\nname: {_yaml_quote(name)}\ndescription: {_yaml_quote(description)}\n---\n"
     return frontmatter + skill.content
+
+
+def render_skill_md(skill: Skill) -> str:
+    """Render a skill in the shared Agent Skills ``SKILL.md`` layout."""
+    return codex_skill_markdown(skill)
 
 
 async def write_skills_to_codex_dir(

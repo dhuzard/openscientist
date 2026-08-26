@@ -7,9 +7,10 @@ and executor error handling.
 
 import json
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -20,12 +21,16 @@ from openscientist.agent.base import AbstractAgent, AgentConfig, IterationResult
 from openscientist.database.models import Job, JobChatMessage, User
 from openscientist.database.rls import set_current_user
 from openscientist.job_chat import (
+    _CHAT_REQUEST_FILE,
+    _CHAT_RESPONSE_FILE,
     _assigned_skills_prompt,
+    _build_chat_request,
     _load_assigned_skills,
     extract_chat_artifact_images,
     get_chat_history,
     load_job_context,
     normalize_chat_artifact_links,
+    run_chat_turn_async,
     send_chat_message,
 )
 from openscientist.providers.base import Provider
@@ -80,6 +85,35 @@ def test_chat_recovers_assigned_skills_for_follow_up(tmp_path: Path) -> None:
     assert "domain--digital-ventilated-cage-analysis" in prompt
     assert "domain--data-science" in prompt
     assert "companion-skill rules" in prompt
+
+
+@contextmanager
+def _chat_runner_writing(response):
+    """Run the chat turn against a fake container that writes the given response
+    file, with a stubbed provider for building the request."""
+
+    def _run(job_id, job_dir, *, timeout=300):
+        (Path(job_dir) / _CHAT_RESPONSE_FILE).write_text(json.dumps(response))
+
+    runner = MagicMock()
+    runner.run_chat_turn.side_effect = _run
+    with (
+        patch("openscientist.job_container.runner.JobContainerRunner", return_value=runner),
+        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
+    ):
+        yield
+
+
+@contextmanager
+def _chat_runner_failing(exc):
+    """Chat turn against a fake container whose run_chat_turn raises."""
+    runner = MagicMock()
+    runner.run_chat_turn.side_effect = exc
+    with (
+        patch("openscientist.job_container.runner.JobContainerRunner", return_value=runner),
+        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
+    ):
+        yield
 
 
 @pytest.mark.asyncio
@@ -508,36 +542,17 @@ async def test_send_chat_message_success(
     test_job: Job,
     temp_jobs_dir: Path,
 ):
-    """Test that send_chat_message stores messages and returns response."""
+    """send_chat_message runs the turn in a container and stores both messages."""
     _ = test_user
     job_dir = temp_jobs_dir / str(test_job.id)
     job_dir.mkdir()
 
-    # get_provider drives the backend (Claude), build_agent runs for real so
-    # write_chat_context writes the chat .claude/CLAUDE.md, and only run_iteration
-    # is mocked.
-    captured: dict[str, AgentConfig] = {}
-    result = IterationResult(
-        outcome=TurnOutcome.COMPLETED,
-        output="The main findings indicate...",
-        tool_calls=0,
-        transcript=[],
-    )
-
-    with (
-        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
-        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
-    ):
+    with _chat_runner_writing({"output": "The main findings indicate..."}):
         response = await send_chat_message(
             db_session, test_job.id, "What are the main findings?", job_dir
         )
 
     assert response == "The main findings indicate..."
-    chat_claude_md = job_dir / ".claude" / "CLAUDE.md"
-    assert chat_claude_md.exists()
-    assert "OpenScientist Job Chat Assistant" in chat_claude_md.read_text(encoding="utf-8")
-
-    # Verify both messages were stored
     history = await get_chat_history(db_session, test_job.id)
     assert len(history) == 2
     assert history[0].role == "user"
@@ -585,7 +600,7 @@ async def test_new_chat_plot_is_embedded_and_creates_report_revision(
 
     with (
         patch(
-            "openscientist.job_chat._send_message_via_executor",
+            "openscientist.job_chat._send_message_via_container",
             side_effect=_generate_plot,
         ),
         patch(
@@ -658,117 +673,108 @@ def test_extract_chat_artifact_images_for_explicit_inline_rendering() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_chat_message_raises_on_executor_failure(
+async def test_send_chat_message_cleans_up_ipc_files(
     db_session: AsyncSession,
     test_user: User,
     test_job: Job,
     temp_jobs_dir: Path,
 ):
-    """Test that executor failure raises RuntimeError instead of returning empty string."""
+    """The request and response files are removed after the turn."""
     _ = test_user
     job_dir = temp_jobs_dir / str(test_job.id)
     job_dir.mkdir()
 
-    captured: dict[str, AgentConfig] = {}
-    result = IterationResult(
-        outcome=TurnOutcome.FAILED,
-        output="",
-        tool_calls=0,
-        transcript=[],
-        error="Process exited with code 1",
-    )
+    with _chat_runner_writing({"output": "ok"}):
+        await send_chat_message(db_session, test_job.id, "hi", job_dir)
 
-    with (
-        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
-        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
-    ):
-        with pytest.raises(RuntimeError, match="Process exited with code 1"):
-            await send_chat_message(db_session, test_job.id, "What are the main findings?", job_dir)
+    assert not (job_dir / _CHAT_REQUEST_FILE).exists()
+    assert not (job_dir / _CHAT_RESPONSE_FILE).exists()
 
-    # Verify no messages were stored (commit never reached)
+
+@pytest.mark.asyncio
+async def test_send_chat_message_raises_on_container_failure(
+    db_session: AsyncSession,
+    test_user: User,
+    test_job: Job,
+    temp_jobs_dir: Path,
+):
+    """A failed container raises and stores no messages."""
+    _ = test_user
+    job_dir = temp_jobs_dir / str(test_job.id)
+    job_dir.mkdir()
+
+    with _chat_runner_failing(RuntimeError("Chat container exited with code 1")):
+        with pytest.raises(RuntimeError, match="exited with code 1"):
+            await send_chat_message(db_session, test_job.id, "hi", job_dir)
+
     history = await get_chat_history(db_session, test_job.id)
     assert len(history) == 0
 
 
 @pytest.mark.asyncio
-async def test_send_chat_message_raises_generic_on_empty_error(
+async def test_send_chat_message_raises_on_error_response(
     db_session: AsyncSession,
     test_user: User,
     test_job: Job,
     temp_jobs_dir: Path,
 ):
-    """Test that executor failure with no error message still raises."""
+    """An error reply in the response file raises and stores no messages."""
     _ = test_user
     job_dir = temp_jobs_dir / str(test_job.id)
     job_dir.mkdir()
 
-    captured: dict[str, AgentConfig] = {}
-    result = IterationResult(outcome=TurnOutcome.FAILED, output="", tool_calls=0, transcript=[])
-
-    with (
-        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
-        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
-    ):
+    with _chat_runner_writing({"error": "Chat executor returned no output"}):
         with pytest.raises(RuntimeError, match="Chat executor returned no output"):
-            await send_chat_message(db_session, test_job.id, "Hello", job_dir)
+            await send_chat_message(db_session, test_job.id, "hi", job_dir)
+
+    history = await get_chat_history(db_session, test_job.id)
+    assert len(history) == 0
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_does_not_include_job_context(
+async def test_build_chat_request_keeps_system_prompt_small(
     db_session: AsyncSession,
     test_user: User,
     test_job: Job,
     temp_jobs_dir: Path,
 ):
-    """Test that the system prompt is small and doesn't embed job context."""
+    """Job context goes in the prompt, never the system prompt (which the claude
+    CLI passes as an arg subject to ARG_MAX)."""
     _ = test_user
+    from openscientist.knowledge_state import KnowledgeState
+
+    large_ks = KnowledgeState(str(test_job.id), "Q?", 10)
+    large_ks.data["findings"] = [{"content": "x" * 50000}]
     job_dir = temp_jobs_dir / str(test_job.id)
     job_dir.mkdir()
 
-    from openscientist.knowledge_state import KnowledgeState
-
-    # Create a large knowledge state that would blow up ARG_MAX if embedded
-    large_ks = KnowledgeState(str(test_job.id), "Q?", 10)
-    large_ks.data["findings"] = [{"content": "x" * 50000}]
-
-    captured: dict[str, AgentConfig] = {}
-    result = IterationResult(
-        outcome=TurnOutcome.COMPLETED, output="Response", tool_calls=0, transcript=[]
-    )
-
     with (
         patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
-        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
         patch(
             "openscientist.job_chat.KnowledgeState.load_from_database_sync",
             return_value=large_ks,
         ),
     ):
-        await send_chat_message(db_session, test_job.id, "Summarize findings", job_dir)
+        request = await _build_chat_request(db_session, test_job.id, "Summarize findings", job_dir)
 
-    # System prompt should be small — just instructions, not embedded context
-    captured_system_prompt = captured["config"].system_prompt
-    assert captured_system_prompt is not None
-    assert len(captured_system_prompt) < 2000
-    # Should not reference deprecated knowledge_state.json file
-    assert "knowledge_state.json" not in captured_system_prompt
-    # Should NOT contain the large content
-    assert "x" * 1000 not in captured_system_prompt
+    system_prompt = request["system_prompt"]
+    prompt = request["prompt"]
+    assert system_prompt is not None
+    assert prompt is not None
+    assert len(system_prompt) < 2000
+    assert "x" * 1000 not in system_prompt
+    assert "x" * 1000 in prompt
 
 
 @pytest.mark.asyncio
-async def test_send_chat_message_codex_provider(
+async def test_build_chat_request_codex_folds_guidance(
     db_session: AsyncSession,
     test_user: User,
     test_job: Job,
     temp_jobs_dir: Path,
 ):
-    """Chat works for codex-family providers (e.g. Ollama).
-
-    It must route through the factory (no Claude-only RuntimeError), fold the
-    chat guidance into the system prompt so CodexAgent delivers it via AGENTS.md,
-    and must NOT write the Claude-only .claude/CLAUDE.md.
-    """
+    """Codex has no model override and folds the chat guidance into the system
+    prompt (delivered via AGENTS.md, not the Claude-only CLAUDE.md)."""
     _ = test_user
     from tests.helpers import StubCodexProvider
 
@@ -796,12 +802,78 @@ async def test_send_chat_message_codex_provider(
         encoding="utf-8",
     )
 
-    # get_provider drives the codex backend, build_agent runs for real, so the
-    # default chat_system_prompt folds the guidance in and write_chat_context is
-    # a no-op (no .claude/CLAUDE.md). Only run_iteration is mocked.
+    with patch("openscientist.providers.get_provider", return_value=StubCodexProvider()):
+        request = await _build_chat_request(db_session, test_job.id, "hi", job_dir)
+
+    system_prompt = request["system_prompt"]
+    assert request["model_override"] is None
+    assert system_prompt is not None
+    assert "OpenScientist Job Chat Assistant" in system_prompt
+    assert "domain--digital-ventilated-cage-analysis" in system_prompt
+    assert "domain--data-science" in system_prompt
+    assert request["assigned_skill_ids"] == list(assigned_ids)
+
+
+@pytest.mark.asyncio
+async def test_run_chat_turn_async_writes_reply(temp_jobs_dir: Path):
+    """The container-side turn reads the request, runs the agent with the
+    request's system prompt, and writes the reply."""
+    job_dir = temp_jobs_dir / "chat-turn"
+    job_dir.mkdir()
+    (job_dir / _CHAT_REQUEST_FILE).write_text(
+        json.dumps({"system_prompt": "You are helpful.", "model_override": None, "prompt": "hi"})
+    )
+
     captured: dict[str, AgentConfig] = {}
     result = IterationResult(
-        outcome=TurnOutcome.COMPLETED, output="Codex chat reply", tool_calls=0, transcript=[]
+        outcome=TurnOutcome.COMPLETED, output="reply", tool_calls=0, transcript=[]
+    )
+    with (
+        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
+        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
+        patch(
+            "openscientist.agent.claude_code_agent.ClaudeCodeAgent.prepare_job_workspace",
+            new_callable=AsyncMock,
+        ) as prepare_workspace,
+    ):
+        status = await run_chat_turn_async(job_dir)
+
+    assert status["status"] == "completed"
+    response = json.loads((job_dir / _CHAT_RESPONSE_FILE).read_text())
+    assert response["output"] == "reply"
+    assert captured["config"].system_prompt == "You are helpful."
+    assert captured["config"].assigned_skill_ids is None
+    assert (job_dir / ".claude" / "CLAUDE.md").exists()
+    prepare_workspace.assert_awaited_once_with(use_hypotheses=False)
+
+
+@pytest.mark.asyncio
+async def test_run_chat_turn_async_preserves_codex_skill_assignment(temp_jobs_dir: Path):
+    """The container rebuilds Codex with the discovery run's exact skills."""
+    from tests.helpers import StubCodexProvider
+
+    job_dir = temp_jobs_dir / "codex-chat-turn"
+    job_dir.mkdir()
+    assigned_ids = (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
+    (job_dir / _CHAT_REQUEST_FILE).write_text(
+        json.dumps(
+            {
+                "system_prompt": "OpenScientist Job Chat Assistant with assigned skills",
+                "model_override": None,
+                "prompt": "hi",
+                "assigned_skill_ids": list(assigned_ids),
+            }
+        )
+    )
+    captured: dict[str, AgentConfig] = {}
+    result = IterationResult(
+        outcome=TurnOutcome.COMPLETED,
+        output="Codex chat reply",
+        tool_calls=0,
+        transcript=[],
     )
 
     with (
@@ -812,27 +884,37 @@ async def test_send_chat_message_codex_provider(
             new_callable=AsyncMock,
         ) as prepare_workspace,
     ):
-        response = await send_chat_message(
-            db_session, test_job.id, "Summarize the main findings.", job_dir
-        )
+        status = await run_chat_turn_async(job_dir)
 
-    assert response == "Codex chat reply"
-    # Codex path must NOT write the Claude-only chat context file.
+    assert status["status"] == "completed"
+    response = json.loads((job_dir / _CHAT_RESPONSE_FILE).read_text())
+    assert response["output"] == "Codex chat reply"
     assert not (job_dir / ".claude" / "CLAUDE.md").exists()
-    # Chat guidance is folded into the system prompt (delivered via AGENTS.md).
     config = captured["config"]
-    assert config.system_prompt is not None
-    assert "OpenScientist Job Chat Assistant" in config.system_prompt
-    assert "domain--digital-ventilated-cage-analysis" in config.system_prompt
-    assert "domain--data-science" in config.system_prompt
     assert config.assigned_skill_ids == assigned_ids
-    prepare_workspace.assert_awaited_once_with(use_hypotheses=False)
-    # No model override on the codex path, the model comes from the provider.
     assert config.model_override is None
+    prepare_workspace.assert_awaited_once_with(use_hypotheses=False)
 
-    # Both messages persisted.
-    history = await get_chat_history(db_session, test_job.id)
-    assert len(history) == 2
-    assert history[0].role == "user"
-    assert history[1].role == "assistant"
-    assert history[1].content == "Codex chat reply"
+
+@pytest.mark.asyncio
+async def test_run_chat_turn_async_records_error(temp_jobs_dir: Path):
+    """A failed turn is captured as an error in the response file, not raised."""
+    job_dir = temp_jobs_dir / "chat-turn-err"
+    job_dir.mkdir()
+    (job_dir / _CHAT_REQUEST_FILE).write_text(
+        json.dumps({"system_prompt": "SP", "model_override": None, "prompt": "hi"})
+    )
+
+    captured: dict[str, AgentConfig] = {}
+    result = IterationResult(
+        outcome=TurnOutcome.FAILED, output="", tool_calls=0, transcript=[], error="boom"
+    )
+    with (
+        patch("openscientist.providers.get_provider", return_value=_ChatProvider()),
+        patch("openscientist.agent.factory.build_agent", _build_agent_recorder(captured, result)),
+    ):
+        status = await run_chat_turn_async(job_dir)
+
+    assert status["status"] == "failed"
+    response = json.loads((job_dir / _CHAT_RESPONSE_FILE).read_text())
+    assert response["error"] == "boom"

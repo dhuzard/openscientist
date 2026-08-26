@@ -93,6 +93,7 @@ jobs:
       - name: Unit & Integration Tests
         run: >-
           uv run pytest
+          -m "not network"
           --cov=src/openscientist
           --cov-report=term-missing
           --junitxml=pytest-results.xml

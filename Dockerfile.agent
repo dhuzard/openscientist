@@ -83,14 +83,14 @@ RUN useradd --uid 1001 --create-home --shell /bin/bash agent
 WORKDIR /app
 
 # Copy project files (README.md required by pyproject.toml readme field)
-COPY pyproject.toml README.md uv.lock* ./
+COPY pyproject.toml README.md uv.lock ./
 COPY requirements/udwa-poc.txt ./requirements/udwa-poc.txt
 COPY src/ ./src/
 
 # Install the locked OpenScientist dependency graph, then the project itself
 # without re-resolving it. A plain `uv pip install -e .` ignores uv.lock and can
 # silently pull incompatible framework releases into the runtime image.
-RUN uv export --locked --no-dev --no-emit-project --no-hashes \
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
         --output-file /tmp/openscientist-requirements.txt \
     && uv pip install --system -r /tmp/openscientist-requirements.txt \
     && uv pip install --system --no-deps -e . \
@@ -125,6 +125,18 @@ RUN --mount=type=secret,id=github_token,required=true \
 # it.
 COPY --from=codex-build /usr/local/bin/codex /usr/local/bin/codex
 RUN chmod +x /usr/local/bin/codex
+
+# omp harness CLI (OPENSCIENTIST_HARNESS=omp): pinned static binary onto PATH.
+# The checksum is the release asset digest, not just the tag: a git tag is
+# mutable and can be repointed at different bytes without this file changing,
+# and this binary runs with the job's database credentials in its environment.
+ARG OMP_VERSION=v17.1.5
+ARG OMP_SHA256=35019bfa4d1acae0040ef1f3d91c29c6e7401acfcdbcfeba6ff506a6b103c987
+ARG OMP_RELEASE_BASE=https://github.com/can1357/oh-my-pi/releases/download
+RUN curl -fsSL "${OMP_RELEASE_BASE}/${OMP_VERSION}/omp-linux-x64" -o /tmp/omp \
+    && echo "${OMP_SHA256}  /tmp/omp" | sha256sum -c - \
+    && install -m 0755 /tmp/omp /usr/local/bin/omp \
+    && rm /tmp/omp
 
 # Copy agent entrypoint
 COPY docker/agent-entrypoint.py /agent-entrypoint.py

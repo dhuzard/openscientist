@@ -18,12 +18,9 @@ from uuid import UUID
 from nicegui import ui
 from sqlalchemy import select
 
-from openscientist.agent.factory import backend_for_provider_id
+from openscientist.agent.factory import agent_class_for_provider_id
 from openscientist.agent_task_provenance import build_job_agent_task_provenance
-from openscientist.artifact_packager import (
-    create_artifacts_zip,
-    create_assay_evidence_bundle_zip,
-)
+from openscientist.artifact_packager import create_assay_evidence_bundle_zip
 from openscientist.assays import AssayAdapter, get_assay_registry
 from openscientist.assays.review import (
     AssayReviewItem,
@@ -1006,16 +1003,14 @@ def _confirm_restart_job(context: _JobDetailContext) -> None:
     dialog.open()
 
 
-_PROVIDER_DISPLAY = {
-    "anthropic": "Anthropic",
-    "cborg": "CBORG",
-    "vertex": "Vertex AI",
-    "bedrock": "AWS Bedrock",
-    "foundry": "Azure AI Foundry",
-    "openai": "OpenAI",
-    "azure-openai": "Azure OpenAI",
-    "ollama": "Ollama (local)",
-}
+def _provider_display_name(provider_id: str) -> str:
+    """The provider's own display name, or a titled id for an unknown provider."""
+    from openscientist.providers import provider_class
+
+    try:
+        return provider_class(provider_id).display_name
+    except ValueError:
+        return provider_id.title()
 
 
 def _format_model_name(llm_model: str | None) -> str | None:
@@ -1058,11 +1053,9 @@ def _stats_badges(latest_job: Any, lit_count: int, hyp_count: int = 0) -> list[A
         badges.append(("Hypotheses", hyp_count, "orange"))
     provider_id = getattr(latest_job, "llm_provider", None)
     if provider_id:
-        backend = backend_for_provider_id(provider_id)
-        badges.append(("Agent", backend.display_name, "indigo"))
-        badges.append(
-            ("Provider", _PROVIDER_DISPLAY.get(provider_id.lower(), provider_id.title()), "teal")
-        )
+        agent_cls = agent_class_for_provider_id(provider_id)
+        badges.append(("Agent", agent_cls.display_name, "indigo"))
+        badges.append(("Provider", _provider_display_name(provider_id), "teal"))
     # Show the model as its own badge when known. This is independent of the
     # provider badge: the provider is where the model is hosted, the model is
     # which one ran. Codex on an account default records no model id, so the
@@ -1729,13 +1722,8 @@ def _render_assay_pending_approvals_banner(context: _JobDetailContext) -> None:
                     ).props("color=amber-9 text-white dense")
 
 
-def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
-    try:
-        zip_buffer = create_artifacts_zip(job_dir, job_id)
-        ui.download(zip_buffer.getvalue(), filename=f"{job_id}_artifacts.zip")
-    except Exception as exc:
-        logger.error("Failed to create artifacts ZIP: %s", exc, exc_info=True)
-        ui.notify("Failed to create ZIP. Please try again.", type="negative")
+def _download_artifacts_zip(job_id: str) -> None:
+    ui.download(f"/web/jobs/{job_id}/artifacts.zip")
 
 
 def _download_assay_evidence_bundle_zip(job_dir: Path, job_id: str, adapter: AssayAdapter) -> None:
@@ -1862,7 +1850,7 @@ def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_pa
 
         ui.button(
             "Download All Artifacts",
-            on_click=lambda: _download_artifacts_zip(context.job_dir, context.job_id),
+            on_click=lambda: _download_artifacts_zip(context.job_id),
             icon="folder_zip",
         ).props("color=accent outline")
 

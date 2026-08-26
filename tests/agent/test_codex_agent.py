@@ -60,12 +60,15 @@ class _Item:
 
 def _usage(*, input_tokens: int, cached: int, output: int, reasoning: int = 0) -> SimpleNamespace:
     """Build a usage payload shaped like the SDK's ThreadTokenUsage (``.last``
-    is the per-turn TokenUsageBreakdown)."""
+    is the per-turn TokenUsageBreakdown). The counts nest the way the SDK
+    reports them: cached sits inside input, reasoning inside output, and
+    ``total_tokens`` counts each token once."""
     last = SimpleNamespace(
         input_tokens=input_tokens,
         cached_input_tokens=cached,
         output_tokens=output,
         reasoning_output_tokens=reasoning,
+        total_tokens=input_tokens + output,
     )
     return SimpleNamespace(last=last, total=last)
 
@@ -337,6 +340,8 @@ async def test_usage_subtraction_accumulates(tmp_path: Path) -> None:
 
 
 def test_usage_from_payload_math() -> None:
+    """Both nested sub-counts leave their parent, so the buckets are disjoint
+    and sum to the payload's own total of 37 rather than over-counting to 40."""
     tu = CodexAgent._usage_from_payload(_usage(input_tokens=30, cached=12, output=7, reasoning=3))
     assert tu == TokenUsage(
         input_tokens=18,

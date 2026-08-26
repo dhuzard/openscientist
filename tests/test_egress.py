@@ -1,4 +1,8 @@
-"""Tests for the air-gapped egress allowlist derivation."""
+"""Tests for the air-gapped egress allowlist dispatcher.
+
+The dispatcher is tested in isolation over an AirgapPosture. Which posture each
+provider reports is covered by the provider tests.
+"""
 
 from types import SimpleNamespace
 from typing import cast
@@ -10,12 +14,16 @@ from openscientist.job_container.egress import (
     derive_egress_allowlist,
     format_egress_allowlist,
 )
+from openscientist.providers.base import AirgapEgress, AirgapPosture
 from openscientist.settings import Settings
+
+BROKER = ("openscientist", 8082)
+PROXY = ("openscientist", 8081)
+GATEWAY = ("openscientist", 8083)
 
 
 @pytest.fixture(autouse=True)
-def _fixed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the broker URL so the allowlist is deterministic regardless of env."""
+def _fixed_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "openscientist.job_container.egress.container_broker_base_url",
         lambda: "http://openscientist:8082",
@@ -24,153 +32,88 @@ def _fixed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
         "openscientist.job_container.egress.container_dvc_gateway_base_url",
         lambda: "http://openscientist:8083",
     )
-
-
-def _settings(
-    *,
-    provider_id: str,
-    database_url: str = "postgresql+asyncpg://u:p@postgres:5432/db",
-    **provider_fields: object,
-) -> Settings:
-    provider = SimpleNamespace(
-        provider_id=provider_id,
-        anthropic_base_url=None,
-        azure_openai_resource=None,
-        anthropic_foundry_base_url=None,
-        anthropic_foundry_resource=None,
-        ollama_base_url="http://host.docker.internal:11434/v1",
-        aws_region=None,
-        cloud_ml_region=None,
+    monkeypatch.setattr(
+        "openscientist.llm_proxy.container_proxy_base_url",
+        lambda: "http://openscientist:8081",
     )
-    for key, value in provider_fields.items():
-        setattr(provider, key, value)
+
+
+def _settings(database_url: str = "postgresql+asyncpg://u:p@postgres:5432/db") -> Settings:
     return cast(
         Settings,
-        SimpleNamespace(
-            provider=provider,
-            database=SimpleNamespace(effective_database_url=database_url),
+        SimpleNamespace(database=SimpleNamespace(effective_database_url=database_url)),
+    )
+
+
+def test_proxy_posture_allows_db_broker_gateway_and_proxy() -> None:
+    entries = derive_egress_allowlist(_settings(), AirgapPosture(AirgapEgress.PROXY))
+    assert ("postgres", 5432) in entries
+    assert BROKER in entries
+    assert GATEWAY in entries
+    assert PROXY in entries
+
+
+def test_proxy_posture_excludes_any_provider_endpoint() -> None:
+    entries = derive_egress_allowlist(_settings(), AirgapPosture(AirgapEgress.PROXY))
+    hosts = {host for host, _ in entries}
+    assert hosts == {"postgres", "openscientist"}
+
+
+def test_direct_posture_allows_endpoints_not_proxy() -> None:
+    posture = AirgapPosture(
+        AirgapEgress.DIRECT,
+        direct_endpoints=(("bedrock-runtime.us-east-1.amazonaws.com", 443),),
+    )
+    entries = derive_egress_allowlist(_settings(), posture)
+    assert ("postgres", 5432) in entries
+    assert BROKER in entries
+    assert GATEWAY in entries
+    assert ("bedrock-runtime.us-east-1.amazonaws.com", 443) in entries
+    assert PROXY not in entries
+
+
+def test_direct_posture_multiple_endpoints() -> None:
+    posture = AirgapPosture(
+        AirgapEgress.DIRECT,
+        direct_endpoints=(
+            ("us-east5-aiplatform.googleapis.com", 443),
+            ("oauth2.googleapis.com", 443),
         ),
     )
-
-
-def test_postgres_and_broker_always_present() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
-    assert ("postgres", 5432) in entries
-    assert ("openscientist", 8082) in entries
-    assert ("openscientist", 8083) in entries
-
-
-def test_postgres_default_port_when_absent() -> None:
-    entries = derive_egress_allowlist(
-        _settings(provider_id="anthropic", database_url="postgresql+asyncpg://u:p@db-host/db")
-    )
-    assert ("db-host", 5432) in entries
-
-
-def test_anthropic_default_endpoint() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
-    assert ("api.anthropic.com", 443) in entries
-
-
-def test_configured_fair_vcg_endpoint() -> None:
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("FAIR_PREPARE_URL", "http://fair-vcg-mentor:8000")
-        monkeypatch.setenv("FAIR_PREPARE_API_KEY", "must-not-affect-egress")
-        entries = derive_egress_allowlist(_settings(provider_id="anthropic"))
-
-    assert ("fair-vcg-mentor", 8000) in entries
-
-
-def test_anthropic_custom_base_url() -> None:
-    entries = derive_egress_allowlist(
-        _settings(provider_id="anthropic", anthropic_base_url="https://llm.internal:8443")
-    )
-    assert ("llm.internal", 8443) in entries
-
-
-def test_cborg_uses_base_url() -> None:
-    entries = derive_egress_allowlist(
-        _settings(provider_id="cborg", anthropic_base_url="https://api.cborg.lbl.gov")
-    )
-    assert ("api.cborg.lbl.gov", 443) in entries
-
-
-def test_cborg_without_base_url_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="ANTHROPIC_BASE_URL"):
-        derive_egress_allowlist(_settings(provider_id="cborg"))
-
-
-def test_openai_default_endpoint() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="openai"))
-    assert ("api.openai.com", 443) in entries
-
-
-def test_azure_openai_resource_endpoint() -> None:
-    entries = derive_egress_allowlist(
-        _settings(provider_id="azure-openai", azure_openai_resource="myres")
-    )
-    assert ("myres.openai.azure.com", 443) in entries
-
-
-def test_azure_openai_without_resource_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="AZURE_OPENAI_RESOURCE"):
-        derive_egress_allowlist(_settings(provider_id="azure-openai"))
-
-
-def test_foundry_base_url_takes_precedence() -> None:
-    entries = derive_egress_allowlist(
-        _settings(
-            provider_id="foundry",
-            anthropic_foundry_base_url="https://foundry.example.com/anthropic",
-            anthropic_foundry_resource="ignored",
-        )
-    )
-    assert ("foundry.example.com", 443) in entries
-
-
-def test_foundry_resource_endpoint() -> None:
-    entries = derive_egress_allowlist(
-        _settings(provider_id="foundry", anthropic_foundry_resource="myfoundry")
-    )
-    assert ("myfoundry.services.ai.azure.com", 443) in entries
-
-
-def test_foundry_without_config_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="FOUNDRY"):
-        derive_egress_allowlist(_settings(provider_id="foundry"))
-
-
-def test_ollama_from_base_url() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="ollama"))
-    assert ("host.docker.internal", 11434) in entries
-
-
-def test_bedrock_regional_runtime_endpoint() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="bedrock", aws_region="us-east-1"))
-    assert ("bedrock-runtime.us-east-1.amazonaws.com", 443) in entries
-
-
-def test_bedrock_without_region_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="AWS_REGION"):
-        derive_egress_allowlist(_settings(provider_id="bedrock"))
-
-
-def test_vertex_regional_and_oauth_endpoints() -> None:
-    entries = derive_egress_allowlist(_settings(provider_id="vertex", cloud_ml_region="us-east5"))
+    entries = derive_egress_allowlist(_settings(), posture)
     assert ("us-east5-aiplatform.googleapis.com", 443) in entries
     assert ("oauth2.googleapis.com", 443) in entries
 
 
-def test_vertex_without_region_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="CLOUD_ML_REGION"):
-        derive_egress_allowlist(_settings(provider_id="vertex"))
+def test_configured_fair_vcg_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAIR_PREPARE_URL", "http://fair-vcg-mentor:8000")
+    monkeypatch.setenv("FAIR_PREPARE_API_KEY", "must-not-affect-egress")
+
+    entries = derive_egress_allowlist(_settings(), AirgapPosture(AirgapEgress.PROXY))
+
+    assert ("fair-vcg-mentor", 8000) in entries
 
 
-def test_unknown_provider_refused() -> None:
-    with pytest.raises(AirgapProviderError, match="Unknown provider"):
-        derive_egress_allowlist(_settings(provider_id="mystery"))
+def test_unsupported_posture_refused() -> None:
+    posture = AirgapPosture(AirgapEgress.UNSUPPORTED, reason="Foo cannot be air-gapped.")
+    with pytest.raises(AirgapProviderError, match="cannot be air-gapped"):
+        derive_egress_allowlist(_settings(), posture)
+
+
+def test_postgres_default_port_when_absent() -> None:
+    entries = derive_egress_allowlist(
+        _settings(database_url="postgresql+asyncpg://u:p@db-host/db"),
+        AirgapPosture(AirgapEgress.PROXY),
+    )
+    assert ("db-host", 5432) in entries
+
+
+def test_deduplicates_entries() -> None:
+    posture = AirgapPosture(AirgapEgress.DIRECT, direct_endpoints=(("openscientist", 8082),))
+    entries = derive_egress_allowlist(_settings(), posture)
+    assert entries.count(("openscientist", 8082)) == 1
 
 
 def test_format_egress_allowlist() -> None:
-    rendered = format_egress_allowlist([("postgres", 5432), ("api.anthropic.com", 443)])
-    assert rendered == "postgres:5432,api.anthropic.com:443"
+    rendered = format_egress_allowlist([("postgres", 5432), ("openscientist", 8081)])
+    assert rendered == "postgres:5432,openscientist:8081"

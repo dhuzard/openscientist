@@ -32,7 +32,7 @@ import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
 from openai_codex.generated.v2_all import (
@@ -119,6 +119,31 @@ def _toml_str(value: str) -> str:
     return f'"{escaped}"'
 
 
+class _TokenBreakdown(Protocol):
+    """The nested per-turn counts read off the SDK's ``TokenUsageBreakdown``.
+
+    Structural rather than nominal so the mapper stays checkable while tests
+    substitute stubs. Typing these four is what keeps a rename or a change of
+    nesting upstream from silently mis-pricing a turn.
+    """
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def cached_input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def reasoning_output_tokens(self) -> int: ...
+
+
+class _TurnUsage(Protocol):
+    """The SDK's ``ThreadTokenUsage``, of which only ``last`` is per-turn."""
+
+    @property
+    def last(self) -> _TokenBreakdown | None: ...
+
+
 class CodexAgent(AbstractAgent[CodexCompatible]):
     """Agent that drives the Codex app-server via the official ``openai-codex``."""
 
@@ -133,6 +158,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
 
     backend = AgentBackend.CODEX
     file_write_tool = "apply_patch"
+    display_name = "Codex"
+    # codex discovers ``.agents/skills/<name>/SKILL.md`` under its cwd; the base
+    # class writes them there via the default SKILL.md layout.
+    skills_subdir = ".agents/skills"
 
     @classmethod
     def prompt_fragments(cls) -> BackendFragments:
@@ -149,6 +178,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         return cls.job_doc(use_hypotheses=use_hypotheses, phenix_available=phenix_available)
 
     async def prepare_job_workspace(self, *, use_hypotheses: bool = False) -> None:
+        if self._config.assigned_skill_ids is None:
+            await super().prepare_job_workspace(use_hypotheses=use_hypotheses)
+            return
+
         from openscientist.agent.skills import write_skills_to_codex_dir
 
         await write_skills_to_codex_dir(
@@ -209,23 +242,10 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         OPENSCIENTIST_SECRET_KEY, provider creds, executor image, ...) that the
         tools need, then overlay the per-job ``OPENSCIENTIST_*`` values.
         """
-        config = self._config
-        job_dir = self._job_dir()
         # Never serialize trusted DVC connection settings into per-job
         # CODEX_HOME/config.toml. Only gateway values may cross this boundary.
         env = without_dvc_credentials(dict(os.environ))
-        env.update(
-            {
-                "OPENSCIENTIST_JOB_ID": job_dir.name,
-                "OPENSCIENTIST_JOB_DIR": str(job_dir),
-                "OPENSCIENTIST_USE_HYPOTHESES": "1" if config.use_hypotheses else "0",
-            }
-        )
-        if config.data_file is not None:
-            env["OPENSCIENTIST_DATA_FILE"] = str(config.data_file)
-        if config.data_files:
-            env["OPENSCIENTIST_DATA_FILES"] = os.pathsep.join(str(p) for p in config.data_files)
-        env.update(config.tool_server_env)
+        env.update(self._job_env_overlay(self._job_dir()))
         return env
 
     def _write_codex_config(self) -> None:
@@ -368,18 +388,18 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
         return self._thread
 
     @staticmethod
-    def _usage_from_payload(usage: Any) -> TokenUsage:
+    def _usage_from_payload(usage: _TurnUsage) -> TokenUsage:
         """Normalize the turn's token usage to ``TokenUsage``.
 
         The SDK reports per-turn usage as ``usage.last`` (a
-        ``TokenUsageBreakdown``). Its Responses-API shape reports input tokens
-        inclusive of cached input and output tokens inclusive of reasoning
-        output, so each nested category is subtracted from its parent. The
-        resulting five ``TokenUsage`` fields are additive and non-overlapping.
-        ``usage.total`` is the running thread total, which we do not use here
-        since ``_token_usage`` accumulates per turn.
+        ``TokenUsageBreakdown``) whose counts nest: ``input_tokens`` includes
+        ``cached_input_tokens`` and ``output_tokens`` includes
+        ``reasoning_output_tokens`` (Responses-API shape). Both sub-counts are
+        subtracted here so the buckets stay non-overlapping and still sum to
+        the payload's ``total_tokens``. ``usage.total`` is the running thread
+        total, which we do not use since ``_token_usage`` accumulates per turn.
         """
-        last = getattr(usage, "last", None)
+        last = usage.last
         if last is None:
             return TokenUsage()
         return TokenUsage(
@@ -387,6 +407,7 @@ class CodexAgent(AbstractAgent[CodexCompatible]):
             output_tokens=max(0, last.output_tokens - last.reasoning_output_tokens),
             cache_read_tokens=max(0, last.cached_input_tokens),
             cache_write_tokens=0,
+            cache_write_1h_tokens=0,
             reasoning_tokens=max(0, last.reasoning_output_tokens),
         )
 

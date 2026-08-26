@@ -8,6 +8,7 @@ unit testing.
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +23,7 @@ from openscientist.orchestrator import (
     increment_ks_iteration,
     update_job_status,
 )
+from openscientist.settings import clear_settings_cache
 
 # ─── get_version_metadata ─────────────────────────────────────────────
 
@@ -58,6 +60,156 @@ class TestGetVersionMetadata:
         mock_path_cls.return_value.exists.return_value = False
         info = get_version_metadata()
         assert isinstance(info, dict)
+
+    def test_records_sdk_versions(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
+        info = get_version_metadata()
+        assert info["claude_code_version"]
+        assert info["claude_agent_sdk_version"]
+
+    def test_sdk_version_break_keeps_cli_version(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
+        with patch.dict(sys.modules, {"claude_agent_sdk._version": None}):
+            info = get_version_metadata()
+        assert info["claude_code_version"]
+        assert "claude_agent_sdk_version" not in info
+
+    def test_cli_version_break_keeps_sdk_version(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
+        with patch.dict(sys.modules, {"claude_agent_sdk._cli_version": None}):
+            info = get_version_metadata()
+        assert info["claude_agent_sdk_version"]
+        assert "claude_code_version" not in info
+
+    def test_both_version_modules_break_fails_soft(self, pinned_harness):
+        pinned_harness("anthropic", "claude_code")
+        broken = {"claude_agent_sdk._cli_version": None, "claude_agent_sdk._version": None}
+        with patch.dict(sys.modules, broken):
+            info = get_version_metadata()
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
+
+
+@pytest.fixture
+def pinned_harness(monkeypatch):
+    """Pin provider + harness env and rebuild settings so factory resolution is real.
+
+    Also pins OPENSCIENTIST_COMMIT so get_commit() never shells out, keeping the
+    subprocess monkeypatches below scoped to the harness version probe.
+    """
+
+    def pin(provider: str, harness: str) -> None:
+        monkeypatch.setenv("OPENSCIENTIST_PROVIDER", provider)
+        monkeypatch.setenv("OPENSCIENTIST_HARNESS", harness)
+        monkeypatch.setenv("OPENSCIENTIST_COMMIT", "0123456789ab")
+        clear_settings_cache()
+
+    yield pin
+    clear_settings_cache()
+
+
+class TestVersionMetadataHarness:
+    """The resolved harness id and its version in the provenance metadata."""
+
+    def test_claude_code_records_sdk_versions_without_probing(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "claude_code")
+        monkeypatch.setattr(
+            subprocess, "run", MagicMock(side_effect=AssertionError("no CLI probe expected"))
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "claude_code"
+        assert info["agent_harness_version"] == info["claude_code_version"]
+        assert info["claude_agent_sdk_version"]
+
+    def test_auto_resolves_to_provider_family(self, pinned_harness):
+        pinned_harness("anthropic", "auto")
+        info = get_version_metadata()
+        assert info["agent_harness"] == "claude_code"
+
+    def test_omp_probes_the_binary_the_agent_runs(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", "/opt/pinned/omp")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="omp/17.1.5\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert info["agent_harness_version"] == "17.1.5"
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
+        assert calls == [["/opt/pinned/omp", "--version"]]
+
+    def test_codex_probes_the_binary_the_agent_runs(self, pinned_harness, monkeypatch):
+        pinned_harness("openai", "codex")
+        monkeypatch.setenv("OPENSCIENTIST_CODEX_BIN", "/opt/pinned/codex")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.0.0\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "codex"
+        assert info["agent_harness_version"] == "0.0.0"
+        assert "claude_code_version" not in info
+        assert "claude_agent_sdk_version" not in info
+        assert calls == [["/opt/pinned/codex", "--version"]]
+
+    def test_missing_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setattr(subprocess, "run", MagicMock(side_effect=FileNotFoundError("omp")))
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
+
+    def test_hanging_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("openai", "codex")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.TimeoutExpired(cmd=["codex", "--version"], timeout=3)),
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "codex"
+        assert "agent_harness_version" not in info
+
+    def test_failing_cli_fails_soft(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.CalledProcessError(1, ["omp", "--version"])),
+        )
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
+
+    def test_unparseable_version_records_the_raw_line(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+        monkeypatch.setenv("OPENSCIENTIST_OMP_BIN", "/opt/pinned/omp")
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="omp nightly build\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness_version"] == "omp nightly build"
+
+    def test_blank_version_output_records_nothing(self, pinned_harness, monkeypatch):
+        pinned_harness("anthropic", "omp")
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        info = get_version_metadata()
+        assert info["agent_harness"] == "omp"
+        assert "agent_harness_version" not in info
 
 
 # ─── update_job_status ────────────────────────────────────────────────
@@ -750,11 +902,11 @@ class TestIncrementKsIteration:
         assert ks.data["hypotheses"] == []
 
 
-# ─── _write_skills_to_claude_dir ──────────────────────────────────────
+# ─── ClaudeCodeAgent.prepare_job_workspace ────────────────────────────
 
 
 class TestWriteSkillsToClaudeDir:
-    """Tests for _write_skills_to_claude_dir."""
+    """ClaudeCodeAgent writes CLAUDE.md plus flat skill files into .claude/."""
 
     def _make_skill(self, *, name, category, slug, description=None, content="Skill content."):
         skill = MagicMock()
@@ -765,10 +917,27 @@ class TestWriteSkillsToClaudeDir:
         skill.content = content
         return skill
 
+    async def _prepare(self, tmp_path, skills):
+        from openscientist.agent.base import AgentConfig
+        from openscientist.agent.claude_code_agent import ClaudeCodeAgent
+        from tests.helpers import StubClaudeProvider
+
+        agent = ClaudeCodeAgent(AgentConfig(job_dir=tmp_path), StubClaudeProvider())
+        with (
+            patch("openscientist.database.session.AsyncSessionLocal") as mock_session_cls,
+            patch(
+                "openscientist.prompts.get_enabled_skills", new_callable=AsyncMock
+            ) as mock_get_skills,
+        ):
+            mock_get_skills.return_value = skills
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value = mock_cm
+            await agent.prepare_job_workspace()
+
     @pytest.mark.asyncio
     async def test_writes_skill_files(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skill = self._make_skill(
             name="Hypothesis Generation",
             category="analysis",
@@ -776,20 +945,7 @@ class TestWriteSkillsToClaudeDir:
             description="How to form hypotheses",
             content="Step 1: ...\nStep 2: ...",
         )
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = [skill]
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [skill])
 
         skills_dir = tmp_path / ".claude" / "skills"
         assert skills_dir.is_dir()
@@ -803,21 +959,7 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_no_skills_does_not_create_skills_dir(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = []
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [])
 
         # .claude/ dir and CLAUDE.md are always written; skills/ subdir is not
         assert (tmp_path / ".claude" / "CLAUDE.md").exists()
@@ -825,8 +967,6 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_skill_without_description(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skill = self._make_skill(
             name="Stopping Criteria",
             category="workflow",
@@ -834,20 +974,7 @@ class TestWriteSkillsToClaudeDir:
             description=None,
             content="Stop when done.",
         )
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = [skill]
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [skill])
 
         md_file = tmp_path / ".claude" / "skills" / "workflow--stopping-criteria.md"
         assert md_file.exists()
@@ -857,21 +984,7 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_always_writes_job_claude_md(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = []
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, [])
 
         claude_md = tmp_path / ".claude" / "CLAUDE.md"
         assert claude_md.exists()
@@ -881,26 +994,11 @@ class TestWriteSkillsToClaudeDir:
 
     @pytest.mark.asyncio
     async def test_writes_multiple_skill_files(self, tmp_path):
-        from openscientist.agent.skills import write_skills_to_claude_dir
-
         skills = [
             self._make_skill(name="Skill A", category="cat1", slug="skill-a", content="Content A"),
             self._make_skill(name="Skill B", category="cat2", slug="skill-b", content="Content B"),
         ]
-
-        with (
-            patch("openscientist.agent.skills.AsyncSessionLocal") as mock_session_cls,
-            patch(
-                "openscientist.agent.skills.get_enabled_skills", new_callable=AsyncMock
-            ) as mock_get_skills,
-        ):
-            mock_get_skills.return_value = skills
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_cm
-
-            await write_skills_to_claude_dir(tmp_path)
+        await self._prepare(tmp_path, skills)
 
         skills_dir = tmp_path / ".claude" / "skills"
         assert len(list(skills_dir.glob("*.md"))) == 2
@@ -1851,10 +1949,11 @@ async def test_persist_job_cost_record_keeps_every_token_category() -> None:
 
     estimate.assert_called_once_with(
         "gpt-5.5",
-        100,
-        20,
-        cache_write_tokens=3,
+        input_tokens=100,
+        output_tokens=20,
         cache_read_tokens=40,
+        cache_write_tokens=3,
+        cache_write_1h_tokens=0,
         reasoning_tokens=5,
     )
     record = session.add.call_args.args[0]

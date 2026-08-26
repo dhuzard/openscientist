@@ -19,8 +19,22 @@ from openscientist.assays import AssayAdapter, get_assay_registry
 
 logger = logging.getLogger(__name__)
 
-_EXCLUDE_DIRS = {".codex", ".git", "__pycache__", ".pytest_cache", "node_modules"}
-_EXCLUDE_FILES = {".dvc_workflow.lock", "config.json"}
+EXCLUDED_FILES_MANIFEST = "EXCLUDED_FILES.txt"
+
+# Agent working directories are never artifacts, and they hold credentials: the
+# per-job MCP config, session transcripts, and the copied omp credential vault.
+_EXCLUDE_DIRS = {
+    ".codex",
+    ".omp",
+    ".omp-home",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+}
+_EXCLUDE_FILES = {".dvc_workflow.lock", "config.json", EXCLUDED_FILES_MANIFEST}
+
+MAX_ARTIFACT_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 def _iter_artifact_files(
@@ -56,53 +70,65 @@ def _iter_artifact_files(
             yield file_path, file_path.relative_to(job_dir)
 
 
+def _partition_by_size(
+    files: Iterator[tuple[Path, Path]],
+) -> tuple[list[tuple[Path, Path]], list[tuple[Path, int]]]:
+    included: list[tuple[Path, Path]] = []
+    oversized: list[tuple[Path, int]] = []
+    for file_path, arcname in files:
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            included.append((file_path, arcname))
+            continue
+        if size > MAX_ARTIFACT_FILE_SIZE_BYTES:
+            oversized.append((arcname, size))
+        else:
+            included.append((file_path, arcname))
+    return included, oversized
+
+
+def _format_excluded_manifest(oversized: list[tuple[Path, int]]) -> str:
+    lines = [
+        "The following files were left out of this archive because they exceed "
+        f"{MAX_ARTIFACT_FILE_SIZE_BYTES // (1024 * 1024)} MB. Large files here are "
+        "often reference datasets used as analysis input rather than report "
+        "outputs; check the job's data sources if you need one of these.",
+        "",
+    ]
+    for arcname, size in sorted(oversized, key=lambda pair: pair[1], reverse=True):
+        lines.append(f"{size / (1024 * 1024):>10.1f} MB  {arcname.as_posix()}")
+    return "\n".join(lines) + "\n"
+
+
 def _write_artifacts_zip(
     zip_file: zipfile.ZipFile,
     job_dir: Path,
     excluded_paths: set[Path] | None = None,
 ) -> int:
     """Write job artifacts into an open zip file and return number of files written."""
+    included, oversized = _partition_by_size(
+        _iter_artifact_files(job_dir, excluded_paths=excluded_paths)
+    )
+
     written = 0
-    for file_path, arcname in _iter_artifact_files(job_dir, excluded_paths=excluded_paths):
+    for file_path, arcname in included:
         try:
             zip_file.write(file_path, arcname)
             written += 1
         except Exception as e:
             logger.warning("Failed to add %s to archive: %s", arcname, e)
+
+    if oversized:
+        zip_file.writestr(EXCLUDED_FILES_MANIFEST, _format_excluded_manifest(oversized))
+        logger.info(
+            "Excluded %d oversized file(s) from artifacts archive (over %d MB): %s",
+            len(oversized),
+            MAX_ARTIFACT_FILE_SIZE_BYTES // (1024 * 1024),
+            ", ".join(arcname.as_posix() for arcname, _ in oversized),
+        )
+
     return written
-
-
-def create_artifacts_zip(job_dir: Path, job_id: str) -> BytesIO:
-    """
-    Create a ZIP archive of all job artifacts.
-
-    Includes:
-    - Final reports (PDF, Markdown)
-    - Plots and visualizations
-    - Data files
-    - Provenance logs
-
-    Args:
-        job_dir: Path to job directory
-        job_id: Job ID (for logging)
-
-    Returns:
-        BytesIO buffer containing ZIP archive
-    """
-    zip_buffer = BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        written = _write_artifacts_zip(zip_file, job_dir)
-
-    zip_buffer.seek(0)
-    logger.info(
-        "Created artifacts ZIP for job %s (%d files, %d bytes)",
-        job_id,
-        written,
-        zip_buffer.getbuffer().nbytes,
-    )
-
-    return zip_buffer
 
 
 def create_artifacts_zip_file(job_dir: Path, archive_path: Path, job_id: str) -> int:

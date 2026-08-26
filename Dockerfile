@@ -86,7 +86,7 @@ COPY src/ src/
 
 # Reinstall the locked dependency graph and project so the web runtime cannot
 # silently drift from the versions exercised by CI and the agent image.
-RUN uv export --locked --no-dev --no-emit-project --no-hashes \
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
         --output-file /tmp/openscientist-requirements.txt \
     && uv pip install --system -r /tmp/openscientist-requirements.txt \
     && uv pip install --system --no-deps -e . \

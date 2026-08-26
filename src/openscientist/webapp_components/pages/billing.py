@@ -66,6 +66,8 @@ def _render_db_cost_records(cost_records: list[CostRecord]) -> None:
 
     totals = summarize_usage(cost_records)
 
+    # Every bucket that cost_usd prices is shown, otherwise the cost per token
+    # reads as nonsense: cached reads usually dominate an agentic run.
     render_stat_badges(
         [
             ("Total Cost", f"${totals.cost_usd:.4f}", "green"),

@@ -542,3 +542,11 @@ class TestTimelineHeaderText:
 
     def test_in_progress_suffix_on_strapline(self) -> None:
         assert job_detail._timeline_header_text("Found X", "", True) == "Found X [in progress]"
+
+
+class TestDownloadArtifactsZipStreamsOverHttp:
+    def test_triggers_http_download_of_session_route(self) -> None:
+        with patch.object(job_detail, "ui") as mock_ui:
+            job_detail._download_artifacts_zip("job-1")
+
+        mock_ui.download.assert_called_once_with("/web/jobs/job-1/artifacts.zip")

@@ -342,6 +342,30 @@ async def test_cost_record_creation(db_session: AsyncSession, test_job: Job):
 
 
 @pytest.mark.asyncio
+async def test_cost_record_token_bucket_defaults(db_session: AsyncSession, test_job: Job):
+    """New token buckets default to zero when callers omit them."""
+    cost = CostRecord(
+        job_id=test_job.id,
+        iteration=1,
+        operation_type="analysis",
+        provider="vertex",
+        model="claude-3-5-sonnet",
+        input_tokens=1000,
+        output_tokens=500,
+        cost_usd=0.015,
+    )
+    db_session.add(cost)
+    await db_session.commit()
+    await db_session.refresh(cost)
+
+    # Inserted with only the two original buckets, so the three added columns
+    # must read back as 0 rather than NULL. Nothing else pins that default.
+    assert cost.cache_read_tokens == 0
+    assert cost.cache_write_tokens == 0
+    assert cost.reasoning_tokens == 0
+
+
+@pytest.mark.asyncio
 async def test_cascade_delete_job(db_session: AsyncSession, test_user: User):
     """Test that deleting a job cascades to related records."""
     # Create job with related records
