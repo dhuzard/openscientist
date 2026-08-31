@@ -78,6 +78,15 @@ The full plan is maintained in
 with executable sequencing in the
 [combined backlog](https://github.com/dhuzard/open-ontologies/blob/main/case-studies/openscientist-hcmo-evidence/BACKLOG.md).
 
+The companion repository now also contains an executable offline reference
+slice for PoCs 2–5: a fail-closed candidate-write gate, seven-operation
+scientific kernel, byte-pinned HCMO ISA/STATO 2 × 2 adapter, bounded
+scientific-method gates, combined traceability output, and a deterministic
+four-arm enforcement smoke harness. This PR intentionally remains the smaller
+PoC 1 integration proposal; the companion smoke harness is not a live-model
+efficacy result and the later components should be reviewed before production
+orchestrator/database wiring is proposed here.
+
 ## Candidate production hook
 
 After `final_report.md` and consensus are successfully written, but before
