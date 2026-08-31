@@ -54,6 +54,37 @@ The OpenScientist namespace in this prototype is provisional and must not be
 treated as a published vocabulary. Namespace governance and versioning are a
 precondition for production use.
 
+### DVC job readiness preflight
+
+Before normalizing an existing DVC/home-cage job, run the read-only preflight:
+
+```bash
+uv run python -m openscientist.evidence.dvc_job_readiness \
+  --job-dir /path/to/jobs/<job-id> \
+  --output-dir /path/to/local-audit-results
+```
+
+When a read-only database URL is available, name its environment variable
+without putting credentials on the command line:
+
+```bash
+uv run python -m openscientist.evidence.dvc_job_readiness \
+  --job-dir /path/to/jobs/<job-id> \
+  --output-dir /path/to/local-audit-results \
+  --database-url-env HCMO_AUDIT_DATABASE_URL
+```
+
+The preflight hashes the discovered activity/event sources, enumerates every
+named timestamp group and trace, excludes summary columns from trace counts,
+audits timestamp parsing and source offsets, and detects mixed native sampling
+intervals. It reports missing governed cage, schedule, timezone, housing, and
+relational evidence metadata as `UNAVAILABLE`; those states block strict export.
+It never treats an inferred light window or a narrative statistic as canonical
+HCMO/STATO evidence.
+
+A fork-local trial on a completed multi-cohort DVC job is documented in
+[`docs/experiments/HCMO_DVC_LOCAL_TRIAL.md`](experiments/HCMO_DVC_LOCAL_TRIAL.md).
+
 ## Refined five-PoC roadmap
 
 The companion design now separates five increments:
