@@ -1,0 +1,16 @@
+{
+  "job_id": "hcmo-dvc-governed-demo",
+  "status": "completed",
+  "current_iteration": 1,
+  "hypotheses": 1,
+  "findings": 1,
+  "analyses": 1,
+  "literature": 1,
+  "data_files": 2,
+  "finding_hypothesis_links": 1,
+  "finding_literature_links": 1,
+  "statistical_results_table": true,
+  "finding_analyses_table": true,
+  "finding_data_files_table": true
+}
+

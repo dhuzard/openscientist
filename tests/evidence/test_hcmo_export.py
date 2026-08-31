@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -132,3 +133,57 @@ def test_appendix_attachment_is_idempotent() -> None:
 
     assert once == twice
     assert twice.count(hcmo_export.APPENDIX_BEGIN) == 1
+
+
+def test_multi_cage_contexts_are_distinct_and_valid() -> None:
+    snapshot = _snapshot()
+    first = snapshot.pop("semantic_context")
+    second = deepcopy(first)
+    for name in ("enclosure", "subject", "sensor", "observation"):
+        second[name]["id"] = f"{second[name]['id']}-2"
+    second["enclosure"]["identifier"] = "rack-3-cage-13"
+    second["sensor"]["identifier"] = "ir-2"
+    second["observation"]["result_id"] = "behavior-result-dark-phase-2"
+    snapshot["semantic_contexts"] = [first, second]
+    snapshot["data_files"][0]["observation_ids"] = [
+        first["observation"]["id"],
+        second["observation"]["id"],
+    ]
+
+    hcmo_export.validate_snapshot(snapshot)
+    graph = hcmo_export.EvidenceGraphBuilder(snapshot).build()
+    evidence_text = graph.serialize(format="turtle")
+    validation = hcmo_export.validate_graph(
+        evidence_text,
+        hcmo_export.DEFAULT_PROFILE.read_text(encoding="utf-8"),
+        hcmo_export.DEFAULT_SHAPES.read_text(encoding="utf-8"),
+    )
+
+    assert validation["valid"] is True
+    assert len(set(graph.subjects(hcmo_export.RDF.type, hcmo_export.HCM.MonitoredEnclosure))) == 2
+    assert len(set(graph.subjects(hcmo_export.RDF.type, hcmo_export.HCM_OBS.BehaviorObservation))) == 2
+
+
+def test_multi_context_data_file_requires_explicit_observation_links() -> None:
+    snapshot = _snapshot()
+    first = snapshot.pop("semantic_context")
+    second = deepcopy(first)
+    for name in ("enclosure", "subject", "sensor", "observation"):
+        second[name]["id"] = f"{second[name]['id']}-2"
+    snapshot["semantic_contexts"] = [first, second]
+
+    with pytest.raises(hcmo_export.EvidenceExportError, match="must declare observation_ids"):
+        hcmo_export.validate_snapshot(snapshot)
+
+
+def test_multi_context_rejects_observation_without_source_data() -> None:
+    snapshot = _snapshot()
+    first = snapshot.pop("semantic_context")
+    second = deepcopy(first)
+    for name in ("enclosure", "subject", "sensor", "observation"):
+        second[name]["id"] = f"{second[name]['id']}-2"
+    snapshot["semantic_contexts"] = [first, second]
+    snapshot["data_files"][0]["observation_ids"] = [first["observation"]["id"]]
+
+    with pytest.raises(hcmo_export.EvidenceExportError, match="have no source data"):
+        hcmo_export.validate_snapshot(snapshot)

@@ -85,6 +85,27 @@ HCMO/STATO evidence.
 A fork-local trial on a completed multi-cohort DVC job is documented in
 [`docs/experiments/HCMO_DVC_LOCAL_TRIAL.md`](experiments/HCMO_DVC_LOCAL_TRIAL.md).
 
+### Runnable governed positive control
+
+The real job remains a useful fail-closed negative control. A separate
+two-cage synthetic positive control now demonstrates the complete strict path
+without filling those real metadata gaps with invented facts:
+
+[`examples/hcmo_dvc_demo/README.md`](../examples/hcmo_dvc_demo/README.md)
+
+Its approved manifest is reconciled against exact source-file, timestamp-field,
+and trace-field tuples. It carries cage-level IANA timezones and source offsets,
+light schedules, housing intervals, enclosure dimensions, and independent
+expected cage count. A deterministic relational inventory supplies the
+first-class provenance relationships that the historical real job lacks.
+
+The evidence adapter accepts multiple explicit semantic contexts and requires
+each data file in a multi-context snapshot to name its observation links. The
+fixture produces two distinct HCMO enclosures, subjects, sensors, observations,
+and time intervals. It intentionally makes only a tiny synthetic interval
+claim; passing this demo does not qualify the scientific pipeline or unblock
+the original job.
+
 ## Refined five-PoC roadmap
 
 The companion design now separates five increments:

@@ -1,0 +1,244 @@
+{
+  "config": {
+    "job_id": "hcmo-dvc-governed-demo",
+    "research_question": "What is the equal-cage mean activity in this synthetic interval after per-cage aggregation to a common five-minute grid?",
+    "short_title": "Governed two-cage DVC fixture",
+    "status": "completed",
+    "max_iterations": 1,
+    "started_at": "2026-08-31T12:00:00Z",
+    "ended_at": "2026-08-31T12:05:00Z",
+    "llm_provider": "deterministic-fixture"
+  },
+  "data_summary": {
+    "files": 2,
+    "subjects": 2,
+    "observations": 2
+  },
+  "iteration": 1,
+  "hypotheses": [
+    {
+      "id": "H-DEMO-001",
+      "iteration_proposed": 1,
+      "statement": "The equal-cage mean activity in the governed synthetic interval is positive after cage-first common-grid aggregation.",
+      "status": "supported",
+      "proposed_by": "fixture-author",
+      "tested_at_iteration": 1,
+      "test_strategy": "Average raw rows within physical cage and five-minute bin, average bins within cage, then average the two cage summaries with equal cage weight.",
+      "result": {
+        "conclusion": "Supported for this synthetic interval only."
+      },
+      "spawned_hypotheses": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-DEMO-001",
+      "iteration_discovered": 1,
+      "title": "Equal-cage mean activity for the synthetic interval",
+      "evidence": "Cage A had a common-grid mean of 14 counts and cage B had a common-grid mean of 22 counts; their equal-cage mean was 18 counts.",
+      "status": "supported",
+      "inference_scope": "sample",
+      "experimental_unit_count": 2,
+      "supporting_hypotheses": ["H-DEMO-001"],
+      "analysis_ids": ["A-DEMO-001"],
+      "data_file_ids": ["D-DEMO-A", "D-DEMO-B"],
+      "result_ids": ["R-DEMO-001"],
+      "literature_support": ["L-DEMO-001"],
+      "plots": [],
+      "biological_interpretation": "This is a structural positive control and supports no circadian, population, causal, or real-animal conclusion.",
+      "citations": [
+        {
+          "pmid": "12884972",
+          "snippet": "Reliable individual differences in home-cage behaviors such as running, swinging on bars, and burrowing were found.",
+          "explanation": "Supports home-cage activity as a relevant behavioral endpoint, not the synthetic numerical result.",
+          "validation_status": "verified"
+        }
+      ]
+    }
+  ],
+  "literature": [
+    {
+      "id": "L-DEMO-001",
+      "pmid": "12884972",
+      "title": "Home-cage activity in heterogeneous stock (HS) mice as a model of baseline activity",
+      "abstract": "Reliable individual differences in home-cage behaviors such as running, swinging on bars, and burrowing were found.",
+      "relevance_to": ["F-DEMO-001"],
+      "retrieved_at_iteration": 1,
+      "search_query": "mouse home cage locomotor activity"
+    }
+  ],
+  "analysis_log": [
+    {
+      "id": "A-DEMO-001",
+      "iteration": 1,
+      "action": "execute_code",
+      "timestamp": "2026-08-31T12:02:00Z",
+      "description": "Computed a five-minute cage-first grid, one mean per physical cage, and an equal-cage sample mean.",
+      "success": true,
+      "code_sha256": "738a93efab41f825a10a9dae6256ab5e74b072e89b60c50f8b09f5a17bea95b9",
+      "input_file_ids": ["D-DEMO-A", "D-DEMO-B"],
+      "output_result_ids": ["R-DEMO-001"]
+    }
+  ],
+  "iteration_summaries": [],
+  "feedback_history": [],
+  "consensus_answer": "The equal-cage mean is 18 counts for this synthetic interval only.",
+  "data_files": [
+    {
+      "id": "D-DEMO-A",
+      "filename": "CohortA_animal_loc__index_smoothed.csv",
+      "file_path": "data/CohortA_animal_loc__index_smoothed.csv",
+      "file_type": "csv",
+      "file_size": 220,
+      "mime_type": "text/csv",
+      "sha256": "80df24a769d635704f1bdaa0952f4018810853be243b9272b1a86fc0a97f42f1",
+      "observation_ids": ["observation-demo-a"]
+    },
+    {
+      "id": "D-DEMO-B",
+      "filename": "CohortB_animal_loc__index_smoothed.csv",
+      "file_path": "data/CohortB_animal_loc__index_smoothed.csv",
+      "file_type": "csv",
+      "file_size": 222,
+      "mime_type": "text/csv",
+      "sha256": "2c2a3427890aeb114c7e87adab2226a4dfbf3623098557e23af97e264dbc757c",
+      "observation_ids": ["observation-demo-b"]
+    }
+  ],
+  "statistical_results": [
+    {
+      "id": "R-DEMO-001",
+      "label": "Equal-cage sample mean activity",
+      "type_iri": "http://purl.obolibrary.org/obo/STATO_0000401",
+      "value": 18.0,
+      "unit_iri": "http://qudt.org/vocab/unit/UNITLESS"
+    }
+  ],
+  "semantic_manifest": {
+    "contract_version": "0.3.0-poc-multi-context",
+    "authoritative_state": "openscientist-postgresql",
+    "projection_mode": "deterministic-read-only",
+    "governance": {
+      "authority_id": "openscientist-synthetic-demo",
+      "review_state": "approved",
+      "governance_manifest_sha256": "3c96b750f5b9e6bdc1357420d7c291e88131db02ed461e377b963ad746f63d89",
+      "expected_cage_count": 2,
+      "per_cage_schedules": [
+        {
+          "cage_id": "demo-cage-a",
+          "timezone": "Europe/Paris",
+          "source_utc_offsets": ["+0200"],
+          "lights_on": "07:00:00",
+          "lights_off": "19:00:00",
+          "transition_policy": "instantaneous",
+          "schedule_authority": "synthetic demo protocol v1"
+        },
+        {
+          "cage_id": "demo-cage-b",
+          "timezone": "Europe/Paris",
+          "source_utc_offsets": ["+0200"],
+          "lights_on": "07:00:00",
+          "lights_off": "19:00:00",
+          "transition_policy": "instantaneous",
+          "schedule_authority": "synthetic demo protocol v1"
+        }
+      ]
+    },
+    "vocabularies": [
+      {
+        "id": "hcmo",
+        "version": "0.3.0",
+        "version_iri": "https://w3id.org/hcmo/ontology/hcm/0.3.0",
+        "sha256": "97b7123875568d1f75bd3405ad73fa4788cc1144543ae534b0ab1ab2d5a48dd5"
+      },
+      {
+        "id": "stato",
+        "version": "2026-04-20",
+        "version_iri": "http://purl.obolibrary.org/obo/stato/releases/2026-04-20/stato.owl",
+        "sha256": "7e8f945ee30c6b24139f0064d57c2edbcfc988f3f74811cad6b5c84819ce1494"
+      },
+      {
+        "id": "prov-o",
+        "version": "W3C Recommendation 2013-04-30",
+        "version_iri": "http://www.w3.org/ns/prov-o-20130430",
+        "sha256": "02a4d7409ee3e1f697a04e4980d8d208a847cc7fa5180ca0d187540abb66919f"
+      },
+      {
+        "id": "qudt-schema",
+        "version": "3.4.0",
+        "version_iri": "http://qudt.org/3.4.0/schema/qudt",
+        "sha256": "9035fc5191e1be880f849c935ce059526872eb7c847b965a3ab0c3d1e5d1303b"
+      }
+    ]
+  },
+  "semantic_contexts": [
+    {
+      "enclosure": {
+        "id": "demo-enclosure-a",
+        "label": "Synthetic rack, cage A",
+        "identifier": "rack-demo-cage-a",
+        "width": 30.0,
+        "length": 45.0,
+        "height": 20.0,
+        "dimension_unit_iri": "http://qudt.org/vocab/unit/CentiM"
+      },
+      "subject": {
+        "id": "demo-mouse-a",
+        "label": "Synthetic mouse A",
+        "species": "Mus musculus",
+        "housing_start": "2026-08-19T00:00:00+02:00",
+        "housing_end": "2026-08-22T00:00:00+02:00"
+      },
+      "sensor": {
+        "id": "demo-sensor-a",
+        "label": "Synthetic DVC sensor A",
+        "identifier": "sensor-demo-a",
+        "observed_property_id": "locomotor-activity",
+        "observed_property_label": "locomotor activity"
+      },
+      "observation": {
+        "id": "observation-demo-a",
+        "result_id": "behavior-result-demo-a",
+        "started_at": "2026-08-20T07:00:00+02:00",
+        "ended_at": "2026-08-20T07:03:00+02:00",
+        "behavior_type": "locomotor activity",
+        "condition_id": "synthetic-demo-condition",
+        "condition_label": "synthetic positive control"
+      }
+    },
+    {
+      "enclosure": {
+        "id": "demo-enclosure-b",
+        "label": "Synthetic rack, cage B",
+        "identifier": "rack-demo-cage-b",
+        "width": 30.0,
+        "length": 45.0,
+        "height": 20.0,
+        "dimension_unit_iri": "http://qudt.org/vocab/unit/CentiM"
+      },
+      "subject": {
+        "id": "demo-mouse-b",
+        "label": "Synthetic mouse B",
+        "species": "Mus musculus",
+        "housing_start": "2026-08-19T00:00:00+02:00",
+        "housing_end": "2026-08-22T00:00:00+02:00"
+      },
+      "sensor": {
+        "id": "demo-sensor-b",
+        "label": "Synthetic DVC sensor B",
+        "identifier": "sensor-demo-b",
+        "observed_property_id": "locomotor-activity",
+        "observed_property_label": "locomotor activity"
+      },
+      "observation": {
+        "id": "observation-demo-b",
+        "result_id": "behavior-result-demo-b",
+        "started_at": "2026-08-20T07:00:00+02:00",
+        "ended_at": "2026-08-20T07:15:00+02:00",
+        "behavior_type": "locomotor activity",
+        "condition_id": "synthetic-demo-condition",
+        "condition_label": "synthetic positive control"
+      }
+    }
+  ]
+}

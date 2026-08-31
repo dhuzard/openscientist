@@ -76,3 +76,12 @@ defeat the purpose of the evidence contract.
 The local generated audit is intentionally ignored by Git under
 `examples/hcmo_evidence/local-audits/`; it contains file fingerprints and stays
 on the test machine.
+
+## Follow-up positive control
+
+The required metadata and lineage path is now exercised independently by the
+fully synthetic governed demo in
+[`examples/hcmo_dvc_demo/`](../../examples/hcmo_dvc_demo/README.md). That fixture
+passes strict readiness and HCMO graph validation with two explicitly mapped
+cages and mixed native cadence. It does not retrofit synthetic facts onto this
+real job, so this trial's `BLOCKED` verdict remains correct.

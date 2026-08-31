@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg  # type: ignore[import-untyped]
 
@@ -199,6 +200,237 @@ def _check(
     return Check(name, family, status, reason_code, detail, observed, threshold)
 
 
+def _governance_checks(
+    governance_manifest: dict[str, Any] | None,
+    activity_files: list[dict[str, Any]],
+    *,
+    inferred_schedule: bool,
+) -> list[Check]:
+    """Validate explicit cage-level authority without inferring missing facts."""
+    observed_mappings = {
+        (item["filename"], group["timestamp_field"], trace_field)
+        for item in activity_files
+        for group in item["groups"]
+        for trace_field in group["trace_fields"]
+    }
+    if governance_manifest is None:
+        return [
+            _check(
+                "expected_cage_reconciliation",
+                "cage_identity",
+                "UNAVAILABLE",
+                "expected_cage_table_missing",
+                "Trace columns were enumerated, but no independent expected-cage table was supplied.",
+                observed=len(observed_mappings),
+            ),
+            _check(
+                "physical_cage_identity",
+                "cage_identity",
+                "UNAVAILABLE",
+                "validated_cage_mapping_missing",
+                "Trace labels cannot be assumed to be globally unique physical-cage identifiers without governed mapping metadata.",
+            ),
+            _check(
+                "per_cage_light_schedule",
+                "biological_time",
+                "UNAVAILABLE",
+                "governed_light_schedule_missing",
+                "The report describes the light/dark boundary as inferred; inferred clock windows cannot become governed schedule facts."
+                if inferred_schedule
+                else "No governed per-cage light schedule was found in job artifacts.",
+            ),
+            _check(
+                "per_cage_timezone",
+                "biological_time",
+                "UNAVAILABLE",
+                "timezone_authority_missing",
+                "UTC offsets are preserved, but an offset alone is not an attributable per-cage timezone/DST policy.",
+            ),
+            _check(
+                "housing_assignment",
+                "hcmo_context",
+                "UNAVAILABLE",
+                "housing_assignment_missing",
+                "No validated subject-to-physical-cage housing assignment was found.",
+            ),
+            _check(
+                "enclosure_dimensions",
+                "hcmo_context",
+                "UNAVAILABLE",
+                "enclosure_dimensions_missing",
+                "No governed physical enclosure dimensions were found; the strict HCMO shape requires them.",
+            ),
+        ]
+
+    authority = governance_manifest.get("authority")
+    authority_approved = bool(
+        isinstance(authority, dict)
+        and authority.get("id")
+        and authority.get("approved_at")
+        and authority.get("review_state") == "approved"
+    )
+    cages_value = governance_manifest.get("cages")
+    cages = cages_value if isinstance(cages_value, list) else []
+    cage_records = [item for item in cages if isinstance(item, dict)]
+    expected_count = governance_manifest.get("expected_cage_count")
+    mapping_fields = ("cage_id", "source_file", "timestamp_field", "trace_field")
+    mapping_fields_present = len(cage_records) == len(cages) and all(
+        all(item.get(field) not in (None, "") for field in mapping_fields)
+        for item in cage_records
+    )
+    expected_mappings = {
+        (
+            str(item.get("source_file")),
+            str(item.get("timestamp_field")),
+            str(item.get("trace_field")),
+        )
+        for item in cage_records
+    }
+    cage_ids = [str(item.get("cage_id")) for item in cage_records if item.get("cage_id")]
+    reconciled = bool(
+        authority_approved
+        and mapping_fields_present
+        and isinstance(expected_count, int)
+        and expected_count == len(cage_records) == len(observed_mappings)
+        and expected_mappings == observed_mappings
+    )
+    unique_cages = reconciled and len(cage_ids) == len(set(cage_ids))
+
+    schedule_valid = authority_approved and bool(cage_records)
+    for cage in cage_records:
+        try:
+            lights_on = datetime.strptime(str(cage["lights_on"]), "%H:%M:%S").time()
+            lights_off = datetime.strptime(str(cage["lights_off"]), "%H:%M:%S").time()
+            schedule_valid = schedule_valid and lights_on != lights_off
+        except (KeyError, TypeError, ValueError):
+            schedule_valid = False
+        schedule_valid = schedule_valid and bool(cage.get("schedule_authority")) and bool(
+            cage.get("transition_policy")
+        )
+
+    observed_offsets = {
+        (item["filename"], group["timestamp_field"]): set(group["source_utc_offsets"])
+        for item in activity_files
+        for group in item["groups"]
+    }
+    timezone_valid = authority_approved and bool(cage_records)
+    for cage in cage_records:
+        try:
+            ZoneInfo(str(cage["timezone"]))
+        except (KeyError, ZoneInfoNotFoundError):
+            timezone_valid = False
+        declared_offsets = cage.get("source_utc_offsets")
+        key = (str(cage.get("source_file")), str(cage.get("timestamp_field")))
+        timezone_valid = timezone_valid and isinstance(declared_offsets, list) and bool(
+            declared_offsets
+        )
+        if isinstance(declared_offsets, list):
+            timezone_valid = timezone_valid and observed_offsets.get(key, set()).issubset(
+                set(map(str, declared_offsets))
+            )
+
+    housing_valid = authority_approved and bool(cage_records)
+    subject_ids: list[str] = []
+    for cage in cage_records:
+        subjects = cage.get("subjects")
+        if not isinstance(subjects, list) or not subjects:
+            housing_valid = False
+            continue
+        for subject in subjects:
+            if not isinstance(subject, dict) or not subject.get("id"):
+                housing_valid = False
+                continue
+            subject_ids.append(str(subject["id"]))
+            try:
+                start = _parse_timestamp(str(subject["housing_start"]))
+                end = _parse_timestamp(str(subject["housing_end"]))
+                housing_valid = housing_valid and start < end
+            except (KeyError, TypeError, ValueError):
+                housing_valid = False
+    housing_valid = housing_valid and len(subject_ids) == len(set(subject_ids))
+
+    dimensions_valid = authority_approved and bool(cage_records)
+    enclosure_ids: list[str] = []
+    for cage in cage_records:
+        enclosure = cage.get("enclosure")
+        if not isinstance(enclosure, dict):
+            dimensions_valid = False
+            continue
+        if enclosure.get("id"):
+            enclosure_ids.append(str(enclosure["id"]))
+        try:
+            dimensions_valid = dimensions_valid and all(
+                float(enclosure[axis]) > 0 for axis in ("width", "length", "height")
+            )
+        except (KeyError, TypeError, ValueError):
+            dimensions_valid = False
+        dimensions_valid = dimensions_valid and bool(enclosure.get("dimension_unit_iri"))
+    dimensions_valid = dimensions_valid and len(enclosure_ids) == len(set(enclosure_ids))
+
+    authority_reason = (
+        "governed_manifest_approved" if authority_approved else "governance_manifest_unapproved"
+    )
+    return [
+        _check(
+            "expected_cage_reconciliation",
+            "cage_identity",
+            "PASS" if reconciled else "FAIL",
+            "expected_cages_reconciled" if reconciled else "expected_cage_mismatch",
+            "The approved manifest exactly reconciles every source trace to one expected cage."
+            if reconciled
+            else "The governed expected-cage set does not exactly match the observed source traces.",
+            observed={"manifest": len(cage_records), "source_traces": len(observed_mappings)},
+            threshold={"exact_match": True},
+        ),
+        _check(
+            "physical_cage_identity",
+            "cage_identity",
+            "PASS" if unique_cages else "FAIL",
+            "physical_cage_mappings_unique" if unique_cages else "physical_cage_mapping_invalid",
+            "Every observed trace maps to one unique governed physical-cage identifier."
+            if unique_cages
+            else "Physical-cage identifiers are missing, duplicated, unapproved, or not exactly reconciled.",
+        ),
+        _check(
+            "per_cage_light_schedule",
+            "biological_time",
+            "PASS" if schedule_valid else "FAIL",
+            "per_cage_schedule_governed" if schedule_valid else "per_cage_schedule_invalid",
+            "Every cage has an approved lights-on/off schedule, transition policy, and authority."
+            if schedule_valid
+            else "At least one cage lacks a valid approved light schedule or schedule authority.",
+        ),
+        _check(
+            "per_cage_timezone",
+            "biological_time",
+            "PASS" if timezone_valid else "FAIL",
+            "per_cage_timezone_governed" if timezone_valid else "per_cage_timezone_invalid",
+            "Every cage has an attributable IANA timezone and declared offsets covering its source timestamps."
+            if timezone_valid
+            else "At least one cage lacks a valid attributable timezone or source-offset declaration.",
+        ),
+        _check(
+            "housing_assignment",
+            "hcmo_context",
+            "PASS" if housing_valid else "FAIL",
+            "housing_assignments_governed" if housing_valid else "housing_assignment_invalid",
+            "Every cage has one or more uniquely identified subjects with bounded housing intervals."
+            if housing_valid
+            else "Subject identities or bounded housing assignments are missing, duplicated, or invalid.",
+        ),
+        _check(
+            "enclosure_dimensions",
+            "hcmo_context",
+            "PASS" if dimensions_valid else "FAIL",
+            "enclosure_dimensions_governed" if dimensions_valid else "enclosure_dimensions_invalid",
+            "Every uniquely identified enclosure has positive governed dimensions and a unit IRI."
+            if dimensions_valid
+            else "Enclosure identities, dimensions, or units are missing, duplicated, or invalid.",
+            observed={"authority": authority_reason},
+        ),
+    ]
+
+
 async def load_relational_inventory(job_id: str, database_url: str) -> dict[str, Any]:
     """Read only the structural evidence counts needed by the readiness audit."""
     connect_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
@@ -238,7 +470,10 @@ async def load_relational_inventory(job_id: str, database_url: str) -> dict[str,
 
 
 def audit_dvc_job(
-    job_dir: Path, *, relational_inventory: dict[str, Any] | None = None
+    job_dir: Path,
+    *,
+    relational_inventory: dict[str, Any] | None = None,
+    governance_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Audit a completed filesystem job without modifying it."""
     job_dir = job_dir.resolve()
@@ -350,52 +585,12 @@ def audit_dvc_job(
             else "One median native interval was observed.",
             observed=intervals,
         ),
-        _check(
-            "expected_cage_reconciliation",
-            "cage_identity",
-            "UNAVAILABLE",
-            "expected_cage_table_missing",
-            "Trace columns were enumerated, but no independent expected-cage table was supplied.",
-            observed=observed_trace_count,
-        ),
-        _check(
-            "physical_cage_identity",
-            "cage_identity",
-            "UNAVAILABLE",
-            "validated_cage_mapping_missing",
-            "Trace labels cannot be assumed to be globally unique physical-cage identifiers without governed mapping metadata.",
-        ),
-        _check(
-            "per_cage_light_schedule",
-            "biological_time",
-            "UNAVAILABLE",
-            "governed_light_schedule_missing",
-            "The report describes the light/dark boundary as inferred; inferred clock windows cannot become governed schedule facts."
-            if inferred_schedule
-            else "No governed per-cage light schedule was found in job artifacts.",
-        ),
-        _check(
-            "per_cage_timezone",
-            "biological_time",
-            "UNAVAILABLE",
-            "timezone_authority_missing",
-            "UTC offsets are preserved, but an offset alone is not an attributable per-cage timezone/DST policy.",
-        ),
-        _check(
-            "housing_assignment",
-            "hcmo_context",
-            "UNAVAILABLE",
-            "housing_assignment_missing",
-            "No validated subject-to-physical-cage housing assignment was found.",
-        ),
-        _check(
-            "enclosure_dimensions",
-            "hcmo_context",
-            "UNAVAILABLE",
-            "enclosure_dimensions_missing",
-            "No governed physical enclosure dimensions were found; the strict HCMO shape requires them.",
-        ),
     ]
+    checks.extend(
+        _governance_checks(
+            governance_manifest, activity_files, inferred_schedule=inferred_schedule
+        )
+    )
     if relational_inventory is None:
         checks.extend(
             [
@@ -435,8 +630,8 @@ def audit_dvc_job(
                     "authoritative_job_state",
                     "provenance",
                     "PASS",
-                    "postgresql_job_loaded",
-                    "The job and structural evidence counts were loaded read-only from PostgreSQL.",
+                    "relational_projection_loaded",
+                    "The job and structural evidence counts were loaded from the supplied relational projection.",
                     observed={
                         key: relational_inventory[key]
                         for key in (
@@ -514,7 +709,11 @@ def audit_dvc_job(
     return {
         "analysis": "OpenScientist DVC to HCMO evidence readiness",
         "job_id": job_dir.name,
-        "mode": "deterministic-read-only-filesystem-audit",
+        "mode": (
+            "deterministic-read-only-filesystem-audit-with-governed-manifest"
+            if governance_manifest is not None
+            else "deterministic-read-only-filesystem-audit"
+        ),
         "eligible_for_strict_hcmo_export": eligible,
         "summary": {
             "checks": len(checks),
@@ -530,10 +729,11 @@ def audit_dvc_job(
         },
         "input_manifest": activity_files + event_files,
         "relational_inventory": relational_inventory,
+        "governance_manifest": governance_manifest,
         "checks": serialized_checks,
         "limitations": [
             "This preflight does not re-run or endorse the original statistical analysis.",
-            "Observed trace-column count is not an independently reconciled physical-cage count.",
+            "Observed trace-column count is not independently reconciled unless an approved governed manifest is supplied.",
             "PASS means a check executed and met its criterion; UNAVAILABLE blocks dependent evidence products.",
         ],
     }
@@ -542,6 +742,20 @@ def audit_dvc_job(
 def make_readiness_report(audit: dict[str, Any]) -> str:
     summary = audit["summary"]
     status = "ELIGIBLE" if audit["eligible_for_strict_hcmo_export"] else "BLOCKED"
+    if audit["eligible_for_strict_hcmo_export"]:
+        interpretation = (
+            "Every required check executed using the supplied governed metadata and "
+            "authoritative relational projection. Strict HCMO + PROV/STATO export may "
+            "proceed for this snapshot. Eligibility does not certify the scientific "
+            "analysis or turn the mixed-cadence warning into a pass."
+        )
+    else:
+        interpretation = (
+            "The source bytes and timestamp schemas can be audited, but strict HCMO + "
+            "PROV/STATO export remains blocked until every required `UNAVAILABLE` item has "
+            "authoritative data. In particular, narrative values and inferred light windows "
+            "must not be promoted into canonical evidence entities."
+        )
     lines = [
         "# HCMO evidence-export readiness",
         "",
@@ -574,10 +788,7 @@ def make_readiness_report(audit: dict[str, Any]) -> str:
             "",
             "## Interpretation",
             "",
-            "The source bytes and timestamp schemas can be audited, but strict HCMO + "
-            "PROV/STATO export remains blocked until every required `UNAVAILABLE` item has "
-            "authoritative data. In particular, narrative values and inferred light windows "
-            "must not be promoted into canonical evidence entities.",
+            interpretation,
             "",
         ]
     )
@@ -606,6 +817,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--relational-inventory-env",
         help="Optional environment-variable name containing a pre-queried JSON inventory.",
     )
+    parser.add_argument(
+        "--relational-inventory",
+        type=Path,
+        help="Optional path to a non-secret pre-queried JSON inventory.",
+    )
+    parser.add_argument(
+        "--governance-manifest",
+        type=Path,
+        help="Optional approved cage/schedule/housing manifest to validate exactly.",
+    )
     return parser.parse_args(argv)
 
 
@@ -613,9 +834,17 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         relational_inventory = None
-        if args.database_url_env and args.relational_inventory_env:
+        inventory_sources = sum(
+            bool(value)
+            for value in (
+                args.database_url_env,
+                args.relational_inventory_env,
+                args.relational_inventory,
+            )
+        )
+        if inventory_sources > 1:
             raise ReadinessAuditError(
-                "choose either --database-url-env or --relational-inventory-env"
+                "choose one relational inventory source"
             )
         if args.database_url_env:
             database_url = os.environ.get(args.database_url_env)
@@ -636,7 +865,24 @@ def main(argv: list[str] | None = None) -> int:
             relational_inventory = json.loads(inventory_text)
             if not isinstance(relational_inventory, dict):
                 raise ReadinessAuditError("relational inventory JSON must be an object")
-        audit = audit_dvc_job(args.job_dir, relational_inventory=relational_inventory)
+        elif args.relational_inventory:
+            relational_inventory = json.loads(
+                args.relational_inventory.read_text(encoding="utf-8")
+            )
+            if not isinstance(relational_inventory, dict):
+                raise ReadinessAuditError("relational inventory JSON must be an object")
+        governance_manifest = None
+        if args.governance_manifest:
+            governance_manifest = json.loads(
+                args.governance_manifest.read_text(encoding="utf-8")
+            )
+            if not isinstance(governance_manifest, dict):
+                raise ReadinessAuditError("governance manifest JSON must be an object")
+        audit = audit_dvc_job(
+            args.job_dir,
+            relational_inventory=relational_inventory,
+            governance_manifest=governance_manifest,
+        )
         write_audit(audit, args.output_dir)
     except (
         OSError,

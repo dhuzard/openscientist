@@ -67,6 +67,22 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True) + "\n"
 
 
+def _semantic_contexts(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    contexts = snapshot.get("semantic_contexts")
+    if contexts is not None:
+        if not isinstance(contexts, list) or not contexts:
+            raise EvidenceExportError("snapshot.semantic_contexts must be a non-empty list")
+        if not all(isinstance(context, dict) for context in contexts):
+            raise EvidenceExportError("snapshot.semantic_contexts entries must be objects")
+        return cast(list[dict[str, Any]], contexts)
+    semantic = snapshot.get("semantic_context")
+    if not isinstance(semantic, dict):
+        raise EvidenceExportError(
+            "snapshot must contain semantic_context or semantic_contexts"
+        )
+    return [semantic]
+
+
 def validate_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate structure, references, and stored citation grounding."""
     config = snapshot.get("config")
@@ -97,12 +113,50 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
             raise EvidenceExportError(f"snapshot.{name} contains duplicate IDs")
         ids[name] = set(record_ids)
 
-    semantic = snapshot.get("semantic_context")
-    if not isinstance(semantic, dict):
-        raise EvidenceExportError("snapshot.semantic_context must be an object")
-    for name in ("enclosure", "subject", "sensor", "observation"):
-        if not isinstance(semantic.get(name), dict):
-            raise EvidenceExportError(f"snapshot.semantic_context.{name} must be an object")
+    semantic_contexts = _semantic_contexts(snapshot)
+    semantic_ids: dict[str, list[str]] = defaultdict(list)
+    for index, semantic in enumerate(semantic_contexts):
+        for name in ("enclosure", "subject", "sensor", "observation"):
+            record = semantic.get(name)
+            if not isinstance(record, dict):
+                raise EvidenceExportError(
+                    f"snapshot semantic context {index}.{name} must be an object"
+                )
+            _require(record, ("id",), f"snapshot semantic context {index}.{name}")
+            semantic_ids[name].append(str(record["id"]))
+    for name, values in semantic_ids.items():
+        if len(values) != len(set(values)):
+            raise EvidenceExportError(f"snapshot semantic contexts contain duplicate {name} IDs")
+
+    observation_ids = set(semantic_ids["observation"])
+    linked_observations: set[str] = set()
+    for record in snapshot["data_files"]:
+        linked = record.get("observation_ids")
+        if linked is None:
+            if len(observation_ids) != 1:
+                raise EvidenceExportError(
+                    f"data file {record['id']} must declare observation_ids for a multi-context snapshot"
+                )
+            linked_observations.update(observation_ids)
+            continue
+        if not isinstance(linked, list) or not linked:
+            raise EvidenceExportError(
+                f"data file {record['id']}.observation_ids must be a non-empty list"
+            )
+        linked_ids = list(map(str, linked))
+        if len(linked_ids) != len(set(linked_ids)):
+            raise EvidenceExportError(
+                f"data file {record['id']}.observation_ids contains duplicates"
+            )
+        unknown = sorted(set(linked_ids) - observation_ids)
+        if unknown:
+            raise EvidenceExportError(
+                f"data file {record['id']} references unknown observations: {unknown}"
+            )
+        linked_observations.update(linked_ids)
+    unlinked = sorted(observation_ids - linked_observations)
+    if unlinked:
+        raise EvidenceExportError(f"semantic observations have no source data: {unlinked}")
 
     manifest = snapshot.get("semantic_manifest")
     if not isinstance(manifest, dict):
@@ -322,8 +376,7 @@ class EvidenceGraphBuilder:
             self.graph.add((manifest_node, OSC.includesVocabulary, node))
         return manifest_node
 
-    def _add_hcmo_context(self) -> dict[str, URIRef]:
-        context = self.snapshot["semantic_context"]
+    def _add_hcmo_context(self, context: dict[str, Any]) -> dict[str, URIRef]:
         enclosure_data = context["enclosure"]
         subject_data = context["subject"]
         sensor_data = context["sensor"]
@@ -367,7 +420,9 @@ class EvidenceGraphBuilder:
         self.graph.add((assignment, RDF.type, HCM_BIO.HousingAssignment))
         self.graph.add((assignment, HCM_BIO.assignedToEnclosure, enclosure))
         housing = self._interval(
-            "housing", subject_data["housing_start"], subject_data["housing_end"]
+            f"housing-{subject_data['id']}-{enclosure_data['id']}",
+            subject_data["housing_start"],
+            subject_data["housing_end"],
         )
         self.graph.add((assignment, TIME.hasTime, housing))
 
@@ -393,7 +448,9 @@ class EvidenceGraphBuilder:
         self.graph.add((observation, HCM_OBS.occursIn, enclosure))
         self.graph.add((observation, HCM_OBS.hasCondition, condition))
         observation_time = self._interval(
-            "observation", observation_data["started_at"], observation_data["ended_at"]
+            f"observation-{observation_data['id']}",
+            observation_data["started_at"],
+            observation_data["ended_at"],
         )
         self.graph.add((observation, SOSA.phenomenonTime, observation_time))
         self.graph.add((behavior_result, RDF.type, HCM_OBS.BehaviorResult))
@@ -401,12 +458,14 @@ class EvidenceGraphBuilder:
             (behavior_result, HCM_OBS.hasBehaviorType, Literal(observation_data["behavior_type"]))
         )
         self.graph.add((condition, RDFS.label, Literal(observation_data["condition_label"])))
-        return {"observation": observation}
+        return {str(observation_data["id"]): observation}
 
     def build(self) -> Graph:
         job = self._add_job()
         self._add_semantic_manifest(job)
-        hcmo = self._add_hcmo_context()
+        observations: dict[str, URIRef] = {}
+        for context in _semantic_contexts(self.snapshot):
+            observations.update(self._add_hcmo_context(context))
         files: dict[str, URIRef] = {}
         for record in self.snapshot["data_files"]:
             node = self.node("data-file", record["id"])
@@ -418,7 +477,11 @@ class EvidenceGraphBuilder:
             self.graph.add((node, HCM_TECH.hasStoragePath, Literal(record["file_path"])))
             self.graph.add((node, OSC.byteSize, Literal(int(record["file_size"]))))
             self.graph.add((node, OSC.sha256, Literal(record["sha256"])))
-            self.graph.add((node, OSC.recordsObservation, hcmo["observation"]))
+            observation_ids = record.get("observation_ids") or list(observations)
+            for observation_id in observation_ids:
+                self.graph.add(
+                    (node, OSC.recordsObservation, observations[str(observation_id)])
+                )
             self.graph.add((job, PROV.used, node))
 
         hypotheses: dict[str, URIRef] = {}

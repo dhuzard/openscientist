@@ -1,0 +1,66 @@
+{
+  "contract_version": "1.0.0-demo",
+  "authority": {
+    "id": "openscientist-synthetic-demo",
+    "review_state": "approved",
+    "approved_at": "2026-08-31T12:00:00Z",
+    "scope": "synthetic-positive-control-only"
+  },
+  "expected_cage_count": 2,
+  "cages": [
+    {
+      "cage_id": "demo-cage-a",
+      "source_file": "CohortA_animal_loc__index_smoothed.csv",
+      "timestamp_field": "A_TIMESTAMP",
+      "trace_field": "A_CAGE_01",
+      "timezone": "Europe/Paris",
+      "source_utc_offsets": ["+0200"],
+      "lights_on": "07:00:00",
+      "lights_off": "19:00:00",
+      "transition_policy": "instantaneous",
+      "schedule_authority": "synthetic demo protocol v1",
+      "subjects": [
+        {
+          "id": "demo-mouse-a",
+          "housing_start": "2026-08-19T00:00:00+02:00",
+          "housing_end": "2026-08-22T00:00:00+02:00"
+        }
+      ],
+      "enclosure": {
+        "id": "demo-enclosure-a",
+        "identifier": "rack-demo-cage-a",
+        "width": 30.0,
+        "length": 45.0,
+        "height": 20.0,
+        "dimension_unit_iri": "http://qudt.org/vocab/unit/CentiM"
+      }
+    },
+    {
+      "cage_id": "demo-cage-b",
+      "source_file": "CohortB_animal_loc__index_smoothed.csv",
+      "timestamp_field": "B_TIMESTAMP",
+      "trace_field": "B_CAGE_01",
+      "timezone": "Europe/Paris",
+      "source_utc_offsets": ["+0200"],
+      "lights_on": "07:00:00",
+      "lights_off": "19:00:00",
+      "transition_policy": "instantaneous",
+      "schedule_authority": "synthetic demo protocol v1",
+      "subjects": [
+        {
+          "id": "demo-mouse-b",
+          "housing_start": "2026-08-19T00:00:00+02:00",
+          "housing_end": "2026-08-22T00:00:00+02:00"
+        }
+      ],
+      "enclosure": {
+        "id": "demo-enclosure-b",
+        "identifier": "rack-demo-cage-b",
+        "width": 30.0,
+        "length": 45.0,
+        "height": 20.0,
+        "dimension_unit_iri": "http://qudt.org/vocab/unit/CentiM"
+      }
+    }
+  ]
+}
