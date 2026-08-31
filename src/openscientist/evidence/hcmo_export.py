@@ -62,6 +62,11 @@ def _load_snapshot(path: Path) -> dict[str, Any]:
     return value
 
 
+def _canonical_json(value: Any) -> str:
+    """Serialize a manifest deterministically for hashing and publication."""
+    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
 def validate_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate structure, references, and stored citation grounding."""
     config = snapshot.get("config")
@@ -99,6 +104,34 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
         if not isinstance(semantic.get(name), dict):
             raise EvidenceExportError(f"snapshot.semantic_context.{name} must be an object")
 
+    manifest = snapshot.get("semantic_manifest")
+    if not isinstance(manifest, dict):
+        raise EvidenceExportError("snapshot.semantic_manifest must be an object")
+    _require(
+        manifest,
+        ("contract_version", "authoritative_state", "projection_mode"),
+        "semantic_manifest",
+    )
+    vocabularies = manifest.get("vocabularies")
+    if not isinstance(vocabularies, list) or not vocabularies:
+        raise EvidenceExportError("snapshot.semantic_manifest.vocabularies must be non-empty")
+    vocabulary_ids: list[str] = []
+    for index, vocabulary in enumerate(vocabularies):
+        if not isinstance(vocabulary, dict):
+            raise EvidenceExportError(f"semantic_manifest.vocabularies[{index}] must be an object")
+        _require(
+            vocabulary,
+            ("id", "version", "version_iri", "sha256"),
+            f"semantic_manifest.vocabularies[{index}]",
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", str(vocabulary["sha256"])):
+            raise EvidenceExportError(
+                f"semantic_manifest vocabulary {vocabulary['id']} has an invalid SHA-256"
+            )
+        vocabulary_ids.append(str(vocabulary["id"]))
+    if len(vocabulary_ids) != len(set(vocabulary_ids)):
+        raise EvidenceExportError("snapshot.semantic_manifest.vocabularies has duplicate IDs")
+
     finding_refs = {
         "supporting_hypotheses": "hypotheses",
         "analysis_ids": "analysis_log",
@@ -107,7 +140,25 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
         "literature_support": "literature",
     }
     for finding in snapshot["findings"]:
-        _require(finding, ("title", "evidence", "iteration_discovered"), "finding")
+        _require(
+            finding,
+            (
+                "title",
+                "evidence",
+                "iteration_discovered",
+                "inference_scope",
+                "experimental_unit_count",
+            ),
+            "finding",
+        )
+        if finding["inference_scope"] not in {"individual", "sample", "population", "causal"}:
+            raise EvidenceExportError(
+                f"finding {finding['id']} has invalid inference_scope {finding['inference_scope']!r}"
+            )
+        if int(finding["experimental_unit_count"]) < 1:
+            raise EvidenceExportError(
+                f"finding {finding['id']} experimental_unit_count must be positive"
+            )
         for field, target in finding_refs.items():
             values = finding.get(field, [])
             if not isinstance(values, list):
@@ -244,6 +295,33 @@ class EvidenceGraphBuilder:
             self.graph.add((job, OSC.llmProvider, Literal(provider)))
         return job
 
+    def _add_semantic_manifest(self, job: URIRef) -> URIRef:
+        manifest = self.snapshot["semantic_manifest"]
+        manifest_node = self.node("semantic-manifest", "profile")
+        canonical = _canonical_json(manifest)
+        self.graph.add((manifest_node, RDF.type, OSC.SemanticManifest))
+        self.graph.add((manifest_node, RDF.type, PROV.Entity))
+        self.graph.add((manifest_node, OSC.semanticManifestSha256, Literal(_sha256(canonical))))
+        self.graph.add(
+            (manifest_node, OSC.evidenceContractVersion, Literal(manifest["contract_version"]))
+        )
+        self.graph.add(
+            (manifest_node, OSC.authoritativeState, Literal(manifest["authoritative_state"]))
+        )
+        self.graph.add((manifest_node, OSC.projectionMode, Literal(manifest["projection_mode"])))
+        self.graph.add((job, OSC.hasSemanticManifest, manifest_node))
+        self.graph.add((job, PROV.used, manifest_node))
+        for vocabulary in manifest["vocabularies"]:
+            node = self.node("vocabulary", vocabulary["id"])
+            self.graph.add((node, RDF.type, OSC.VocabularySnapshot))
+            self.graph.add((node, RDF.type, PROV.Entity))
+            self.graph.add((node, DCTERMS.identifier, Literal(vocabulary["id"])))
+            self.graph.add((node, OSC.vocabularyVersion, Literal(vocabulary["version"])))
+            self.graph.add((node, OSC.versionIri, URIRef(vocabulary["version_iri"])))
+            self.graph.add((node, OSC.sha256, Literal(vocabulary["sha256"])))
+            self.graph.add((manifest_node, OSC.includesVocabulary, node))
+        return manifest_node
+
     def _add_hcmo_context(self) -> dict[str, URIRef]:
         context = self.snapshot["semantic_context"]
         enclosure_data = context["enclosure"]
@@ -327,6 +405,7 @@ class EvidenceGraphBuilder:
 
     def build(self) -> Graph:
         job = self._add_job()
+        self._add_semantic_manifest(job)
         hcmo = self._add_hcmo_context()
         files: dict[str, URIRef] = {}
         for record in self.snapshot["data_files"]:
@@ -415,6 +494,14 @@ class EvidenceGraphBuilder:
             self.graph.add((node, DCTERMS.title, Literal(record["title"])))
             self.graph.add((node, OSC.evidenceText, Literal(record["evidence"])))
             self.graph.add((node, OSC.findingStatus, Literal(record.get("status", "supported"))))
+            self.graph.add((node, OSC.inferenceScope, Literal(record["inference_scope"])))
+            self.graph.add(
+                (
+                    node,
+                    OSC.experimentalUnitCount,
+                    Literal(int(record["experimental_unit_count"])),
+                )
+            )
             self.graph.add((node, OSC.iteration, Literal(int(record["iteration_discovered"]))))
             self.graph.add((job, OSC.hasFinding, node))
             for identifier in record.get("supporting_hypotheses", []):
@@ -540,11 +627,12 @@ def _traceability_rows(evidence_text: str) -> list[dict[str, Any]]:
     query = f"""
 PREFIX osc: <{OSC}> PREFIX prov: <{PROV}> PREFIX dcterms: <{DCTERMS}>
 PREFIX schema: <{SCHEMA}> PREFIX qudt: <{QUDT}> PREFIX rdfs: <{RDFS}>
-SELECT ?finding ?findingId ?title ?evidence ?hypothesisId ?hypothesisText
+SELECT ?finding ?findingId ?title ?evidence ?scope ?unitCount ?hypothesisId ?hypothesisText
        ?analysisId ?analysisDescription ?sourceTitle ?sourceSha
        ?resultLabel ?value ?unit ?paperTitle ?pmid WHERE {{
   ?finding a osc:Finding ; dcterms:identifier ?findingId ;
-           dcterms:title ?title ; osc:evidenceText ?evidence .
+           dcterms:title ?title ; osc:evidenceText ?evidence ;
+           osc:inferenceScope ?scope ; osc:experimentalUnitCount ?unitCount .
   OPTIONAL {{ ?finding osc:addressesHypothesis [ dcterms:identifier ?hypothesisId ;
              dcterms:description ?hypothesisText ] . }}
   OPTIONAL {{ ?finding prov:wasGeneratedBy [ dcterms:identifier ?analysisId ;
@@ -568,6 +656,8 @@ SELECT ?finding ?findingId ?title ?evidence ?hypothesisId ?hypothesisText
                 "id": str(binding_values["findingId"]),
                 "title": str(binding_values["title"]),
                 "evidence": str(binding_values["evidence"]),
+                "scope": str(binding_values["scope"]),
+                "experimental_unit_count": str(binding_values["unitCount"]),
             },
         )
         values = {
@@ -628,13 +718,14 @@ def make_traceability_appendix(evidence_text: str, validation: dict[str, Any]) -
         "",
         "### Finding-to-evidence matrix",
         "",
-        "| Finding | Hypothesis | Analysis | Data | Statistical result | Literature |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Finding | Scope | Hypothesis | Analysis | Data | Statistical result | Literature |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     rows = _traceability_rows(evidence_text)
     for row in rows:
         values = [
             f"{row['id']}: {row['title']}",
+            f"{row['scope']} (n={row['experimental_unit_count']})",
             "; ".join(row["hypotheses"]),
             "; ".join(row["analyses"]),
             "; ".join(row["sources"]),
@@ -671,23 +762,30 @@ def export_hcmo_evidence(
     validate_snapshot(snapshot)
     verified = verify_source_files(snapshot, source_root or snapshot_path.parent)
     output_dir.mkdir(parents=True, exist_ok=True)
+    semantic_manifest_path = output_dir / "semantic-manifest.json"
+    semantic_manifest_text = _canonical_json(snapshot["semantic_manifest"])
+    semantic_manifest_path.write_text(semantic_manifest_text, encoding="utf-8", newline="\n")
     evidence_text = (
         EvidenceGraphBuilder(snapshot).build().serialize(format="turtle").rstrip() + "\n"
     )
     profile_text = profile_path.read_text(encoding="utf-8")
     shapes_text = shapes_path.read_text(encoding="utf-8")
     validation = validate_graph(evidence_text, profile_text, shapes_text)
+    validation["artifacts"]["semantic_manifest"] = semantic_manifest_path.name
+    validation["artifacts"]["semantic_manifest_sha256"] = _sha256(semantic_manifest_text)
     validation["source_files"] = verified
-    (output_dir / "evidence.ttl").write_text(evidence_text, encoding="utf-8")
+    (output_dir / "evidence.ttl").write_text(evidence_text, encoding="utf-8", newline="\n")
     (output_dir / "validation.json").write_text(
-        json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(validation, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     appendix = make_traceability_appendix(evidence_text, validation)
-    (output_dir / "traceability-appendix.md").write_text(appendix, encoding="utf-8")
+    (output_dir / "traceability-appendix.md").write_text(appendix, encoding="utf-8", newline="\n")
     if report_path:
         report = report_path.read_text(encoding="utf-8")
         (output_dir / "final_report_with_traceability.md").write_text(
-            attach_appendix(report, appendix), encoding="utf-8"
+            attach_appendix(report, appendix), encoding="utf-8", newline="\n"
         )
     return validation
 

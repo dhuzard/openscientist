@@ -20,8 +20,26 @@ osc:InvestigationShape a sh:NodeShape ;
   sh:property [ sh:path osc:researchQuestion ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path osc:jobStatus ; sh:in ( "completed" "running" "failed" "cancelled" ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path prov:startedAtTime ; sh:datatype xsd:dateTime ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:hasSemanticManifest ; sh:class osc:SemanticManifest ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path osc:hasHypothesis ; sh:class osc:Hypothesis ; sh:minCount 1 ] ;
   sh:property [ sh:path osc:hasFinding ; sh:class osc:Finding ; sh:minCount 1 ] .
+
+osc:SemanticManifestShape a sh:NodeShape ;
+  sh:targetClass osc:SemanticManifest ;
+  sh:class prov:Entity ;
+  sh:property [ sh:path osc:semanticManifestSha256 ; sh:pattern "^[0-9a-f]{64}$" ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:evidenceContractVersion ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:authoritativeState ; sh:in ( "openscientist-postgresql" ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:projectionMode ; sh:in ( "deterministic-read-only" ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:includesVocabulary ; sh:class osc:VocabularySnapshot ; sh:minCount 3 ] .
+
+osc:VocabularySnapshotShape a sh:NodeShape ;
+  sh:targetClass osc:VocabularySnapshot ;
+  sh:class prov:Entity ;
+  sh:property [ sh:path dcterms:identifier ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:vocabularyVersion ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:versionIri ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:sha256 ; sh:pattern "^[0-9a-f]{64}$" ; sh:minCount 1 ; sh:maxCount 1 ] .
 
 osc:HypothesisShape a sh:NodeShape ;
   sh:targetClass osc:Hypothesis ;
@@ -71,6 +89,8 @@ osc:FindingShape a sh:NodeShape ;
   sh:property [ sh:path dcterms:title ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path osc:evidenceText ; sh:minLength 1 ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path osc:findingStatus ; sh:in ( "supported" "rejected" "provisional" ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:inferenceScope ; sh:in ( "individual" "sample" "population" "causal" ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path osc:experimentalUnitCount ; sh:datatype xsd:integer ; sh:minInclusive 1 ; sh:minCount 1 ; sh:maxCount 1 ] ;
   sh:property [ sh:path osc:addressesHypothesis ; sh:class osc:Hypothesis ; sh:minCount 1 ] ;
   sh:property [ sh:path prov:wasGeneratedBy ; sh:class osc:AnalysisActivity ; sh:minCount 1 ] ;
   sh:property [ sh:path prov:wasDerivedFrom ; sh:qualifiedValueShape [ sh:class osc:DataFile ] ; sh:qualifiedMinCount 1 ] ;
@@ -85,6 +105,18 @@ osc:FindingShape a sh:NodeShape ;
       SELECT $this WHERE {
         $this osc:findingStatus "supported" ; prov:wasGeneratedBy ?activity .
         FILTER NOT EXISTS { ?activity osc:success true }
+      }
+    """
+  ] ;
+  sh:sparql [
+    sh:message "A supported population-level finding cannot be based on only one experimental unit." ;
+    sh:select """
+      PREFIX osc: <https://example.org/openscientist/evidence#>
+      SELECT $this WHERE {
+        $this osc:findingStatus "supported" ;
+              osc:inferenceScope "population" ;
+              osc:experimentalUnitCount ?count .
+        FILTER (?count < 2)
       }
     """
   ] .

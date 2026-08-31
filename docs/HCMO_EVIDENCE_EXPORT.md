@@ -30,10 +30,18 @@ The runnable example demonstrates that an export can:
 - reject plausible but undeclared ontology terms with a closed allowlist;
 - generate a report appendix by querying the graph rather than copying the
   snapshot narrative.
+- embed a semantic manifest that freezes the evidence-contract and vocabulary
+  version IRIs/hashes used by the run;
+- expose inference scope and experimental-unit count, and reject the obvious
+  mismatch of a supported population claim based on one unit.
 
 Passing these gates means the bundle is structurally traceable. It does not
 prove that the statistical method was appropriate, that the input data were
 unbiased, or that the scientific conclusion is true.
+
+The prototype requires identity, version IRI, and SHA-256-shaped pins in the
+semantic manifest. It does not yet resolve each vocabulary against a frozen
+local registry and re-hash its bytes; that is explicitly planned downstream.
 
 ## Prototype boundary
 
@@ -45,6 +53,30 @@ finding-to-statistical-result reference required by the strict profile.
 The OpenScientist namespace in this prototype is provisional and must not be
 treated as a published vocabulary. Namespace governance and versioning are a
 precondition for production use.
+
+## Refined five-PoC roadmap
+
+The companion design now separates five increments:
+
+1. Traceability — the exporter in this PR.
+2. Runtime semantic enforcement — Open Ontologies validates typed candidates
+   before persistence and returns bounded repair/abstention outcomes.
+3. Scientific kernel — a task-specific ontology slice compiles into roughly
+   five to ten typed operations rather than exposing every ontology tool.
+4. Full experiment semantics — reuse HCMO's existing ISA/STATO 2 × 2 fixture
+   for treatment × enrichment, repeated observations, mixed-model analysis,
+   estimate, confidence interval, and p-value provenance.
+5. Scientific-method validation — separately report semantic, statistical,
+   scientific-scope, provenance, source-integrity, and literature verdicts.
+
+The runtime term model must distinguish `CANONICAL`, `MAPPED`, and `PROPOSED`.
+A genuinely new concept belongs in a separate proposal graph and must never be
+silently asserted as an HCMO term.
+
+The full plan is maintained in
+[the canonical PoC plan](https://github.com/dhuzard/open-ontologies/blob/main/case-studies/openscientist-hcmo-evidence/POC_PLAN.md),
+with executable sequencing in the
+[combined backlog](https://github.com/dhuzard/open-ontologies/blob/main/case-studies/openscientist-hcmo-evidence/BACKLOG.md).
 
 ## Candidate production hook
 
@@ -72,6 +104,10 @@ operational behavior are stable.
 - Should invalid evidence block publication or mark a job completed with
   warnings?
 - How are ontology upgrades migrated without changing historical bundles?
+- Which statistical-method and scientific-scope rules are deterministic enough
+  to gate automatically, and which require scientist review?
+- How should proposed novel concepts be reviewed without weakening the closed
+  vocabulary used for canonical evidence?
 
 The larger ontology-constrained agent experiment and evaluation backlog lives
 in the

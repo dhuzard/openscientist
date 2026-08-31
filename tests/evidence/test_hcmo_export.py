@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -30,6 +31,14 @@ def test_complete_export_passes_all_gates(tmp_path: Path) -> None:
     assert validation["syntax"]["triples"] > 100
     assert validation["shacl"]["focus_nodes"] > 0
     assert validation["closed_world_vocabulary"]["undeclared_terms"] == []
+    assert (
+        hashlib.sha256((tmp_path / "semantic-manifest.json").read_bytes()).hexdigest()
+        == validation["artifacts"]["semantic_manifest_sha256"]
+    )
+    assert (
+        hashlib.sha256((tmp_path / "evidence.ttl").read_bytes()).hexdigest()
+        == validation["artifacts"]["evidence_sha256"]
+    )
     appendix = (tmp_path / "traceability-appendix.md").read_text(encoding="utf-8")
     assert "F001: Mean dark-phase activity" in appendix
     assert "A001" in appendix
@@ -59,6 +68,14 @@ def test_citation_grounding_is_rechecked() -> None:
     snapshot["findings"][0]["citations"][0]["snippet"] = "Absent from the abstract."
 
     with pytest.raises(hcmo_export.EvidenceExportError, match="is not grounded"):
+        hcmo_export.validate_snapshot(snapshot)
+
+
+def test_semantic_manifest_requires_pinned_hashes() -> None:
+    snapshot = _snapshot()
+    snapshot["semantic_manifest"]["vocabularies"][0]["sha256"] = "unpinned"
+
+    with pytest.raises(hcmo_export.EvidenceExportError, match="invalid SHA-256"):
         hcmo_export.validate_snapshot(snapshot)
 
 
@@ -92,6 +109,18 @@ def test_shacl_rejects_finding_without_generating_analysis() -> None:
         item["focus_node"] == str(finding) and item["constraint"] == "MinCountConstraintComponent"
         for item in result["violations"]
     )
+
+
+def test_shacl_rejects_one_unit_population_claim() -> None:
+    snapshot = _snapshot()
+    snapshot["findings"][0]["inference_scope"] = "population"
+    graph = hcmo_export.EvidenceGraphBuilder(snapshot).build()
+    shapes = hcmo_export.DEFAULT_SHAPES.read_text(encoding="utf-8")
+
+    result = hcmo_export._shacl_check(graph, shapes)
+
+    assert result["conforms"] is False
+    assert any("population-level" in item["message"] for item in result["violations"])
 
 
 def test_appendix_attachment_is_idempotent() -> None:

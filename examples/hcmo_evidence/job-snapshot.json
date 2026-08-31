@@ -31,6 +31,8 @@
       "title": "Mean dark-phase activity exceeded the prespecified threshold",
       "evidence": "The sample mean was 143.2 activity counts/hour for the exported 12-hour dark-phase observation, 43.2 counts/hour above the prespecified threshold.",
       "status": "supported",
+      "inference_scope": "individual",
+      "experimental_unit_count": 1,
       "supporting_hypotheses": ["H001"],
       "analysis_ids": ["A001"],
       "data_file_ids": ["D001"],
@@ -95,6 +97,37 @@
       "unit_iri": "http://qudt.org/vocab/unit/UNITLESS"
     }
   ],
+  "semantic_manifest": {
+    "contract_version": "0.2.0-poc",
+    "authoritative_state": "openscientist-postgresql",
+    "projection_mode": "deterministic-read-only",
+    "vocabularies": [
+      {
+        "id": "hcmo",
+        "version": "0.3.0",
+        "version_iri": "https://w3id.org/hcmo/ontology/hcm/0.3.0",
+        "sha256": "97b7123875568d1f75bd3405ad73fa4788cc1144543ae534b0ab1ab2d5a48dd5"
+      },
+      {
+        "id": "stato",
+        "version": "2026-04-20",
+        "version_iri": "http://purl.obolibrary.org/obo/stato/releases/2026-04-20/stato.owl",
+        "sha256": "7e8f945ee30c6b24139f0064d57c2edbcfc988f3f74811cad6b5c84819ce1494"
+      },
+      {
+        "id": "prov-o",
+        "version": "W3C Recommendation 2013-04-30",
+        "version_iri": "http://www.w3.org/ns/prov-o-20130430",
+        "sha256": "02a4d7409ee3e1f697a04e4980d8d208a847cc7fa5180ca0d187540abb66919f"
+      },
+      {
+        "id": "qudt-schema",
+        "version": "3.4.0",
+        "version_iri": "http://qudt.org/3.4.0/schema/qudt",
+        "sha256": "9035fc5191e1be880f849c935ce059526872eb7c847b965a3ab0c3d1e5d1303b"
+      }
+    ]
+  },
   "semantic_context": {
     "enclosure": {
       "id": "cage-12",

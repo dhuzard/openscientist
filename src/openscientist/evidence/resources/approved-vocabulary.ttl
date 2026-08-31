@@ -23,6 +23,8 @@ osc:DataFile a owl:Class .
 osc:StatisticalResult a owl:Class .
 osc:LiteratureReference a owl:Class .
 osc:Citation a owl:Class .
+osc:SemanticManifest a owl:Class .
+osc:VocabularySnapshot a owl:Class .
 osc:researchQuestion a owl:DatatypeProperty .
 osc:jobStatus a owl:DatatypeProperty .
 osc:maxIterations a owl:DatatypeProperty .
@@ -46,6 +48,16 @@ osc:hasCitation a owl:ObjectProperty .
 osc:citesLiterature a owl:ObjectProperty .
 osc:citationSnippet a owl:DatatypeProperty .
 osc:citationValidationStatus a owl:DatatypeProperty .
+osc:hasSemanticManifest a owl:ObjectProperty .
+osc:semanticManifestSha256 a owl:DatatypeProperty .
+osc:evidenceContractVersion a owl:DatatypeProperty .
+osc:authoritativeState a owl:DatatypeProperty .
+osc:projectionMode a owl:DatatypeProperty .
+osc:includesVocabulary a owl:ObjectProperty .
+osc:vocabularyVersion a owl:DatatypeProperty .
+osc:versionIri a owl:ObjectProperty .
+osc:inferenceScope a owl:DatatypeProperty .
+osc:experimentalUnitCount a owl:DatatypeProperty .
 
 prov:Activity a owl:Class .
 prov:Entity a owl:Class .
