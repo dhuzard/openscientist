@@ -28,9 +28,7 @@ def test_skill_is_ingestible_self_contained_and_export_ready(slug: str) -> None:
     markdown = path.read_text(encoding="utf-8")
     parsed = SkillParser().parse_file(path)
     errors = [
-        finding
-        for finding in validate_skill_markdown(markdown)
-        if finding.severity == "error"
+        finding for finding in validate_skill_markdown(markdown) if finding.severity == "error"
     ]
 
     assert errors == []
@@ -50,9 +48,9 @@ def test_skill_is_ingestible_self_contained_and_export_ready(slug: str) -> None:
 
 
 def test_preregistration_api_contract_is_read_only_and_secret_safe() -> None:
-    markdown = (
-        SKILLS_ROOT / "preclinical-preregistration" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    markdown = (SKILLS_ROOT / "preclinical-preregistration" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "GET https://preclinicaltrials.eu/api/external/viewable-protocols" in markdown
     assert "read-only external endpoint" in markdown
@@ -62,15 +60,9 @@ def test_preregistration_api_contract_is_read_only_and_secret_safe() -> None:
 
 
 def test_full_fair_arrive_and_prepare_topologies_are_present() -> None:
-    fair = (SKILLS_ROOT / "fair-data-stewardship" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    arrive = (SKILLS_ROOT / "arrive-2-reporting" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    prepare = (SKILLS_ROOT / "prepare-study-planning" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    fair = (SKILLS_ROOT / "fair-data-stewardship" / "SKILL.md").read_text(encoding="utf-8")
+    arrive = (SKILLS_ROOT / "arrive-2-reporting" / "SKILL.md").read_text(encoding="utf-8")
+    prepare = (SKILLS_ROOT / "prepare-study-planning" / "SKILL.md").read_text(encoding="utf-8")
 
     for principle in (
         "F1",
