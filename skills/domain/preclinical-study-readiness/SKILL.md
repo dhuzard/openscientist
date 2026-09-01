@@ -1,6 +1,6 @@
 ---
 name: preclinical-study-readiness
-description: Assess and explain FAIR data stewardship, PREPARE experimental-planning, and ARRIVE reporting readiness for preclinical studies. Use when collecting study context, interpreting FAIR-VCG findings, prioritizing missing metadata, preparing a governed analysis approval, or checking a completed analysis bundle without claiming guideline compliance.
+description: Coordinate governed preclinical study-readiness assessments and specialist handoffs across preregistration, experimental design, statistics, FAIR, PREPARE, and ARRIVE. Use when collecting study context, interpreting FAIR-VCG findings, prioritizing gaps, preparing a governed DVC analysis approval, or reconciling a completed analysis bundle without claiming guideline compliance.
 metadata:
   category: domain
   slug: preclinical-study-readiness
@@ -53,6 +53,28 @@ Use each framework for its intended question:
 A missing field is not automatically evidence of poor science. It can mean the
 fact is unknown, not applicable, not yet recorded, or unsupported by the current
 exchange schema. Preserve that distinction.
+
+## Companion specialist skills
+
+Use this skill as the readiness orchestrator and preserve the specialist's
+authority within its domain:
+
+- `preclinical-preregistration` owns the prospective registry record,
+  amendments, deviations, and PreclinicalTrials.eu field mapping;
+- `preclinical-power-statistics` owns estimands, unit-aware sample-size
+  calculations, statistical models, and numerical verification;
+- `preclinical-experimental-design` owns mouse and rat procedures, behavioural
+  assay validity, welfare, and veterinarian-reviewed anaesthesia planning under
+  Directive 2010/63/EU;
+- `fair-data-stewardship` owns the principle-by-principle FAIR evidence matrix;
+- `prepare-study-planning` owns the complete prospective PREPARE planning
+  matrix;
+- `arrive-2-reporting` owns completed-study ARRIVE 2.0 reporting evidence.
+
+If a specialist is unavailable, record the handoff as unresolved. Do not
+simulate its review. When specialist artifacts conflict, preserve the conflict,
+identify the affected checkpoint or claim, and request human resolution before
+approval.
 
 ## Build the governed context
 

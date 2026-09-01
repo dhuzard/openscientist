@@ -798,15 +798,21 @@ class TestBuiltinSkillsIngestion:
         skills = {s.slug: s for s in result.scalars().all()}
 
         expected_slugs = {
+            "arrive-2-reporting",
             "create-job-brief",
             "data-science",
             "digital-ventilated-cage-analysis",
+            "fair-data-stewardship",
             "genomics",
             "jgi-lakehouse",
             "kbase-query",
             "metabolomics",
             "phenix-tools-reference",
+            "preclinical-experimental-design",
+            "preclinical-power-statistics",
+            "preclinical-preregistration",
             "preclinical-study-readiness",
+            "prepare-study-planning",
             "hypothesis-generation",
             "prioritization",
             "result-interpretation",
@@ -814,10 +820,10 @@ class TestBuiltinSkillsIngestion:
         }
         assert set(skills.keys()) == expected_slugs
 
-        # Verify 8 domain + 5 workflow category split
+        # Verify 14 domain + 5 workflow category split
         domain_skills = [s for s in skills.values() if s.category == "domain"]
         workflow_skills = [s for s in skills.values() if s.category == "workflow"]
-        assert len(domain_skills) == 8
+        assert len(domain_skills) == 14
         assert len(workflow_skills) == 5
 
         # Spot-check one skill's metadata
