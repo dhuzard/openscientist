@@ -88,7 +88,9 @@ jobs:
       - name: Unit & Integration Tests
         # Live third-party APIs are deselected: NCBI rate limits by IP and the
         # shared runner egress makes those tests fail unrelated to the change.
-        run: uv run pytest -m "not network" --cov=src/openscientist --cov-report=term-missing --cov-report=xml
+        # The preceding step already built the environment from the lockfile,
+        # so this one resolves nothing and installs nothing.
+        run: uv run --frozen --no-sync pytest -m "not network" --cov=src/openscientist --cov-report=term-missing --cov-report=xml
 
       - name: Publish coverage report
         uses: actions/upload-artifact@v7
