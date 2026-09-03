@@ -278,6 +278,72 @@ class TestTurnPrompt:
         assert "`mcp__openscientist_tools_execute_code`" in body
         assert "`execute_code`" not in body
 
+    def test_the_research_question_is_not_rewritten(self, tmp_path: Path) -> None:
+        """The turn prompt carries the user's own words, so a question that
+        happens to discuss a function called execute_code must survive intact.
+        Only a marked-up mention (backticked, bold, or an actual call) names a
+        tool the model should call."""
+        agent = _agent(tmp_path)
+        question = "Why does our execute_code helper drop rows?"
+        written = agent._write_turn_prompt(question).read_text()
+        assert written == question
+
+    def test_skill_callable_form_is_namespaced(self, tmp_path: Path) -> None:
+        """The shipped skills call tools without backticks, for example
+        ``search_pubmed("...")`` in the metabolomics skill, so backticked-only
+        rewriting still leaves a skill teaching an unresolvable name."""
+        from openscientist.database.models import Skill
+
+        skill = Skill(
+            slug="demo",
+            category="workflow",
+            name="Demo",
+            description="d",
+            content='Search with search_pubmed("ATP depletion mechanism").',
+        )
+        agent = _agent(tmp_path)
+        agent._write_skill(tmp_path / "skills", skill)
+        body = (tmp_path / "skills" / "workflow--demo" / "SKILL.md").read_text()
+        assert 'mcp__openscientist_tools_search_pubmed("ATP depletion mechanism")' in body
+
+    def test_callable_and_bold_forms_are_namespaced(self, tmp_path: Path) -> None:
+        """Backticks are one of several ways the prompts name a tool. The shipped
+        skills write ``search_pubmed("x")`` and the shared doc writes
+        ``**execute_code**``, and those reach the model as unresolvable names too."""
+        agent = _agent(tmp_path)
+        written = agent._write_turn_prompt(
+            'Use **execute_code**, then search_pubmed("torpor"), then record it '
+            "with `update_knowledge_state`."
+        ).read_text()
+        assert "**mcp__openscientist_tools_execute_code**" in written
+        assert 'mcp__openscientist_tools_search_pubmed("torpor")' in written
+        assert "with `mcp__openscientist_tools_update_knowledge_state`." in written
+
+    def test_a_call_written_with_a_space_is_namespaced(self, tmp_path: Path) -> None:
+        """A space before the paren is still a call, and prompt prose is not
+        formatter-clean."""
+        agent = _agent(tmp_path)
+        written = agent._write_turn_prompt('Then search_pubmed ("torpor").').read_text()
+        assert 'mcp__openscientist_tools_search_pubmed ("torpor")' in written
+
+    def test_namespacing_an_already_namespaced_name_is_a_no_op(self, tmp_path: Path) -> None:
+        """The rewrite runs per surface, so a name that already carries the prefix
+        must survive unchanged rather than collect a second one."""
+        agent = _agent(tmp_path)
+        written = agent._write_turn_prompt(
+            "Call `mcp__openscientist_tools_execute_code` and "
+            "mcp__openscientist_tools_search_pubmed()."
+        ).read_text()
+        assert "mcp__openscientist_tools_mcp__openscientist_tools_" not in written
+        assert "`mcp__openscientist_tools_execute_code`" in written
+
+    def test_longer_identifiers_containing_a_tool_name_are_left_alone(self, tmp_path: Path) -> None:
+        """``run_phenix_tool`` is a tool, ``_run_phenix_tool_impl`` is an internal
+        helper a skill may mention in an example."""
+        agent = _agent(tmp_path)
+        written = agent._write_turn_prompt("See _run_phenix_tool_impl in the source.").read_text()
+        assert written == "See _run_phenix_tool_impl in the source."
+
     def test_builtin_tool_names_are_left_alone(self, tmp_path: Path) -> None:
         """Only MCP tools are namespaced. omp's own tools are called bare, and the
         report turn tells the agent to call ``write``."""

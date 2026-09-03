@@ -81,7 +81,7 @@ def build_initial_prompt(
             f"- Files: {data_files}\n"
             f"- Columns: {ks.data['data_summary'].get('columns', [])}\n"
             f"- Samples: {ks.data['data_summary'].get('n_samples', 'Unknown')}\n"
-            f"- Accessing data in execute_code: the primary file is pre-loaded "
+            f"- Accessing data in `execute_code`: the primary file is pre-loaded "
             f"as the `data` DataFrame, and every file is listed in `data_files` "
             f"with a ready-to-read `path`. Do not construct file paths yourself "
             f"or reuse paths from the shell. They do not exist in the code "
