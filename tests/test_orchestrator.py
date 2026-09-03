@@ -436,7 +436,7 @@ class TestDiscoveryCancellationAndFailure:
             ),
             patch("openscientist.orchestrator.discovery.update_job_status", new_callable=AsyncMock),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
-            patch("openscientist.orchestrator.discovery._sync_version_metadata_if_available"),
+            patch("openscientist.orchestrator.discovery._sync_version_metadata"),
             patch(
                 "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
                 return_value=ks,
@@ -524,7 +524,7 @@ class TestDiscoveryCancellationAndFailure:
             ),
             patch("openscientist.orchestrator.discovery.update_job_status", new_callable=AsyncMock),
             patch("openscientist.orchestrator.discovery._append_iteration_artifacts"),
-            patch("openscientist.orchestrator.discovery._sync_version_metadata_if_available"),
+            patch("openscientist.orchestrator.discovery._sync_version_metadata"),
             patch(
                 "openscientist.orchestrator.discovery.KnowledgeState.load_from_database_sync",
                 return_value=ks,
