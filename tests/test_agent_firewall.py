@@ -432,7 +432,7 @@ class _Lab:
             command=[
                 "sed 's/\\r$//' /source-entrypoint.sh > /tmp/entrypoint.sh && "
                 "chmod +x /tmp/entrypoint.sh && "
-                "exec /tmp/entrypoint.sh \"$@\"",
+                'exec /tmp/entrypoint.sh "$@"',
                 "agent-firewall-entrypoint",
                 "python3",
                 "-c",
