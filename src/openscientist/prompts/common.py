@@ -72,9 +72,8 @@ MCP_TOOL_NAMES: tuple[str, ...] = (
 )
 
 # The three ways a prompt marks a name as a tool to call: backticked, bold, or
-# an actual call. Free prose is left alone, because the turn prompt carries the
-# user's research question and their words are not ours to rewrite. A name
-# already carrying the prefix is preceded by a word character and cannot match.
+# an actual call. A name already carrying the prefix is preceded by a word
+# character and cannot match.
 _MCP_TOOL_MENTION = re.compile(
     r"(?<!\w)(?:`(?P<tick>{names})`|\*\*(?P<bold>{names})\*\*|(?P<call>{names})(?=[ \t]*\())".format(
         names="|".join(MCP_TOOL_NAMES)
@@ -90,18 +89,28 @@ def _prefixed_mention(match: re.Match[str], prefix: str) -> str:
     return f"{prefix}{match.group('call')}"
 
 
-def apply_mcp_tool_prefix(doc: str, frags: BackendFragments) -> str:
-    """Rewrite MCP tool names into the backend's callable name.
+def namespace_tool_mentions(doc: str, prefix: str) -> str:
+    """Rewrite MCP tool names in ``doc`` into the backend's callable name.
 
     Covers every form the prompts use to mark a tool as callable, because the
     skills write ``search_pubmed("...")`` and the shared doc writes
     ``**execute_code**``, and a form left bare teaches a name the backend
     cannot resolve. An empty prefix is the identity, so Claude and codex
     bodies are unchanged.
+
+    Pass only text this repository authored. A turn prompt also carries the
+    scientist's question, description and feedback, and rewriting a tool name
+    inside those puts a question to the model that nobody asked, so callers
+    namespace their own instructions before interpolating anyone else's words.
     """
-    if not frags.mcp_tool_prefix:
+    if not prefix:
         return doc
-    return _MCP_TOOL_MENTION.sub(lambda m: _prefixed_mention(m, frags.mcp_tool_prefix), doc)
+    return _MCP_TOOL_MENTION.sub(lambda m: _prefixed_mention(m, prefix), doc)
+
+
+def apply_mcp_tool_prefix(doc: str, frags: BackendFragments) -> str:
+    """Rewrite MCP tool names in text this repository authored end to end."""
+    return namespace_tool_mentions(doc, frags.mcp_tool_prefix)
 
 
 def build_system_prompt(frags: BackendFragments) -> str:

@@ -203,6 +203,7 @@ async def _run_primary_discovery_loop(
         data_files,
         ks,
         description=runtime.get("description"),
+        tool_prefix=executor.prompt_fragments().mcp_tool_prefix,
     )
 
     logger.info("Iteration 1/%d: Starting session", max_iterations)
@@ -249,6 +250,7 @@ async def _run_primary_discovery_loop(
             ks,
             pending_feedback,
             description=runtime.get("description"),
+            tool_prefix=executor.prompt_fragments().mcp_tool_prefix,
         )
         pending_feedback = None
         should_reset = iteration % reset_interval == 1
@@ -475,11 +477,12 @@ async def _set_consensus_answer(
     fabricating one.
     """
     baseline = KnowledgeState.load_from_database_sync(job_dir.name).data.get("consensus_answer")
+    tool_prefix = executor.prompt_fragments().mcp_tool_prefix
     for attempt in range(1, _MAX_CONSENSUS_ATTEMPTS + 1):
         prompt = (
-            build_consensus_prompt(research_question)
+            build_consensus_prompt(research_question, tool_prefix=tool_prefix)
             if attempt == 1
-            else build_consensus_retry_prompt(research_question)
+            else build_consensus_retry_prompt(research_question, tool_prefix=tool_prefix)
         )
         await executor.run_iteration(prompt, reset_session=False)
         current = KnowledgeState.load_from_database_sync(job_dir.name).data.get("consensus_answer")

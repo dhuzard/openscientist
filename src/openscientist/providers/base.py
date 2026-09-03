@@ -330,8 +330,8 @@ class Provider(abc.ABC):
         if pinned is not None:
             # Pass the pin on rather than skip it. It is set in this process's
             # environment, but the container resolves the window again on its own
-            # side, so returning nothing here left it probing -- the very thing
-            # pinning exists to avoid -- and silently taking the 8192 fallback.
+            # side, so returning nothing here left it probing (the very thing
+            # pinning exists to avoid) and silently taking the 8192 fallback.
             return {"OPENSCIENTIST_MODEL_CONTEXT_TOKENS": str(pinned)}
         window = self.probe_context_window()
         if not window:

@@ -327,7 +327,7 @@ class AbstractAgent[P: Provider](abc.ABC):
         skill_dir.mkdir(parents=True, exist_ok=True)
         # Skill bodies name MCP tools bare like the rest of the prompts, so a
         # backend that namespaces them needs the same rewrite the system and turn
-        # prompts get; otherwise a skill teaches a name that will not resolve.
+        # prompts get. Otherwise a skill teaches a name that will not resolve.
         # No-op wherever the prefix is empty, which is Claude and codex.
         body = apply_mcp_tool_prefix(render_skill_md(skill), self.prompt_fragments())
         (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")

@@ -230,19 +230,13 @@ class OmpAgent(AbstractAgent[Provider]):
         return path
 
     def _write_turn_prompt(self, prompt: str) -> Path:
-        # Passed as ``@<path>`` so a large prompt never hits the argv limit.
-        from openscientist.prompts.common import apply_mcp_tool_prefix
-
+        # Passed as ``@<path>`` so a large prompt never hits the argv limit. The
+        # prompt arrives already namespaced by whoever wrote its instructions,
+        # because only they can tell their own words from the scientist's.
         omp_dir = self._omp_dir()
         omp_dir.mkdir(parents=True, exist_ok=True)
         path = omp_dir / "turn_prompt.md"
-        # The orchestrator builds the turn prompt backend-agnostically, so it
-        # names MCP tools bare -- right for Claude and codex, but omp exposes
-        # them as mcp__openscientist_tools_<name>, and a bare name comes back
-        # "Tool <name> not found". prompts.common already rewrites the system
-        # prompt; the per-turn instructions were missed, and those are the copy
-        # the model acts on, so every execute_code call failed.
-        path.write_text(apply_mcp_tool_prefix(prompt, self.prompt_fragments()), encoding="utf-8")
+        path.write_text(prompt, encoding="utf-8")
         return path
 
     def _write_omp_model_catalog(self) -> None:
