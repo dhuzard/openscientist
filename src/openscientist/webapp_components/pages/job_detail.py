@@ -17,7 +17,6 @@ from uuid import UUID
 from nicegui import ui
 
 from openscientist.agent.factory import agent_class_for_provider_id
-from openscientist.artifact_packager import create_artifacts_zip
 from openscientist.async_tasks import run_sync
 from openscientist.auth import get_current_user_id, is_current_user_admin, require_auth
 from openscientist.database.rls import set_current_user
@@ -1124,13 +1123,8 @@ def _render_timeline_tab(context: _JobDetailContext) -> None:
         context.active_timers.append(stats_timer_holder["timer"])
 
 
-def _download_artifacts_zip(job_dir: Path, job_id: str) -> None:
-    try:
-        zip_buffer = create_artifacts_zip(job_dir, job_id)
-        ui.download(zip_buffer.getvalue(), filename=f"{job_id}_artifacts.zip")
-    except Exception as exc:
-        logger.error("Failed to create artifacts ZIP: %s", exc, exc_info=True)
-        ui.notify("Failed to create ZIP. Please try again.", type="negative")
+def _download_artifacts_zip(job_id: str) -> None:
+    ui.download(f"/web/jobs/{job_id}/artifacts.zip")
 
 
 def _download_pdf_report(report_path: Path, pdf_path: Path, job_id: str) -> None:
@@ -1226,7 +1220,7 @@ def _render_report_actions(context: _JobDetailContext, report_path: Path, pdf_pa
 
         ui.button(
             "Download All Artifacts",
-            on_click=lambda: _download_artifacts_zip(context.job_dir, context.job_id),
+            on_click=lambda: _download_artifacts_zip(context.job_id),
             icon="folder_zip",
         ).props("color=accent outline")
 

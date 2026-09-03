@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from sqlalchemy import select
 
 from openscientist.agent.base import (
     AbstractAgent,
+    AgentBackend,
     AgentConfig,
     IterationResult,
     TokenUsage,
@@ -573,6 +576,32 @@ async def _load_runtime_context(job_dir: Path) -> dict[str, Any]:
     }
 
 
+def _harness_binary(harness: AgentBackend) -> str:
+    """The binary the harness agent will launch, via the agents' own resolvers
+    so env overrides stay honoured.
+    """
+    if harness is AgentBackend.CODEX:
+        from openscientist.agent.codex_agent import _resolve_codex_bin
+
+        return _resolve_codex_bin() or "codex"
+    from openscientist.agent.omp_agent import _resolve_omp_bin
+
+    return _resolve_omp_bin()
+
+
+def _harness_cli_version(command: str) -> str | None:
+    """Bare version from the first ``<command> --version`` line; None if the CLI is unusable."""
+    try:
+        result = subprocess.run(
+            [command, "--version"], capture_output=True, text=True, timeout=3, check=True
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    first_line = result.stdout.strip().split("\n", 1)[0]
+    match = re.search(r"\d+\.\d+\S*", first_line)
+    return match.group(0) if match else (first_line or None)
+
+
 def get_version_metadata() -> dict[str, str]:
     """Get OpenScientist version metadata for reproducibility."""
     from openscientist.version import SHORT_COMMIT_LENGTH, get_commit
@@ -596,6 +625,33 @@ def get_version_metadata() -> dict[str, str]:
     except OSError:
         pass
 
+    # The resolved harness driving the job, never the literal "auto". A failure
+    # here also aborts agent build, so best-effort: leave the keys unrecorded.
+    try:
+        harness = agent_class_for_provider_id(get_settings().provider.provider_id).backend
+    except Exception:
+        return metadata
+    metadata["agent_harness"] = harness.value
+
+    if harness is AgentBackend.CLAUDE_CODE:
+        # Private modules of an unpinned SDK; omit each key if its module moves.
+        try:
+            from claude_agent_sdk._cli_version import __cli_version__
+
+            metadata["claude_code_version"] = __cli_version__
+            metadata["agent_harness_version"] = __cli_version__
+        except Exception:
+            pass
+
+        try:
+            from claude_agent_sdk._version import __version__
+
+            metadata["claude_agent_sdk_version"] = __version__
+        except Exception:
+            pass
+    elif version := _harness_cli_version(_harness_binary(harness)):
+        metadata["agent_harness_version"] = version
+
     return metadata
 
 
@@ -610,7 +666,17 @@ async def _persist_job_cost_record(
     from openscientist.database.models import CostRecord
     from openscientist.providers.pricing import estimate_cost_usd
 
-    cost_usd = estimate_cost_usd(model_name, tokens.input_tokens, tokens.output_tokens)
+    # The pricing buckets are keyword-only, since they are easy to transpose and each
+    # is priced differently.
+    cost_usd = estimate_cost_usd(
+        model_name,
+        input_tokens=tokens.input_tokens,
+        output_tokens=tokens.output_tokens,
+        cache_read_tokens=tokens.cache_read_tokens,
+        cache_write_tokens=tokens.cache_write_tokens,
+        cache_write_1h_tokens=tokens.cache_write_1h_tokens,
+        reasoning_tokens=tokens.reasoning_tokens,
+    )
     async with AsyncSessionLocal(thread_safe=True) as session:
         record = CostRecord(
             job_id=UUID(job_id),
@@ -620,6 +686,11 @@ async def _persist_job_cost_record(
             model=model_name,
             input_tokens=tokens.input_tokens,
             output_tokens=tokens.output_tokens,
+            cache_read_tokens=tokens.cache_read_tokens,
+            # The column holds every cache write. Only the price depends on how long
+            # the entry lives, and `cost_usd` already accounts for that.
+            cache_write_tokens=tokens.cache_write_tokens + tokens.cache_write_1h_tokens,
+            reasoning_tokens=tokens.reasoning_tokens,
             cost_usd=cost_usd,
         )
         session.add(record)
@@ -634,9 +705,14 @@ async def _finalize_executor(executor: AbstractAgent[Provider], job_id: str) -> 
     """
     tokens = executor.total_tokens
     logger.info(
-        "Agent executor completed: %d input tokens, %d output tokens",
+        "Agent executor completed: %d input, %d output, %d cache read, "
+        "%d cache write (%d of them one-hour), %d reasoning tokens",
         tokens.input_tokens,
         tokens.output_tokens,
+        tokens.cache_read_tokens,
+        tokens.cache_write_tokens + tokens.cache_write_1h_tokens,
+        tokens.cache_write_1h_tokens,
+        tokens.reasoning_tokens,
     )
     try:
         settings = get_settings()

@@ -44,6 +44,7 @@ from openscientist.version import SHORT_COMMIT_LENGTH
 logger = logging.getLogger(__name__)
 
 AGENT_APP_DIR = "/agent"
+AGENT_GCP_CREDENTIALS_PATH = f"{AGENT_APP_DIR}/gcp-credentials.json"
 
 
 class JobContainerRunner:
@@ -100,8 +101,6 @@ class JobContainerRunner:
         # Air-gapped mode routes the tools subprocess to the local PubMed corpus.
         if settings.airgap.enabled:
             env["OPENSCIENTIST_AIRGAPPED"] = "1"
-        if settings.provider.google_application_credentials:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = "/agent/gcp-credentials.json"
         if settings.phenix.phenix_host_path:
             env["PHENIX_PATH"] = "/opt/phenix"
         return env
@@ -117,11 +116,12 @@ class JobContainerRunner:
         volumes: dict[str, dict[str, str]] = {
             str(job_dir_host): {"bind": job_mount, "mode": "rw"},
         }
-        gcp_path = settings.provider.google_application_credentials
-        if gcp_path:
-            gcp_host_path = settings.provider.gcp_credentials_host_path or gcp_path
+        # Mount only the operator-provided host creds. google_application_credentials
+        # is the container-internal path (Dockerfile ENV), not a valid host source.
+        gcp_host_path = settings.provider.gcp_credentials_host_path
+        if gcp_host_path:
             volumes[str(gcp_host_path)] = {
-                "bind": "/agent/gcp-credentials.json",
+                "bind": AGENT_GCP_CREDENTIALS_PATH,
                 "mode": "ro",
             }
         phenix_host = settings.phenix.phenix_host_path
@@ -170,9 +170,15 @@ class JobContainerRunner:
         )
         job_mount = f"{AGENT_APP_DIR}/jobs/{job_id}"
         provider = get_provider()
+        # Mount and advertise the GCP creds only when the operator gives a host
+        # path, so the provider never emits a creds file that was not mounted.
+        gcp_credentials_container_path = (
+            AGENT_GCP_CREDENTIALS_PATH if settings.provider.gcp_credentials_host_path else None
+        )
         provider_env = provider.proxied_container_env(
             proxy_base_url=container_proxy_base_url(),
             placeholder=make_job_placeholder(settings.secret_key, job_id),
+            gcp_credentials_container_path=gcp_credentials_container_path,
         )
         # Resolve a self-hosted model's window app-side and pass it in, since the
         # proxied container cannot probe a root path like llama.cpp's /props.

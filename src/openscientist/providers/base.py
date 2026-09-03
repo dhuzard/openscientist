@@ -356,9 +356,17 @@ class Provider(abc.ABC):
             reason=f"{self.display_name} cannot be air-gapped.",
         )
 
-    def proxied_container_env(self, *, proxy_base_url: str, placeholder: str) -> dict[str, str]:
+    def proxied_container_env(
+        self,
+        *,
+        proxy_base_url: str,
+        placeholder: str,
+        gcp_credentials_container_path: str | None = None,
+    ) -> dict[str, str]:
         """Job-container provider env with LLM traffic routed through the proxy."""
-        env = get_settings().provider.get_container_env_vars()
+        env = get_settings().provider.get_container_env_vars(
+            gcp_credentials_container_path=gcp_credentials_container_path
+        )
         env.update(self.proxy_env_overrides(proxy_base_url=proxy_base_url, placeholder=placeholder))
         return env
 

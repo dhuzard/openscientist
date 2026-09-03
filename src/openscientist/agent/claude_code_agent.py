@@ -110,6 +110,26 @@ class _IterationState:
     final_output: str = ""
 
 
+def _usage_field(payload: object, name: str) -> object:
+    """Read ``name`` off a usage payload that may be a dict or a typed object.
+
+    The SDK hands over model objects, while cached transcripts and tests hand over
+    the wire dicts, and both reach the usage mapper.
+    """
+    if isinstance(payload, dict):
+        return payload.get(name)
+    return getattr(payload, name, None)
+
+
+def _usage_int(payload: object, name: str) -> int:
+    value = _usage_field(payload, name)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
 _install_parse_message_patch()
 
 
@@ -297,33 +317,30 @@ class ClaudeCodeAgent(AbstractAgent[ClaudeCompatible]):
     def _usage_from_payload(usage: object) -> TokenUsage:
         """Normalize Anthropic SDK usage payloads (object or dict) to TokenUsage.
 
-        Anthropic's shape is already additive: ``input_tokens`` excludes
-        cached input, and ``cache_creation_input_tokens`` /
-        ``cache_read_input_tokens`` are independent buckets. We pass the
-        values through with only the field renames required by the
-        normalized schema.
+        Anthropic's shape is already additive: ``input_tokens`` excludes cached
+        input, and ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+        are independent buckets.
 
-        ``reasoning_tokens`` is always 0 on this path because the
-        Anthropic API does not expose a separate count for extended-
-        thinking tokens; they are billed inside ``output_tokens``.
+        ``cache_creation_input_tokens`` is the sum of the per-lifetime counts in
+        ``cache_creation``, and a one-hour write bills at twice the input rate
+        against 1.25x for five minutes, so the one-hour portion is split off into
+        its own bucket. It is clamped to the total so the two stay disjoint.
 
-        The Codex backend (Phase 5) will have its own
-        ``_usage_from_payload`` that subtracts ``cached_input_tokens``
-        and ``reasoning_output_tokens`` from their parent totals to
-        produce the same additive form.
+        ``reasoning_tokens`` is always 0 on this path because the Anthropic API
+        does not expose a separate count for extended-thinking tokens; they are
+        billed inside ``output_tokens``.
         """
-        if isinstance(usage, dict):
-            return TokenUsage(
-                input_tokens=int(usage.get("input_tokens", 0) or 0),
-                output_tokens=int(usage.get("output_tokens", 0) or 0),
-                cache_write_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
-                cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
-            )
+        cache_write_total = _usage_int(usage, "cache_creation_input_tokens")
+        write_1h = min(
+            _usage_int(_usage_field(usage, "cache_creation"), "ephemeral_1h_input_tokens"),
+            cache_write_total,
+        )
         return TokenUsage(
-            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
-            cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            input_tokens=_usage_int(usage, "input_tokens"),
+            output_tokens=_usage_int(usage, "output_tokens"),
+            cache_write_tokens=cache_write_total - write_1h,
+            cache_write_1h_tokens=write_1h,
+            cache_read_tokens=_usage_int(usage, "cache_read_input_tokens"),
         )
 
     def _record_usage(self, message: object) -> None:
