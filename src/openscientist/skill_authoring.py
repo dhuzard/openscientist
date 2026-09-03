@@ -42,6 +42,7 @@ _AUTHORING_CONCURRENCY = asyncio.Semaphore(2)
 _SAFE_IDENTIFIER = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RESOURCE_LINK = re.compile(r"\]\((?:\./)?(?:references|scripts|assets)/[^)]+\)", re.IGNORECASE)
 _NUMBERED_STEP = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
+_PYTHON_FENCE = re.compile(r"(?m)^\s*```(?:python|py)\s*$", re.IGNORECASE)
 _SECRET_VALUE = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
     r"AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
@@ -146,6 +147,15 @@ OpenScientist runtime facts:
   a description capped at 1,024 characters.
 - Current ingestion transports only SKILL.md. Sibling references, scripts, and
   assets are NOT delivered, even though some repository examples contain them.
+- SKILL.md may contain directly usable fenced Python recipes, and should do so
+  when executable methodology makes the procedure more reliable or reusable.
+- A later job agent reads the skill, adapts a recipe to the uploaded data and
+  runtime data contract, and explicitly passes the adapted code to
+  `execute_code`. Enabling or rendering a skill does not execute fenced code;
+  the rendering layer preserves Markdown and does not parse code blocks.
+- A skill provides procedural knowledge and code recipes. It does not register
+  tools. An MCP tool is a separately registered callable with a fixed interface
+  and controlled implementation; a fenced code block never becomes an MCP tool.
 
 Quality principles:
 - Make the description say what the skill does and when it applies.
@@ -167,6 +177,9 @@ Quality principles:
   observable in a future run trace.
 - Do not invent tools, dependencies, citations, evidence, or platform support.
 - Keep the draft self-contained for today's OpenScientist runtime.
+- When including Python, make it an adaptable recipe with clear inputs,
+  assumptions, expected outputs, and failure checks. Tell the job agent when to
+  invoke `execute_code`; never claim that enabling the skill runs the code.
 
 Return exactly one JSON object and no surrounding prose:
 {
@@ -202,6 +215,10 @@ Apply the same creation-quality principles used by OpenScientist:
   a reusable decision rule.
 - Do not invent tools, platform support, citations, or events absent from the
   evidence.
+- Treat fenced Python as a valid agent-readable recipe. Check that the skill
+  tells the job agent when to adapt it to uploaded data and invoke
+  `execute_code`, and does not imply that a code fence runs automatically or
+  registers an MCP tool.
 
 Return exactly one JSON object and no surrounding prose:
 {
@@ -579,6 +596,15 @@ def validate_skill_markdown(markdown: str) -> tuple[SkillValidationFinding, ...]
             "resource-bundle",
             "Current OpenScientist ingestion does not deliver sibling references, scripts, or "
             "assets; keep the exported SKILL.md self-contained.",
+        )
+    if _PYTHON_FENCE.search(body):
+        _finding(
+            findings,
+            "info",
+            "python-recipe",
+            "Fenced Python is supported as an agent-readable recipe, but it is not executed "
+            "when the skill is enabled. Confirm that the instructions say when to adapt it "
+            "to the job data and invoke `execute_code` explicitly.",
         )
     if re.search(r"(?:/Users/|[A-Za-z]:\\\\Users\\\\|/home/[^/\s]+/)", body):
         _finding(

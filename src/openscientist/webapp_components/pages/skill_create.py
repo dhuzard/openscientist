@@ -69,8 +69,14 @@ _GOOD_SKILL_PRINCIPLES = (
     (
         "tune",
         "Right degree of freedom",
-        "It uses heuristics when several approaches are valid, and exact steps or scripts when "
-        "the task is fragile.",
+        "It uses heuristics when several approaches are valid, and exact steps or executable "
+        "code recipes when the task is fragile.",
+    ),
+    (
+        "code",
+        "Code recipes, not tools",
+        "It may contain directly usable Python that the agent adapts and passes to execute_code. "
+        "Code fences do not run automatically or register MCP tools.",
     ),
     (
         "compress",
@@ -270,14 +276,16 @@ _FIELD_HELP = {
     "workflow": _dvc_help(
         theory=(
             "Match specificity to fragility: use flexible heuristics when several approaches "
-            "are valid, but prescribe ordered checks or deterministic scripts when mistakes "
-            "would be costly or hard to detect. Define explicit handoffs where work crosses "
-            "into a companion skill."
+            "are valid, but prescribe ordered checks or directly usable code recipes when "
+            "mistakes would be costly or hard to detect. Inline Python is procedural knowledge: "
+            "the job agent must adapt it to uploaded data and invoke execute_code explicitly. "
+            "Define explicit handoffs where work crosses into a companion skill."
         ),
         approaches=(
             "Ordered procedure for fragile, repeatable operations.",
             "Decision tree for workflows whose next step depends on evidence.",
             "Phase-based guidance with checkpoints for open-ended investigation.",
+            "Fenced Python recipe with inputs, assumptions, outputs, and failure checks.",
             "Companion-skill handoff with precedence and unavailable-dependency behavior.",
         ),
         example=(
@@ -347,7 +355,8 @@ _FIELD_HELP = {
             "Keep SKILL.md concise and operational: metadata controls discovery, while the body "
             "contains only non-obvious instructions needed after activation. OpenScientist "
             "currently transports only SKILL.md, so required behavior cannot depend on sibling "
-            "reference or script files."
+            "reference or script files. Directly usable Python may be embedded in SKILL.md, but "
+            "the agent must adapt and submit it to execute_code; rendering a fence never runs it."
         ),
         approaches=(
             "Compact procedure: frontmatter followed by one end-to-end workflow.",
@@ -549,7 +558,7 @@ async def skill_create_page(
 
         with ui.expansion(
             "What makes a good skill?",
-            caption="Seven principles for creation and run-based review",
+            caption="Eight principles for creation and run-based review",
             icon="school",
             value=not review_mode,
         ).classes("w-full border rounded-lg bg-slate-50"):

@@ -111,6 +111,18 @@ def test_creation_protocol_requires_composable_traceable_skills() -> None:
     assert "observable in a future run trace" in normalized
 
 
+def test_authoring_protocol_distinguishes_code_recipes_from_tool_execution() -> None:
+    creation = " ".join(_SYSTEM_PROMPT.split())
+    review = " ".join(_REVIEW_SYSTEM_PROMPT.split())
+
+    assert "directly usable fenced Python recipes" in creation
+    assert "explicitly passes the adapted code to `execute_code`" in creation
+    assert "does not execute fenced code" in creation
+    assert "does not register tools" in creation
+    assert "does not imply that a code fence runs automatically" in review
+    assert "registers an MCP tool" in review
+
+
 def test_parse_structured_response_accepts_json_fence() -> None:
     raw = (
         "```json\n"
@@ -168,6 +180,25 @@ def test_validator_accepts_complete_self_contained_skill() -> None:
 
     assert not [finding for finding in findings if finding.severity == "error"]
     assert not [finding for finding in findings if finding.severity == "warning"]
+
+
+def test_validator_accepts_inline_python_as_an_explicit_execute_code_recipe() -> None:
+    markdown = VALID_SKILL + """\
+
+## Executable recipe
+
+Adapt `value_column` to the uploaded table, then pass this code to `execute_code`.
+
+```python
+summary = data[value_column].describe()
+print(summary)
+```
+"""
+
+    findings = validate_skill_markdown(markdown)
+
+    assert not [finding for finding in findings if finding.severity in {"error", "warning"}]
+    assert "python-recipe" in {finding.code for finding in findings}
 
 
 @pytest.mark.parametrize(

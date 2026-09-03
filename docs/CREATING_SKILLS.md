@@ -198,6 +198,30 @@ background. Although the broader
 `SKILL.md`. Until bundle support exists, an OpenScientist skill must remain
 self-contained.
 
+### Include executable code recipes when they improve reliability
+
+An OpenScientist skill can—and often should—contain directly usable Python in
+fenced code blocks. The bundled `data-science` skill demonstrates this pattern:
+methodological instructions and executable templates live together in
+`SKILL.md`.
+
+Keep the execution boundary explicit:
+
+- A **skill** contains procedural knowledge and executable code recipes.
+- At job time, the agent reads the recipe, adapts it to the uploaded data and
+  current runtime contract, and explicitly passes it to `execute_code`.
+- Enabling or rendering the skill does **not** execute fenced code. The current
+  materialization layer preserves the Markdown body verbatim and does not parse
+  code blocks as execution requests.
+- An **MCP tool** is a separately registered callable with a fixed interface and
+  controlled implementation. A Python fence in `SKILL.md` neither defines nor
+  registers a tool.
+
+Write recipes with explicit inputs, assumptions, expected outputs, and failure
+checks. Use the runtime-provided data handles rather than contributor-specific
+paths, and tell the agent when the recipe should be adapted and submitted to
+`execute_code`.
+
 ### Match precision to risk
 
 - Use principles where several methods can be scientifically valid.
@@ -291,6 +315,9 @@ support. Parser success only proves that the file can be ingested.
 - [ ] The description says what the skill does and when it applies.
 - [ ] The category matches current discovery behavior.
 - [ ] The procedure is ordered, testable, and self-contained.
+- [ ] Inline Python, when useful, is an adaptable recipe with an explicit
+      `execute_code` invocation point; no text implies that fences auto-run or
+      register MCP tools.
 - [ ] Boundaries with companion skills define the handoff trigger, which skill
       remains authoritative, and safe behavior when a dependency is unavailable.
 - [ ] Evaluation cases state the expected skill activations so run provenance

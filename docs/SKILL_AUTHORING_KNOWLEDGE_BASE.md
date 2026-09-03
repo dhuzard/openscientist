@@ -37,6 +37,8 @@ files evolve; the surrounding symbol or section name is the durable locator.
 | R6 | [Default source configuration](../src/openscientist/web_app.py#L362), [scheduler query](../src/openscientist/skill_scheduler.py#L150) | **Observed:** the default GitHub source tracks `main`, and enabled sources are synchronized automatically. |
 | R7 | [`parse_content`](../src/openscientist/skill_ingestion.py#L138), [Codex path construction](../src/openscientist/agent/skills.py#L90) | **Assessment:** explicit category and slug values need validation before path materialization. The parser currently accepts path characters verbatim. |
 | R8 | [Skills API](../src/openscientist/api/endpoints/skills.py), [skills page](../src/openscientist/webapp_components/pages/skills_list.py) | **Observed:** skills can be read and sources administered, but there is no end-user create/update API. The authoring UI therefore exports a draft instead of silently publishing it. |
+| R9 | [Codex skill rendering](../src/openscientist/agent/skills.py), [`data-science` skill](../skills/domain/data-science/SKILL.md) | **Observed:** materialization writes the skill body unchanged. Fenced Python is delivered as agent-visible procedural content; the renderer does not parse or execute it. |
+| R10 | [`execute_code` registration](../src/openscientist_tools/code_exec.py), [MCP server](../src/openscientist_tools/server.py) | **Observed:** `execute_code` is a separately registered MCP callable with an explicit interface. A code block in a skill does not define or invoke that tool. |
 
 ### Current effective format
 
@@ -70,7 +72,7 @@ tags:
 | [`workflow/prioritization`](../skills/workflow/prioritization/SKILL.md) | Impact/feasibility/novelty decision structure. | Scores range to 125 and examples use thresholds incompatible with hypothesis generation. |
 | [`workflow/result-interpretation`](../skills/workflow/result-interpretation/SKILL.md) | Effect sizes, assumptions, negative-result learning, multiple-testing warning. | It equates `p` above threshold with a rejected hypothesis, which overstates evidence. |
 | [`workflow/stopping-criteria`](../skills/workflow/stopping-criteria/SKILL.md) | Explicit saturation, budget, and diminishing-return checks. | Its priority thresholds inherit the inconsistent scoring contract. |
-| [`domain/data-science`](../skills/domain/data-science/SKILL.md) | Broad procedural coverage and reproducibility prompts. | Some statistical defaults and diagnostic logic need specialist review before being mandatory. |
+| [`domain/data-science`](../skills/domain/data-science/SKILL.md) | Broad procedural coverage, reproducibility prompts, and directly usable Python templates. | Some statistical defaults and diagnostic logic need specialist review before being mandatory. |
 | [`domain/genomics`](../skills/domain/genomics/SKILL.md) | Strong biological-replicate and single-cell pseudoreplication guidance. | Early count-data examples suggest ordinary per-gene tests despite later DESeq2/edgeR guidance. |
 | [`domain/metabolomics`](../skills/domain/metabolomics/SKILL.md) | Pathway context and ratio exploration. | Steady-state abundance ratios are repeatedly described as flux and bottlenecks without sufficient qualification. |
 | [`domain/phenix-tools-reference`](../skills/domain/phenix-tools-reference/SKILL.md) | Exact supported tool-call contract. | Long command catalog increases context cost; validate commands against installed versions. |
@@ -122,7 +124,8 @@ A production-quality skill should satisfy all of these layers:
 2. **Contract:** prerequisites, supported inputs, output, and completion
    criteria.
 3. **Procedure:** one clear sequence or decision tree with justified degrees of
-   freedom.
+   freedom. Directly usable Python recipes are valid when the agent is told how
+   to adapt them and explicitly invoke `execute_code`.
 4. **Evidence:** sources for consequential claims; identifiers, versions,
    parameters, units, and intermediate checks.
 5. **Epistemics:** observations, associations, hypotheses, proxies, and causal
@@ -145,6 +148,7 @@ A production-quality skill should satisfy all of these layers:
 | Export-only `SKILL.md` | There is no end-user write API, provenance model, or trust-review workflow for safe direct publishing. |
 | Isolated, no-tools ephemeral model turn | Uses provider text-completion APIs rather than an agent runtime, substitutes unusable settings sentinels for job/database credentials, omits execution and Codex OAuth credentials, and carries only the active provider settings required for the API call. |
 | No sibling resources in generated drafts | Matches R2 and current materialization behavior. |
+| Inline executable recipes allowed | Matches R9: Python can live directly in `SKILL.md`, while execution remains an explicit `execute_code` tool call by the job agent. |
 
 ## External knowledge traces
 

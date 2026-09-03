@@ -20,6 +20,7 @@ def test_general_skill_theory_covers_core_authoring_principles() -> None:
         "Discoverable",
         "Non-obvious and reusable",
         "Right degree of freedom",
+        "Code recipes, not tools",
         "Context-efficient",
         "Contract-driven",
         "Testable and revisable",
@@ -29,6 +30,13 @@ def test_general_skill_theory_covers_core_authoring_principles() -> None:
     assert all(
         len(description.split()) >= 10 for _icon, _title, description in _GOOD_SKILL_PRINCIPLES
     )
+    code_principle = next(
+        description
+        for _icon, title, description in _GOOD_SKILL_PRINCIPLES
+        if title == "Code recipes, not tools"
+    )
+    assert "execute_code" in code_principle
+    assert "do not run automatically" in code_principle
 
 
 def test_skills_table_has_one_quality_check_action() -> None:

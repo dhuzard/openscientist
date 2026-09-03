@@ -76,3 +76,26 @@ def test_render_skill_md_handles_yaml_special_chars() -> None:
     )
     fm, _ = _parse_frontmatter(render_skill_md(skill))
     assert fm["description"] == 'Analysis: uses "quotes" and: colons'
+
+
+def test_render_skill_md_preserves_fenced_python_without_executing_it() -> None:
+    content = """# Analysis recipe
+
+Adapt this recipe to the job data and pass it to `execute_code`.
+
+```python
+print(data.shape)
+```
+"""
+    skill = Skill(
+        name="Analysis recipe",
+        slug="analysis-recipe",
+        category="domain",
+        description="Provide a Python recipe. Use for tabular analysis.",
+        content=content,
+        is_enabled=True,
+    )
+
+    _frontmatter, body = _parse_frontmatter(render_skill_md(skill))
+
+    assert body == content
