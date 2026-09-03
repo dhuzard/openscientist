@@ -27,12 +27,14 @@ from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, XSD
 from rdflib.query import ResultRow
 
 OSC = Namespace("https://example.org/openscientist/evidence#")
-PROV = Namespace("http://www.w3.org/ns/prov#")
-SCHEMA = Namespace("http://schema.org/")
-SOSA = Namespace("http://www.w3.org/ns/sosa/")
-QUDT = Namespace("http://qudt.org/schema/qudt/")
-TIME = Namespace("http://www.w3.org/2006/time#")
-SH = Namespace("http://www.w3.org/ns/shacl#")
+# These are canonical vocabulary identifiers, not transport endpoints. Changing
+# their schemes would create different RDF terms rather than make a request safer.
+PROV = Namespace("http://www.w3.org/ns/prov#")  # NOSONAR
+SCHEMA = Namespace("http://schema.org/")  # NOSONAR
+SOSA = Namespace("http://www.w3.org/ns/sosa/")  # NOSONAR
+QUDT = Namespace("http://qudt.org/schema/qudt/")  # NOSONAR
+TIME = Namespace("http://www.w3.org/2006/time#")  # NOSONAR
+SH = Namespace("http://www.w3.org/ns/shacl#")  # NOSONAR
 HCM = Namespace("https://w3id.org/hcmo/ontology/hcm#")
 HCM_BIO = Namespace("https://w3id.org/hcmo/ontology/hcm/bio#")
 HCM_OBS = Namespace("https://w3id.org/hcmo/ontology/hcm/obs#")
@@ -43,6 +45,22 @@ DEFAULT_PROFILE = RESOURCE_ROOT / "approved-vocabulary.ttl"
 DEFAULT_SHAPES = RESOURCE_ROOT / "evidence-shapes.ttl"
 APPENDIX_BEGIN = "<!-- BEGIN OPENSCIENTIST TRACEABILITY APPENDIX -->"
 APPENDIX_END = "<!-- END OPENSCIENTIST TRACEABILITY APPENDIX -->"
+COLLECTION_NAMES = (
+    "hypotheses",
+    "findings",
+    "literature",
+    "analysis_log",
+    "data_files",
+    "statistical_results",
+)
+FINDING_REFERENCES = {
+    "supporting_hypotheses": "hypotheses",
+    "analysis_ids": "analysis_log",
+    "data_file_ids": "data_files",
+    "result_ids": "statistical_results",
+    "literature_support": "literature",
+}
+INFERENCE_SCOPES = frozenset({"individual", "sample", "population", "causal"})
 
 
 class EvidenceExportError(ValueError):
@@ -67,23 +85,17 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True) + "\n"
 
 
-def validate_snapshot(snapshot: dict[str, Any]) -> None:
-    """Validate structure, references, and stored citation grounding."""
-    config = snapshot.get("config")
-    if not isinstance(config, dict):
-        raise EvidenceExportError("snapshot.config must be an object")
-    _require(config, ("job_id", "research_question", "started_at"), "config")
+def _require_object(container: dict[str, Any], key: str, context: str) -> dict[str, Any]:
+    value = container.get(key)
+    if not isinstance(value, dict):
+        raise EvidenceExportError(f"{context} must be an object")
+    return value
 
-    collections = (
-        "hypotheses",
-        "findings",
-        "literature",
-        "analysis_log",
-        "data_files",
-        "statistical_results",
-    )
+
+def _validate_collections(snapshot: dict[str, Any]) -> dict[str, set[str]]:
+    """Validate normalized record collections and return their ID indexes."""
     ids: dict[str, set[str]] = {}
-    for name in collections:
+    for name in COLLECTION_NAMES:
         records = snapshot.get(name)
         if not isinstance(records, list):
             raise EvidenceExportError(f"snapshot.{name} must be a list")
@@ -96,17 +108,18 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
         if len(record_ids) != len(set(record_ids)):
             raise EvidenceExportError(f"snapshot.{name} contains duplicate IDs")
         ids[name] = set(record_ids)
+    return ids
 
-    semantic = snapshot.get("semantic_context")
-    if not isinstance(semantic, dict):
-        raise EvidenceExportError("snapshot.semantic_context must be an object")
+
+def _validate_semantic_context(snapshot: dict[str, Any]) -> None:
+    semantic = _require_object(snapshot, "semantic_context", "snapshot.semantic_context")
     for name in ("enclosure", "subject", "sensor", "observation"):
         if not isinstance(semantic.get(name), dict):
             raise EvidenceExportError(f"snapshot.semantic_context.{name} must be an object")
 
-    manifest = snapshot.get("semantic_manifest")
-    if not isinstance(manifest, dict):
-        raise EvidenceExportError("snapshot.semantic_manifest must be an object")
+
+def _validate_semantic_manifest(snapshot: dict[str, Any]) -> None:
+    manifest = _require_object(snapshot, "semantic_manifest", "snapshot.semantic_manifest")
     _require(
         manifest,
         ("contract_version", "authoritative_state", "projection_mode"),
@@ -132,13 +145,8 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
     if len(vocabulary_ids) != len(set(vocabulary_ids)):
         raise EvidenceExportError("snapshot.semantic_manifest.vocabularies has duplicate IDs")
 
-    finding_refs = {
-        "supporting_hypotheses": "hypotheses",
-        "analysis_ids": "analysis_log",
-        "data_file_ids": "data_files",
-        "result_ids": "statistical_results",
-        "literature_support": "literature",
-    }
+
+def _validate_findings(snapshot: dict[str, Any], ids: dict[str, set[str]]) -> None:
     for finding in snapshot["findings"]:
         _require(
             finding,
@@ -151,7 +159,7 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
             ),
             "finding",
         )
-        if finding["inference_scope"] not in {"individual", "sample", "population", "causal"}:
+        if finding["inference_scope"] not in INFERENCE_SCOPES:
             raise EvidenceExportError(
                 f"finding {finding['id']} has invalid inference_scope {finding['inference_scope']!r}"
             )
@@ -159,7 +167,7 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
             raise EvidenceExportError(
                 f"finding {finding['id']} experimental_unit_count must be positive"
             )
-        for field, target in finding_refs.items():
+        for field, target in FINDING_REFERENCES.items():
             values = finding.get(field, [])
             if not isinstance(values, list):
                 raise EvidenceExportError(f"finding {finding['id']}.{field} must be a list")
@@ -169,6 +177,8 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
                     f"finding {finding['id']} references unknown {target}: {unknown}"
                 )
 
+
+def _validate_analysis_references(snapshot: dict[str, Any], ids: dict[str, set[str]]) -> None:
     for analysis in snapshot["analysis_log"]:
         for field, target in (
             ("input_file_ids", "data_files"),
@@ -180,6 +190,21 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
                     f"analysis {analysis['id']} references unknown {target}: {unknown}"
                 )
 
+
+def _normalize_citation_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower().strip()).strip(".,;:!?\"'()[]{}")
+
+
+def _citation_is_grounded(snippet: str, abstract: str, status: Any) -> bool:
+    if status == "verified":
+        return snippet in abstract
+    if status == "verified_normalized":
+        normalized_snippet = _normalize_citation_text(snippet)
+        return bool(normalized_snippet) and normalized_snippet in _normalize_citation_text(abstract)
+    return False
+
+
+def _validate_citations(snapshot: dict[str, Any]) -> None:
     literature_by_pmid = {
         str(item.get("pmid")): item for item in snapshot["literature"] if item.get("pmid")
     }
@@ -192,16 +217,36 @@ def validate_snapshot(snapshot: dict[str, Any]) -> None:
             snippet = str(citation.get("snippet") or "")
             abstract = str(paper.get("abstract") or "")
             status = citation.get("validation_status")
-            normalize = lambda text: re.sub(r"\s+", " ", text.lower().strip()).strip(  # noqa: E731
-                ".,;:!?\"'()[]{}"
-            )
-            matches = snippet in abstract if status == "verified" else False
-            if status == "verified_normalized":
-                matches = bool(normalize(snippet)) and normalize(snippet) in normalize(abstract)
-            if not matches:
+            if not _citation_is_grounded(snippet, abstract, status):
                 raise EvidenceExportError(
                     f"finding {finding['id']} citation PMID {pmid} is not grounded"
                 )
+
+
+def validate_snapshot(snapshot: dict[str, Any]) -> None:
+    """Validate structure, references, and stored citation grounding."""
+    config = _require_object(snapshot, "config", "snapshot.config")
+    _require(config, ("job_id", "research_question", "started_at"), "config")
+    ids = _validate_collections(snapshot)
+    _validate_semantic_context(snapshot)
+    _validate_semantic_manifest(snapshot)
+    _validate_findings(snapshot, ids)
+    _validate_analysis_references(snapshot, ids)
+    _validate_citations(snapshot)
+
+
+def _resolve_within(root: Path, path: Path, context: str) -> Path:
+    """Resolve a path and reject absolute, parent, or symlink escapes."""
+    resolved_root = root.resolve()
+    candidate = path if path.is_absolute() else resolved_root / path
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise EvidenceExportError(
+            f"{context} escapes allowed root {resolved_root}: {path}"
+        ) from exc
+    return resolved
 
 
 def verify_source_files(snapshot: dict[str, Any], source_root: Path) -> list[dict[str, Any]]:
@@ -209,9 +254,11 @@ def verify_source_files(snapshot: dict[str, Any], source_root: Path) -> list[dic
     verified: list[dict[str, Any]] = []
     for record in snapshot["data_files"]:
         _require(record, ("file_path", "file_size", "sha256"), f"data file {record['id']}")
-        path = Path(record["file_path"])
-        path = path if path.is_absolute() else source_root / path
-        path = path.resolve()
+        path = _resolve_within(
+            source_root,
+            Path(record["file_path"]),
+            f"data file {record['id']}",
+        )
         if not path.is_file():
             raise EvidenceExportError(f"data file {record['id']} does not exist: {path}")
         digest = hashlib.sha256()
@@ -403,10 +450,7 @@ class EvidenceGraphBuilder:
         self.graph.add((condition, RDFS.label, Literal(observation_data["condition_label"])))
         return {"observation": observation}
 
-    def build(self) -> Graph:
-        job = self._add_job()
-        self._add_semantic_manifest(job)
-        hcmo = self._add_hcmo_context()
+    def _add_data_files(self, job: URIRef, observation: URIRef) -> dict[str, URIRef]:
         files: dict[str, URIRef] = {}
         for record in self.snapshot["data_files"]:
             node = self.node("data-file", record["id"])
@@ -418,9 +462,11 @@ class EvidenceGraphBuilder:
             self.graph.add((node, HCM_TECH.hasStoragePath, Literal(record["file_path"])))
             self.graph.add((node, OSC.byteSize, Literal(int(record["file_size"]))))
             self.graph.add((node, OSC.sha256, Literal(record["sha256"])))
-            self.graph.add((node, OSC.recordsObservation, hcmo["observation"]))
+            self.graph.add((node, OSC.recordsObservation, observation))
             self.graph.add((job, PROV.used, node))
+        return files
 
+    def _add_hypotheses(self, job: URIRef) -> dict[str, URIRef]:
         hypotheses: dict[str, URIRef] = {}
         for record in self.snapshot["hypotheses"]:
             node = self.node("hypothesis", record["id"])
@@ -435,7 +481,9 @@ class EvidenceGraphBuilder:
             if strategy := record.get("test_strategy") or record.get("test_code"):
                 self.graph.add((node, OSC.testStrategy, Literal(strategy)))
             self.graph.add((job, OSC.hasHypothesis, node))
+        return hypotheses
 
+    def _add_statistical_results(self) -> dict[str, URIRef]:
         results: dict[str, URIRef] = {}
         for record in self.snapshot["statistical_results"]:
             node = self.node("statistical-result", record["id"])
@@ -445,7 +493,14 @@ class EvidenceGraphBuilder:
             self.graph.add((node, RDFS.label, Literal(record["label"])))
             self.graph.add((node, SCHEMA.value, Literal(Decimal(str(record["value"])))))
             self.graph.add((node, QUDT.hasUnit, URIRef(record["unit_iri"])))
+        return results
 
+    def _add_analyses(
+        self,
+        job: URIRef,
+        files: dict[str, URIRef],
+        results: dict[str, URIRef],
+    ) -> dict[str, URIRef]:
         analyses: dict[str, URIRef] = {}
         for record in self.snapshot["analysis_log"]:
             node = self.node("analysis", record["id"])
@@ -470,7 +525,9 @@ class EvidenceGraphBuilder:
                 result = results[str(result_id)]
                 self.graph.add((node, PROV.generated, result))
                 self.graph.add((result, PROV.wasGeneratedBy, node))
+        return analyses
 
+    def _add_literature(self) -> tuple[dict[str, URIRef], dict[str, URIRef]]:
         literature: dict[str, URIRef] = {}
         literature_by_pmid: dict[str, URIRef] = {}
         for record in self.snapshot["literature"]:
@@ -485,7 +542,39 @@ class EvidenceGraphBuilder:
                     (node, SCHEMA.url, URIRef(f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
                 )
                 literature_by_pmid[pmid] = node
+        return literature, literature_by_pmid
 
+    def _add_citations(
+        self,
+        finding: URIRef,
+        record: dict[str, Any],
+        literature_by_pmid: dict[str, URIRef],
+    ) -> None:
+        for index, citation in enumerate(record.get("citations", []), 1):
+            paper = literature_by_pmid[str(citation["pmid"])]
+            citation_node = self.node("citation", f"{record['id']}-{index}")
+            self.graph.add((citation_node, RDF.type, OSC.Citation))
+            self.graph.add((citation_node, OSC.citesLiterature, paper))
+            self.graph.add((citation_node, OSC.citationSnippet, Literal(citation["snippet"])))
+            self.graph.add(
+                (
+                    citation_node,
+                    OSC.citationValidationStatus,
+                    Literal(citation["validation_status"]),
+                )
+            )
+            self.graph.add((finding, OSC.hasCitation, citation_node))
+
+    def _add_findings(
+        self,
+        job: URIRef,
+        hypotheses: dict[str, URIRef],
+        analyses: dict[str, URIRef],
+        files: dict[str, URIRef],
+        results: dict[str, URIRef],
+        literature: dict[str, URIRef],
+        literature_by_pmid: dict[str, URIRef],
+    ) -> None:
         for record in self.snapshot["findings"]:
             node = self.node("finding", record["id"])
             self.graph.add((node, RDF.type, OSC.Finding))
@@ -514,20 +603,26 @@ class EvidenceGraphBuilder:
                 self.graph.add((node, PROV.wasDerivedFrom, results[str(identifier)]))
             for identifier in record.get("literature_support", []):
                 self.graph.add((node, PROV.wasDerivedFrom, literature[str(identifier)]))
-            for index, citation in enumerate(record.get("citations", []), 1):
-                paper = literature_by_pmid[str(citation["pmid"])]
-                citation_node = self.node("citation", f"{record['id']}-{index}")
-                self.graph.add((citation_node, RDF.type, OSC.Citation))
-                self.graph.add((citation_node, OSC.citesLiterature, paper))
-                self.graph.add((citation_node, OSC.citationSnippet, Literal(citation["snippet"])))
-                self.graph.add(
-                    (
-                        citation_node,
-                        OSC.citationValidationStatus,
-                        Literal(citation["validation_status"]),
-                    )
-                )
-                self.graph.add((node, OSC.hasCitation, citation_node))
+            self._add_citations(node, record, literature_by_pmid)
+
+    def build(self) -> Graph:
+        job = self._add_job()
+        self._add_semantic_manifest(job)
+        hcmo = self._add_hcmo_context()
+        files = self._add_data_files(job, hcmo["observation"])
+        hypotheses = self._add_hypotheses(job)
+        results = self._add_statistical_results()
+        analyses = self._add_analyses(job, files, results)
+        literature, literature_by_pmid = self._add_literature()
+        self._add_findings(
+            job,
+            hypotheses,
+            analyses,
+            files,
+            results,
+            literature,
+            literature_by_pmid,
+        )
         return self.graph
 
 
@@ -622,9 +717,8 @@ def validate_graph(evidence_text: str, profile_text: str, shapes_text: str) -> d
     }
 
 
-def _traceability_rows(evidence_text: str) -> list[dict[str, Any]]:
-    graph = Graph().parse(data=evidence_text, format="turtle")
-    query = f"""
+def _traceability_query() -> str:
+    return f"""
 PREFIX osc: <{OSC}> PREFIX prov: <{PROV}> PREFIX dcterms: <{DCTERMS}>
 PREFIX schema: <{SCHEMA}> PREFIX qudt: <{QUDT}> PREFIX rdfs: <{RDFS}>
 SELECT ?finding ?findingId ?title ?evidence ?scope ?unitCount ?hypothesisId ?hypothesisText
@@ -645,49 +739,57 @@ SELECT ?finding ?findingId ?title ?evidence ?scope ?unitCount ?hypothesisId ?hyp
              dcterms:title ?paperTitle . OPTIONAL {{ ?paper osc:pmid ?pmid }} }}
 }} ORDER BY ?finding
 """
+
+
+def _traceability_summary(binding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(binding["findingId"]),
+        "title": str(binding["title"]),
+        "evidence": str(binding["evidence"]),
+        "scope": str(binding["scope"]),
+        "experimental_unit_count": str(binding["unitCount"]),
+    }
+
+
+def _traceability_values(binding: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    source_hash = binding.get("sourceSha")
+    result_unit = str(binding.get("unit") or "").rsplit("/", 1)[-1]
+    pmid = binding.get("pmid")
+    return {
+        "hypotheses": (binding.get("hypothesisId"), binding.get("hypothesisText")),
+        "analyses": (binding.get("analysisId"), binding.get("analysisDescription")),
+        "sources": (
+            binding.get("sourceTitle"),
+            f"sha256:{source_hash}" if source_hash else None,
+        ),
+        "results": (
+            binding.get("resultLabel"),
+            f"{binding.get('value')} {result_unit}",
+        ),
+        "papers": (
+            binding.get("paperTitle"),
+            f"PMID:{pmid}" if pmid else None,
+        ),
+    }
+
+
+def _record_traceability_values(
+    target: dict[str, set[str]], values: dict[str, tuple[Any, Any]]
+) -> None:
+    for field, (left, right) in values.items():
+        if left:
+            target[field].add(f"{left} ({right})" if right else str(left))
+
+
+def _traceability_rows(evidence_text: str) -> list[dict[str, Any]]:
+    graph = Graph().parse(data=evidence_text, format="turtle")
     grouped: dict[str, dict[str, Any]] = {}
     sets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
-    for binding in graph.query(query):
+    for binding in graph.query(_traceability_query()):
         binding_values = cast(ResultRow, binding).asdict()
         key = str(binding_values["finding"])
-        grouped.setdefault(
-            key,
-            {
-                "id": str(binding_values["findingId"]),
-                "title": str(binding_values["title"]),
-                "evidence": str(binding_values["evidence"]),
-                "scope": str(binding_values["scope"]),
-                "experimental_unit_count": str(binding_values["unitCount"]),
-            },
-        )
-        values = {
-            "hypotheses": (
-                binding_values.get("hypothesisId"),
-                binding_values.get("hypothesisText"),
-            ),
-            "analyses": (
-                binding_values.get("analysisId"),
-                binding_values.get("analysisDescription"),
-            ),
-            "sources": (
-                binding_values.get("sourceTitle"),
-                f"sha256:{binding_values.get('sourceSha')}"
-                if binding_values.get("sourceSha")
-                else None,
-            ),
-            "results": (
-                binding_values.get("resultLabel"),
-                f"{binding_values.get('value')} "
-                f"{str(binding_values.get('unit') or '').rsplit('/', 1)[-1]}",
-            ),
-            "papers": (
-                binding_values.get("paperTitle"),
-                f"PMID:{binding_values.get('pmid')}" if binding_values.get("pmid") else None,
-            ),
-        }
-        for field, (left, right) in values.items():
-            if left:
-                sets[key][field].add(f"{left} ({right})" if right else str(left))
+        grouped.setdefault(key, _traceability_summary(binding_values))
+        _record_traceability_values(sets[key], _traceability_values(binding_values))
     for key, summary in grouped.items():
         for field in ("hypotheses", "analyses", "sources", "results", "papers"):
             summary[field] = sorted(sets[key][field])
@@ -748,6 +850,26 @@ def attach_appendix(report: str, appendix: str) -> str:
     return pattern.sub("", report).rstrip() + "\n\n" + appendix
 
 
+def _resolve_export_path(path: Path, workspace_root: Path | None, context: str) -> Path:
+    """Resolve an explicit path, confining agent-operated calls to a workspace."""
+    if workspace_root is None:
+        return path.resolve()
+    return _resolve_within(workspace_root, path, context)
+
+
+def _resolve_vocabulary_path(
+    path: Path,
+    workspace_root: Path | None,
+    trusted_default: Path,
+    context: str,
+) -> Path:
+    """Allow package resources while confining caller-selected vocabularies."""
+    resolved = path.resolve()
+    if resolved == trusted_default.resolve():
+        return resolved
+    return _resolve_export_path(path, workspace_root, context)
+
+
 def export_hcmo_evidence(
     snapshot_path: Path,
     output_dir: Path,
@@ -756,11 +878,39 @@ def export_hcmo_evidence(
     source_root: Path | None = None,
     profile_path: Path = DEFAULT_PROFILE,
     shapes_path: Path = DEFAULT_SHAPES,
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Export and validate an evidence bundle from one normalized job snapshot."""
+    """Export and validate an evidence bundle from one normalized job snapshot.
+
+    Agent-operated callers must provide ``workspace_root``. The CLI does so by
+    default. ``None`` preserves unrestricted paths for trusted, direct Python
+    callers while source files declared by a snapshot remain confined to their
+    explicit ``source_root`` in every mode.
+    """
+    snapshot_path = _resolve_export_path(snapshot_path, workspace_root, "snapshot")
+    output_dir = _resolve_export_path(output_dir, workspace_root, "output directory")
+    if report_path is not None:
+        report_path = _resolve_export_path(report_path, workspace_root, "report")
+    profile_path = _resolve_vocabulary_path(
+        profile_path,
+        workspace_root,
+        DEFAULT_PROFILE,
+        "vocabulary profile",
+    )
+    shapes_path = _resolve_vocabulary_path(
+        shapes_path,
+        workspace_root,
+        DEFAULT_SHAPES,
+        "SHACL shapes",
+    )
     snapshot = _load_snapshot(snapshot_path)
     validate_snapshot(snapshot)
-    verified = verify_source_files(snapshot, source_root or snapshot_path.parent)
+    resolved_source_root = _resolve_export_path(
+        source_root or snapshot_path.parent,
+        workspace_root,
+        "source root",
+    )
+    verified = verify_source_files(snapshot, resolved_source_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     semantic_manifest_path = output_dir / "semantic-manifest.json"
     semantic_manifest_text = _canonical_json(snapshot["semantic_manifest"])
@@ -792,6 +942,12 @@ def export_hcmo_evidence(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        default=Path.cwd(),
+        help="allowed root for all caller-selected input and output paths (default: current directory)",
+    )
     parser.add_argument("--snapshot", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--source-root", type=Path)
@@ -811,6 +967,7 @@ def main(argv: list[str] | None = None) -> int:
             source_root=args.source_root,
             profile_path=args.profile,
             shapes_path=args.shapes,
+            workspace_root=args.workspace_root,
         )
     except (EvidenceExportError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"export failed: {exc}", file=sys.stderr)

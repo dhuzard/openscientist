@@ -14,6 +14,11 @@ uv run python -m openscientist.evidence.hcmo_export \
   --output-dir examples/hcmo_evidence/results
 ```
 
+The CLI confines all caller-selected paths to the current directory by
+default. Use `--workspace-root PATH` when running from another directory; the
+snapshot, source root, report, custom vocabulary files, and output directory
+must remain within that root.
+
 The command writes `semantic-manifest.json`, `evidence.ttl`,
 `validation.json`, `traceability-appendix.md`, and
 `final_report_with_traceability.md`. It exits zero only when RDF syntax,

@@ -63,6 +63,33 @@ def test_source_hash_is_verified(tmp_path: Path) -> None:
         hcmo_export.export_hcmo_evidence(path, tmp_path / "out", source_root=EXAMPLE)
 
 
+def test_source_path_cannot_escape_declared_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    outside = tmp_path / "outside.csv"
+    outside.write_text("untrusted\n", encoding="utf-8")
+    snapshot = _snapshot()
+    snapshot["data_files"][0].update(
+        {
+            "file_path": "../outside.csv",
+            "file_size": outside.stat().st_size,
+            "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+        }
+    )
+
+    with pytest.raises(hcmo_export.EvidenceExportError, match="escapes allowed root"):
+        hcmo_export.verify_source_files(snapshot, source_root)
+
+
+def test_agent_workspace_rejects_explicit_path_escape(tmp_path: Path) -> None:
+    with pytest.raises(hcmo_export.EvidenceExportError, match="snapshot escapes allowed root"):
+        hcmo_export.export_hcmo_evidence(
+            SNAPSHOT,
+            tmp_path / "out",
+            workspace_root=tmp_path,
+        )
+
+
 def test_citation_grounding_is_rechecked() -> None:
     snapshot = _snapshot()
     snapshot["findings"][0]["citations"][0]["snippet"] = "Absent from the abstract."

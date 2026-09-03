@@ -54,6 +54,16 @@ The OpenScientist namespace in this prototype is provisional and must not be
 treated as a published vocabulary. Namespace governance and versioning are a
 precondition for production use.
 
+Snapshot-declared source files are always confined to the selected source
+root after resolving parent segments and symbolic links. The CLI also confines
+all caller-selected input and output paths to `--workspace-root`, which defaults
+to the current directory. Trusted direct Python callers may omit that boundary;
+an eventual agent or orchestrator integration must not.
+
+Several standards used here intentionally retain canonical `http://` namespace
+identifiers. They identify RDF terms and are not network requests; silently
+rewriting them to `https://` would change the graph's vocabulary.
+
 ## Refined five-PoC roadmap
 
 The companion design now separates five increments:
